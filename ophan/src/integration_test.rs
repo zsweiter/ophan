@@ -1449,16 +1449,14 @@ routes {
 
     // Use the config path env var
     let old = std::env::var("CONFIG_PATH").ok();
-    unsafe { std::env::set_var("CONFIG_PATH", cfg_dir.to_str().unwrap()); }
+    unsafe {
+        std::env::set_var("CONFIG_PATH", cfg_dir.to_str().unwrap());
+    }
 
     let config = crate::config::OphanConfig::parse().expect("parse config");
     let ctx = crate::gateway::build_app_context(&config).expect("build app context");
 
-    eprintln!(
-        "Parsed: {} routes, {} upstreams",
-        config.routes.len(),
-        config.upstreams.len()
-    );
+    eprintln!("Parsed: {} routes, {} upstreams", config.routes.len(), config.upstreams.len());
 
     let r = ctx.router.find_route(Some("api.izzimed.me"), "GET", "/v1");
     match &r {
@@ -1473,7 +1471,9 @@ routes {
         Err(e) => eprintln!("❌ SSE route miss: {:?}", e),
     }
 
-    unsafe { std::env::set_var("CONFIG_PATH", old.unwrap_or_default()); }
+    unsafe {
+        std::env::set_var("CONFIG_PATH", old.unwrap_or_default());
+    }
 
     if r.is_err() || r2.is_err() {
         eprintln!("Routes registered: {}", config.routes.len());
@@ -1543,7 +1543,7 @@ fn debug_catch_all_with_prefix() {
         Err(e) => eprintln!("❌ ERROR: {:?}", e),
     }
 
-    if let Err(e) = &result {
+    if result.is_err() {
         // Try without the SSE prefix route
         eprintln!("\n=== DEBUG: trying without prefix route ===");
         let mut cfg2 = make_config();
