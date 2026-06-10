@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/ophan.png" alt="Ophan Gateway" width="320" />
+  <img src="docs/assets/ophan.png" alt="Ophan Gateway" width="500" />
   <br />
   <br />
   <h1>🛡️ Ophan API Gateway</h1>
