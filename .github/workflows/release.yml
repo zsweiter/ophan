@@ -114,12 +114,14 @@ jobs:
                   EOF
 
             - name: Install UPX
+              if: runner.os != 'macOS' 
               uses: crazy-max/ghaction-upx@v3
 
             - name: Build (${{ matrix.target }})
               run: cargo build --release --target ${{ matrix.target }}
 
             - name: Compress binary (UPX)
+              if: runner.os != 'macOS' 
               run: upx --best target/${{ matrix.target }}/release/ophan${{ matrix.pkg_os == 'windows' && '.exe' || '' }}
 
             - name: Package (${{ matrix.pkg_os }}-${{ matrix.pkg_arch }})

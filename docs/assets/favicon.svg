@@ -1,0 +1,48 @@
+<svg id="svg-logo-1"
+     width="200"
+     height="200"
+     viewBox="0 0 500 120"
+     xmlns="http://www.w3.org/2000/svg">
+
+    <defs>
+        <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#6366f1" />
+            <stop offset="100%" stop-color="#a855f7" />
+        </linearGradient>
+    </defs>
+
+    <!-- Mover todo el contenido hacia la derecha -->
+    <g transform="translate(60,0)">
+        <g transform="translate(15, 0)">
+            <circle cx="55" cy="60" r="28" fill="none" stroke="#27272a" stroke-width="8" />
+            <circle cx="85" cy="60" r="28" fill="none" stroke="url(#grad1)" stroke-width="8" />
+
+            <path d="M 55,32 A 28,28 0 0,1 83,60"
+                  fill="none"
+                  stroke="#27272a"
+                  stroke-width="8" />
+
+            <path d="M 57,32 L 53,32"
+                  stroke="#05070c"
+                  stroke-width="12"
+                  stroke-linecap="round" />
+
+            <path d="M 83,88 L 87,88"
+                  stroke="#05070c"
+                  stroke-width="12"
+                  stroke-linecap="round" />
+        </g>
+
+        <g transform="translate(150, 0)">
+            <text x="0"
+                  y="72"
+                  font-family="'Plus Jakarta Sans', sans-serif"
+                  font-weight="400"
+                  font-size="44"
+                  fill="black"
+                  letter-spacing="4">
+                ophan
+            </text>
+        </g>
+    </g>
+</svg>
