@@ -10,11 +10,6 @@ members = [
 ]
 default-members = ["ophan"]
 
-[workspace.package]
-name = "ophan"
-version = "0.1.1"
-edition = "2024"
-
 [workspace.dependencies]
 pingora = { version = "0.8", default-features = false }
 tokio = { version = "1", default-features = false }
