@@ -1,0 +1,17 @@
+[package]
+name = "ophan-router"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ophan-net = { path = "../ophan-net" }
+regex = { workspace = true }
+ahash = { workspace = true }
+
+[dev-dependencies]
+rayon = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "router_bench"
+harness = false

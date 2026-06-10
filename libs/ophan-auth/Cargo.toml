@@ -1,0 +1,27 @@
+[package]
+name = "ophan-auth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ophan-net = { path = "../ophan-net" }
+
+serde = { workspace = true }
+jsonwebtoken = { workspace = true, features = [
+    "aws_lc_rs",
+] }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+dashmap = { workspace = true }
+arc-swap = { workspace = true }
+tracing = { workspace = true }
+
+http = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+criterion = { workspace = true }
+tokio = { workspace = true }
+
+

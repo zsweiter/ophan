@@ -1,0 +1,29 @@
+# --- Rust build cache ---
+target/
+
+# --- Local env ---
+.env
+.env.*
+
+# --- IDE ---
+.idea/
+.vscode/
+*.iml
+
+# --- macOS ---
+.DS_Store
+
+# --- Testing ---
+*.profraw
+tarpaulin-report.html
+
+# --- Backup ---
+*.rs.bk
+*~
+*.swp
+
+# ---- Artifacts ---
+archive/
+benches/
+docs/
+stubs/

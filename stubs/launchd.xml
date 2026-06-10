@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://apple.com">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.ophan.gateway</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ophan</string>
+        <string>--config</string>
+        <string>/etc/ophan/config.toml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ExitTimeOut</key>
+    <integer>5</integer>
+    <key>UserName</key>
+    <string>_www</string>
+    <key>GroupName</key>
+    <string>_www</string>
+    <key>Umask</key>
+    <integer>23</integer>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ophan/error.log</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/ophan/access.log</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65535</integer>
+    </dict>
+</dict>
+</plist>

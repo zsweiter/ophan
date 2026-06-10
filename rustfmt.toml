@@ -1,0 +1,19 @@
+max_width = 130
+edition = "2024"
+newline_style = "Unix"
+use_small_heuristics = "Default"
+hard_tabs = false
+tab_spaces = 4
+
+reorder_imports = true
+reorder_modules = true
+fn_params_layout = "Tall"
+
+array_width = 100
+chain_width = 100
+struct_lit_width = 60
+struct_variant_width = 60
+
+match_block_trailing_comma = true
+match_arm_leading_pipes = "Preserve"
+remove_nested_parens = true

@@ -1,0 +1,79 @@
+[workspace]
+resolver = "2"
+members = [
+    "ophan",
+    "libs/ophan-net",
+    "libs/ophan-auth",
+    "libs/ophan-static",
+    "libs/ophan-waf",
+    "libs/ophan-router",
+]
+default-members = ["ophan"]
+
+[workspace.package]
+name = "ophan"
+version = "0.1.1"
+edition = "2024"
+
+[workspace.dependencies]
+pingora = { version = "0.8", default-features = false }
+tokio = { version = "1", default-features = false }
+tokio-util = "0.7.18"
+serde = { version = "1", features = ["derive"] }
+jsonwebtoken = { version = "10.4.0" }
+serde_json = "1"
+base64 = "0.22.1"
+mime_guess = "2.0.5"
+memmap2 = "0.9.10"
+thiserror = "1.0.69"
+url = "2"
+regex = "1"
+sha2 = "0.10.0"
+memchr = "2.7"
+
+aho-corasick = "1.1"
+
+uuid = { version = "1", default-features = false, features = ["v4"] }
+pest = { version = "2.7", default-features = false }
+pest_derive = { version = "2.7" }
+
+async-trait = "0.1.42"
+bytes = "1.2"
+
+hashbrown = "0.17.1"
+dashmap = "6.2.1"
+arc-swap = "1.9.1"
+parking_lot = "0.12.5"
+ahash = "0.8.12"
+
+## Used for loggs
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+
+## Http and networking
+httparse = "1"
+s2n-tls = "0.3"
+s2n-tls-tokio = "0.3"
+http = "1.4"
+http-body-util = "0.1"
+itoa = "1.0"
+form_urlencoded = "1.2"
+
+## For testing & benchmarking
+httpmock = "0.8.3"
+criterion = { version = "0.5", features = ["html_reports"] }
+rayon = "1.12.0"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.bench]
+debug = true
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

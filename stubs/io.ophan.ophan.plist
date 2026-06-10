@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.ophan.ophan</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@SBINDIR@/ophan</string>
+        <string>-c</string>
+        <string>@CONFIGDIR@/master.conf</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/ophan/access.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/ophan/error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CONFIG</key>
+        <string>@CONFIGDIR@/master.conf</string>
+        <key>PIDFILE</key>
+        <string>/var/run/ophan.pid</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/usr/local</string>
+
+    <key>Nice</key>
+    <integer>-5</integer>
+
+    <key>LimitNOFILE</key>
+    <integer>65536</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>65536</integer>
+    </dict>
+</dict>
+</plist>

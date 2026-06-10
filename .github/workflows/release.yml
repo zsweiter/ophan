@@ -1,0 +1,177 @@
+# ═══════════════════════════════════════════════════════════════
+# Ophan API Gateway — Release Pipeline
+#
+# Triggered by: git tag v*
+# Builds for:   Linux (x86_64), macOS (x86_64, aarch64), Windows (x86_64)
+# Outputs:      .tar.gz / .zip + .sha256 checksums
+# ═══════════════════════════════════════════════════════════════
+
+name: Release
+
+on:
+    push:
+        tags:
+            - "v*"
+
+permissions:
+    contents: write
+
+jobs:
+    # ── CI: lint + test across all platforms ─────────────────────
+    ci:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, macos-latest, windows-latest]
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  components: clippy, rustfmt
+
+            - name: Format
+              run: cargo fmt --all -- --check
+
+            - name: Lint
+              run: cargo clippy --all-targets --all-features -- -D warnings
+
+            - name: Test
+              run: cargo test --all --all-targets
+
+    # ── Build + Package per platform ────────────────────────────
+    package:
+        needs: ci
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-latest
+                      target: x86_64-unknown-linux-gnu
+                      ext: tar.gz
+                      pkg_os: linux
+                      pkg_arch: x86_64
+
+                    - os: macos-latest
+                      target: x86_64-apple-darwin
+                      ext: tar.gz
+                      pkg_os: macos
+                      pkg_arch: x86_64
+
+                    - os: macos-latest
+                      target: aarch64-apple-darwin
+                      ext: tar.gz
+                      pkg_os: macos
+                      pkg_arch: aarch64
+
+                    - os: windows-latest
+                      target: x86_64-pc-windows-msvc
+                      ext: zip
+                      pkg_os: windows
+                      pkg_arch: x86_64
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.target }}
+
+            - name: Install UPX
+              uses: crazy-max/ghaction-upx@v3
+
+            - name: Build (${{ matrix.target }})
+              run: cargo build --release --target ${{ matrix.target }}
+
+            - name: Compress binary (UPX)
+              run: upx --best target/${{ matrix.target }}/release/ophan${{ matrix.pkg_os == 'windows' && '.exe' || '' }}
+
+            - name: Package (${{ matrix.pkg_os }}-${{ matrix.pkg_arch }})
+              shell: bash
+              env:
+                  PKG_OS: ${{ matrix.pkg_os }}
+                  PKG_ARCH: ${{ matrix.pkg_arch }}
+                  EXT: ${{ matrix.ext }}
+                  TARGET: ${{ matrix.target }}
+              run: |
+                  VERSION="${GITHUB_REF_NAME#v}"
+                  PACKAGE="ophan-${VERSION}-${PKG_OS}-${PKG_ARCH}"
+                  DIST="dist/${PACKAGE}"
+                  mkdir -p "${DIST}/stubs"
+
+                  # Binary
+                  BINARY="target/${TARGET}/release/ophan"
+                  if [ "${PKG_OS}" = "windows" ]; then BINARY="${BINARY}.exe"; fi
+                  cp "${BINARY}" "${DIST}/"
+
+                  # Config
+                  cp -r config "${DIST}/config"
+
+                  # Stubs (per platform)
+                  if [ "${PKG_OS}" = "linux" ]; then
+                    cp stubs/systemd.service "${DIST}/stubs/ophan.service"
+                    cp scripts/install.sh "${DIST}/install.sh"
+                    chmod +x "${DIST}/install.sh"
+                  elif [ "${PKG_OS}" = "macos" ]; then
+                    cp stubs/io.ophan.ophan.plist "${DIST}/stubs/"
+                    cp scripts/install.sh "${DIST}/install.sh"
+                    chmod +x "${DIST}/install.sh"
+                  elif [ "${PKG_OS}" = "windows" ]; then
+                    cp stubs/windows-service.ps1 "${DIST}/stubs/"
+                    cp scripts/install.ps1 "${DIST}/"
+                  fi
+
+                  # Docs
+                  cp README.md LICENSE* "${DIST}/" 2>/dev/null || true
+
+                  # Archive
+                  if [ "${EXT}" = "tar.gz" ]; then
+                    cd dist && tar -czf "${PACKAGE}.tar.gz" "${PACKAGE}"
+                  else
+                    cd dist && zip -r "${PACKAGE}.zip" "${PACKAGE}"
+                  fi
+
+                  # Checksum
+                  cd dist && sha256sum "${PACKAGE}.${EXT}" > "${PACKAGE}.${EXT}.sha256"
+
+                  echo "✅ Package: dist/${PACKAGE}.${EXT}"
+
+            - name: Upload artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: ophan-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
+                  path: dist/*.${{ matrix.ext }}*
+
+    # ── Create GitHub Release ────────────────────────────────────
+    release:
+        needs: package
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+
+            - name: Organize artifacts
+              run: |
+                  mkdir -p release-assets
+                  find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+                    -exec cp {} release-assets/ \;
+                  ls -la release-assets/
+
+            - name: Generate checksums.txt
+              run: |
+                  cd release-assets
+                  sha256sum * > checksums.txt
+                  cat checksums.txt
+
+            - name: Upload release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: release-assets/*
+                  generate_release_notes: true
