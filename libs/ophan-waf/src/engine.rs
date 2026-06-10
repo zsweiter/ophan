@@ -76,6 +76,7 @@ impl WafEngine {
                     }
                 },
 
+                #[allow(clippy::collapsible_match)]
                 WafCondition::SqlTokenMatch => {
                     if phase == WafPhase::RequestBody && is_suspicious_sql(body) {
                         total_score += rule.score;

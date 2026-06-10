@@ -1,10 +1,10 @@
 <div align="center">
-  <img src="docs/assets/ophan.png" alt="Ophan Gateway" width="500" />
+  <img src="docs/assets/ophan.png" alt="Ophan Gateway" width="600" />
   <br />
   <br />
   <h1>🛡️ Ophan API Gateway</h1>
   <p>
-    <b>A lightweight, high-performance edge gateway</b>
+    <b>A lightweight, high-performance api gateway</b>
     <br />
     built on <a href="https://github.com/cloudflare/pingora">Cloudflare Pingora</a>
   </p>
