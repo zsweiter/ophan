@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+use std::{env, fs};
 
 use crate::config::dsl_parser::{MasterConfig, parse_gateway_config, parse_master_config};
 use crate::config::parts::{GatewayConfig, ListenerConfig, MAX_CONFIG_FILE_SIZE, PolicyConfig, RoutesConfig, UpstreamConfig};
@@ -236,6 +236,10 @@ impl OphanConfig {
 }
 
 fn get_config_path() -> PathBuf {
+    if let Ok(path) = env::var("CONFIG_PATH") {
+        return PathBuf::from(path);
+    }
+
     if cfg!(debug_assertions) {
         PathBuf::from(".config")
     } else if cfg!(target_os = "windows") {
@@ -248,6 +252,6 @@ fn get_config_path() -> PathBuf {
             PathBuf::from("/usr/local/etc/ophan")
         }
     } else {
-        PathBuf::from(".config")
+        PathBuf::from("/etc/ophan")
     }
 }

@@ -1406,3 +1406,166 @@ fn e2e_bench_throughput() {
         n_static, n_param, n_wild, total_routes
     );
 }
+
+// ═══════════════════════════════════════════════════════════════
+// DEBUG: reproduce the exact e2e scenario with config files
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+fn debug_parse_and_route() {
+    let tmp = tempfile::tempdir().expect("create temp dir");
+    let cfg_dir = tmp.path().join("config");
+    let gw_dir = cfg_dir.join("gateways");
+    std::fs::create_dir_all(&gw_dir).unwrap();
+
+    let gw_cfg = br#"name = "test-gw"
+listeners { listener "main" { address = "127.0.0.1:5050" } }
+upstreams { upstream "api" { servers = "127.0.0.1:9999" } }
+routes {
+    route "/v1/realtime/sse" {
+        hosts = ["api.izzimed.me"]
+        backend = upstream("api")
+    }
+    route "/*" {
+        hosts = ["api.izzimed.me"]
+        backend = upstream("api")
+    }
+}
+"#;
+    std::fs::write(gw_dir.join("test.conf"), gw_cfg).unwrap();
+
+    let master = format!(
+        r#"master "test" {{
+    user = "nobody"
+    workers = "auto"
+    pid = "/tmp/ophan-test.pid"
+    error_log = "/tmp/ophan-test.log"
+    includes = "{gw}/test.conf"
+}}
+"#,
+        gw = gw_dir.display()
+    );
+    std::fs::write(cfg_dir.join("master.conf"), &master).unwrap();
+
+    // Use the config path env var
+    let old = std::env::var("CONFIG_PATH").ok();
+    unsafe { std::env::set_var("CONFIG_PATH", cfg_dir.to_str().unwrap()); }
+
+    let config = crate::config::OphanConfig::parse().expect("parse config");
+    let ctx = crate::gateway::build_app_context(&config).expect("build app context");
+
+    eprintln!(
+        "Parsed: {} routes, {} upstreams",
+        config.routes.len(),
+        config.upstreams.len()
+    );
+
+    let r = ctx.router.find_route(Some("api.izzimed.me"), "GET", "/v1");
+    match &r {
+        Ok(m) => eprintln!("✅ Router match: backend={:?}", m.value.backend),
+        Err(e) => eprintln!("❌ Router miss: {:?}", e),
+    }
+
+    // Also test /v1/realtime/sse
+    let r2 = ctx.router.find_route(Some("api.izzimed.me"), "GET", "/v1/realtime/sse");
+    match &r2 {
+        Ok(m) => eprintln!("✅ SSE route match: backend={:?}", m.value.backend),
+        Err(e) => eprintln!("❌ SSE route miss: {:?}", e),
+    }
+
+    unsafe { std::env::set_var("CONFIG_PATH", old.unwrap_or_default()); }
+
+    if r.is_err() || r2.is_err() {
+        eprintln!("Routes registered: {}", config.routes.len());
+        for (i, rt) in config.routes.iter().enumerate() {
+            eprintln!("  [{}] path={}, hosts={:?}, backend={:?}", i, rt.path, rt.hosts, rt.backend);
+        }
+    }
+
+    assert!(r.is_ok(), "Route should match /v1 for api.izzimed.me");
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DEBUG: reproduce the exact scenario that returns 404
+// ═══════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "debug — run manually"]
+fn debug_catch_all_with_prefix() {
+    let mut cfg = make_config();
+    add_upstream(&mut cfg, "api");
+
+    // Route for specific path (static prefix)
+    add_route(
+        &mut cfg,
+        RoutesConfig {
+            path: "/v1/realtime/sse".into(),
+            hosts: vec!["api.izzimed.me".into()],
+            backend: BackendTarget::Upstream("api".into()),
+            ..RoutesConfig::upstream("", "api")
+        },
+    );
+
+    // Catch-all
+    add_route(
+        &mut cfg,
+        RoutesConfig {
+            path: "/*".into(),
+            hosts: vec!["api.izzimed.me".into()],
+            backend: BackendTarget::Upstream("api".into()),
+            ..RoutesConfig::upstream("", "api")
+        },
+    );
+
+    let ctx = build_app_context(&cfg).unwrap();
+
+    // Test: /v1 should match the catch-all
+    eprintln!("=== Testing /v1 with host api.izzimed.me ===");
+    let result = ctx.router.find_route(Some("api.izzimed.me"), "GET", "/v1");
+    match &result {
+        Ok(m) => eprintln!("✅ MATCH: backend={:?}", m.value.backend),
+        Err(e) => eprintln!("❌ ERROR: {:?}", e),
+    }
+
+    // Also test without host (should use default vhost)
+    eprintln!("=== Testing /v1 without host ===");
+    let result2 = ctx.router.find_route(None, "GET", "/v1");
+    match &result2 {
+        Ok(m) => eprintln!("✅ MATCH: backend={:?}", m.value.backend),
+        Err(e) => eprintln!("❌ ERROR: {:?}", e),
+    }
+
+    // Test the specific SSE route works
+    eprintln!("=== Testing /v1/realtime/sse ===");
+    let result3 = ctx.router.find_route(Some("api.izzimed.me"), "GET", "/v1/realtime/sse");
+    match &result3 {
+        Ok(m) => eprintln!("✅ MATCH: backend={:?}", m.value.backend),
+        Err(e) => eprintln!("❌ ERROR: {:?}", e),
+    }
+
+    if let Err(e) = &result {
+        // Try without the SSE prefix route
+        eprintln!("\n=== DEBUG: trying without prefix route ===");
+        let mut cfg2 = make_config();
+        add_upstream(&mut cfg2, "api");
+        add_route(
+            &mut cfg2,
+            RoutesConfig {
+                path: "/*".into(),
+                hosts: vec!["api.izzimed.me".into()],
+                backend: BackendTarget::Upstream("api".into()),
+                ..RoutesConfig::upstream("", "api")
+            },
+        );
+        let ctx2 = build_app_context(&cfg2).unwrap();
+        let r = ctx2.router.find_route(Some("api.izzimed.me"), "GET", "/v1");
+        match &r {
+            Ok(m) => eprintln!("✅ Without prefix: MATCH backend={:?}", m.value.backend),
+            Err(e2) => eprintln!("❌ Without prefix: {:?}", e2),
+        }
+    }
+
+    if let Err(e) = &result {
+        panic!("Catch-all should match /v1 but got: {:?}", e);
+    }
+}

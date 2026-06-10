@@ -8,14 +8,16 @@ ConditionFileIsExecutable=@SBINDIR@/ophan
 [Service]
 EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
-Environment="CONFIG=/etc/ophan/ophan.cfg" "PIDFILE=/run/ophan.pid"
-ExecStart=@SBINDIR@/ophan -Ws -f $CONFIG -f $CFGDIR -p $PIDFILE $EXTRAOPTS
-ExecReload=@SBINDIR@/ophan -Ws -f $CONFIG -f $CFGDIR -c $EXTRAOPTS
+Environment="CONFIG_PATH=@CONFIGDIR@"
+ExecStart=@SBINDIR@/ophan
+ExecReload=@SBINDIR@/ophan
 ExecReload=/bin/kill -USR2 $MAINPID
 KillMode=mixed
 Restart=always
 SuccessExitStatus=143
-Type=notify
+Type=simple
+#Type=notify
+LimitNOFILE=65535
 
 # The following lines leverage SystemD's sandboxing options to provide
 # defense in depth protection at the expense of restricting some flexibility

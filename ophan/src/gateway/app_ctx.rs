@@ -6,7 +6,7 @@ use ophan_router::Router;
 use ophan_waf::config::WafConfig;
 
 use ophan_auth::AuthConfig;
-use ophan_net::http::HttpMethodSet;
+use ophan_net::http::{HttpMethod, HttpMethodSet};
 
 use crate::config::validate::{ConfigError, validate_config};
 use crate::config::{
@@ -93,9 +93,16 @@ pub fn build_app_context(config: &OphanConfig) -> Result<AppContext, Vec<ConfigE
         let resolved_cors = route_cfg.cors_policy.as_ref().and_then(|p| config.policies.resolve_cors(p));
         let resolved_limiter = route_cfg.limiter_policy.as_ref().and_then(|p| config.policies.resolve_limiter(p));
 
+        let route_methods = route_cfg.methods.clone();
+        // If no methods were specified, default to ALL
+        let methods = if route_methods.standard() == HttpMethod::NONE {
+            HttpMethodSet::all()
+        } else {
+            route_methods
+        };
         let compiled = Arc::new(CompiledRoute {
             backend: route_cfg.backend.clone(),
-            methods: route_cfg.methods.clone(),
+            methods,
             rewrite: rewrite_engine,
             prepend_headers: route_cfg.rewrite.as_ref().map_or(vec![], |rw| rw.prepend_headers.clone()),
             auth_policy: resolved_auth.clone(),

@@ -168,6 +168,10 @@ impl<T> Router<T> {
     // -----------------------------------------------------------------------
 
     fn add_vhost_inner(&mut self, host: &str, methods: HttpMethodSet) -> u32 {
+        // If no methods were specified, default to ALL to avoid MethodNotAllowed
+        // for every request on a route that didn't set explicit methods.
+        let bits = methods.standard().bits();
+        let methods = if bits == 0 { HttpMethodSet::all() } else { methods };
         let id = self.routes_bucket.len() as u32;
         self.routes_bucket.push(VirtualHost::new(host, methods));
         self.hosts_table.add_route(host, id);

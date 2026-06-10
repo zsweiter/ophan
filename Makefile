@@ -189,19 +189,42 @@ _package-common:
 	# Docs
 	cp README.md LICENSE* $(PACKAGE_DIR)/ 2>/dev/null || true
 
-# ── Legacy install ────────────────────────────────────────────
-install: build
-	sudo install -Dm755 $(TARGET) /usr/local/bin/$(APP_NAME)
-	if [ -d "$(CONFIG_DIR)" ]; then \
-		sudo mkdir -p /etc/$(APP_NAME); \
-		sudo cp -r $(CONFIG_DIR)/* /etc/$(APP_NAME)/; \
-	fi
-	@echo "$(APP_NAME) installed to /usr/local/bin"
+# ── System install ────────────────────────────────────────────
+install:
+	cargo build --release
+	@echo "=== Installing $(APP_NAME) ==="
+
+	# 1. Binary
+	sudo install -Dm755 target/release/ophan /usr/local/bin/$(APP_NAME)
+
+	# 2. Sensitive assets (certs, chown, permissions)
+	sudo ./scripts/copy-certs.sh
+
+	# 3. Config from .config/ → /etc/ophan/
+	sudo mkdir -p /etc/$(APP_NAME)
+	sudo cp -r .config/* /etc/$(APP_NAME)/
+
+	# 4. Systemd service (replace @SBINDIR@, @CONFIGDIR@)
+	sed "s|@SBINDIR@|/usr/local/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)|g" \
+		$(STUB_DIR)/systemd.service > /tmp/$(APP_NAME).service
+	sudo install -Dm644 /tmp/$(APP_NAME).service /etc/systemd/system/$(APP_NAME).service
+
+	# 5. Register + start
+	sudo systemctl daemon-reload
+	sudo systemctl enable $(APP_NAME)
+	sudo systemctl restart $(APP_NAME)
+
+	@echo "✅ $(APP_NAME) installed: binary + config + service registered"
 
 uninstall:
+	@echo "=== Uninstalling $(APP_NAME) ==="
+	-sudo systemctl stop $(APP_NAME)
+	-sudo systemctl disable $(APP_NAME)
+	-sudo rm -f /etc/systemd/system/$(APP_NAME).service
+	sudo systemctl daemon-reload
 	-sudo rm -f /usr/local/bin/$(APP_NAME)
 	-sudo rm -rf /etc/$(APP_NAME)
-	@echo "$(APP_NAME) uninstalled"
+	@echo "✅ $(APP_NAME) uninstalled"
 
 git-tag:
 	git tag v$(VERSION)

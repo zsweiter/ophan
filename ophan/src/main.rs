@@ -5,6 +5,9 @@ mod middlewares;
 #[cfg(test)]
 mod integration_test;
 
+use std::thread;
+use std::time::Instant;
+
 use arc_swap::ArcSwap;
 use pingora::prelude::*;
 use pingora::proxy::HttpProxy;
@@ -61,6 +64,7 @@ fn main() {
 
 fn run_gateway_server(config_swap: ArcSwap<OphanConfig>, app_swap: ArcSwap<AppContext>) -> Result<(), String> {
     let snapshot = config_swap.load();
+    let cpus = thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 
     let mut server = Server::new_with_opt_and_conf(
         None,
@@ -71,6 +75,8 @@ fn run_gateway_server(config_swap: ArcSwap<OphanConfig>, app_swap: ArcSwap<AppCo
             error_log: Some(snapshot.master.error_log.clone()),
             user: Some(snapshot.master.user.clone()),
             upgrade_sock: String::from("/tmp/ophan_upgrade.sock"),
+            work_stealing: true,
+            threads: cpus,
             ..Default::default()
         },
     );
@@ -105,7 +111,11 @@ fn run_gateway_server(config_swap: ArcSwap<OphanConfig>, app_swap: ArcSwap<AppCo
     }
 
     server.add_service(proxy_service);
-    println!("[master: {}] Ophan API Gateway is running...", snapshot.master.name.clone());
+    println!(
+        "[master: {:?}][{}] Ophan API Gateway is running...",
+        Instant::now(),
+        snapshot.master.name.clone()
+    );
 
     drop(snapshot);
 
