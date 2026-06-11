@@ -761,9 +761,7 @@ impl<T> Node<T> {
             'walk: loop {
                 // Reached the end of the
                 if path.len() <= node.prefix.len() {
-                    // Check for an exact match.
                     if *path == *node.prefix {
-                        // Found the matching value.
                         if let Some(ref value) = node.value {
                             // Remap the keys of any route parameters we accumulated during the search.
                             params.for_each_key_mut(|(i, param)| param.key = &node.remapping[i]);
@@ -774,10 +772,8 @@ impl<T> Node<T> {
                     break 'walk;
                 }
 
-                // Otherwise, the path is longer than this node's prefix, search deeper.
                 let (prefix, rest) = path.split_at(node.prefix.len());
 
-                // The prefix does not match.
                 if *prefix != *node.prefix {
                     break 'walk;
                 }
@@ -938,11 +934,9 @@ impl<T> Node<T> {
                 }
             }
 
-            // Try backtracking to any matching wildcard nodes that we skipped while
-            // traversing the tree.
+            // Try backtracking to any matching wildcard nodes that we skipped.
             while let Some(skipped) = skipped.pop() {
                 if skipped.path.ends_with(path) {
-                    // Found a matching node, restore the search state.
                     path = skipped.path;
                     node = skipped.node;
                     backtracking = true;
