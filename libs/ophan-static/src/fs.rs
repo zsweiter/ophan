@@ -109,9 +109,10 @@ impl FileServer {
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .as_secs() as i64;
+            .as_secs()
+            .cast_signed();
 
-        let etag = format!("\"{:x}-{:x}\"", mtime, size);
+        let etag = format!("\"{mtime:x}-{size:x}\"");
 
         #[allow(clippy::collapsible_if)]
         if let Some(if_none_match) = req_parts.headers.get(http::header::IF_NONE_MATCH) {
@@ -255,14 +256,60 @@ impl FileServer {
     }
 }
 
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{} B", bytes);
+pub fn format_size(bytes: u64) -> String {
+    let mut buf = [0u8; 16];
+    let mut pos = 0;
+
+    let (integral, fractional, unit) = if bytes < 1024 {
+        (bytes, 0, " B")
+    } else if bytes < 1024 * 1024 {
+        // KB
+        let val_x10 = (bytes * 10) / 1024;
+        (val_x10 / 10, val_x10 % 10, " KB")
+    } else if bytes < 1024 * 1024 * 1024 {
+        // MB
+        let val_x10 = (bytes * 10) / (1024 * 1024);
+        (val_x10 / 10, val_x10 % 10, " MB")
+    } else if bytes < 1024 * 1024 * 1024 * 1024 {
+        // GB
+        let val_x10 = (bytes * 10) / (1024 * 1024 * 1024);
+        (val_x10 / 10, val_x10 % 10, " GB")
+    } else {
+        // TB
+        let val_x10 = (bytes * 10) / (1024 * 1024 * 1024 * 1024);
+        (val_x10 / 10, val_x10 % 10, " TB")
+    };
+
+    let mut num = integral;
+    let start_pos = pos;
+
+    if num == 0 {
+        buf[pos] = b'0';
+        pos += 1;
+    } else {
+        while num > 0 {
+            buf[pos] = b'0' + (num % 10) as u8;
+            num /= 10;
+            pos += 1;
+        }
+        let mut left = start_pos;
+        let mut right = pos - 1;
+        while left < right {
+            buf.swap(left, right);
+            left += 1;
+            right -= 1;
+        }
     }
-    let kb = bytes as f64 / 1024.0;
-    if kb < 1024.0 {
-        return format!("{:.1} KB", kb);
+
+    if unit != " B" {
+        buf[pos] = b'.';
+        buf[pos + 1] = b'0' + fractional as u8;
+        pos += 2;
     }
-    let mb = kb / 1024.0;
-    format!("{:.1} MB", mb)
+
+    let unit_bytes = unit.as_bytes();
+    buf[pos..pos + unit_bytes.len()].copy_from_slice(unit_bytes);
+    pos += unit_bytes.len();
+
+    unsafe { String::from_utf8_unchecked(buf[..pos].to_vec()) }
 }

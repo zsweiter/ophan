@@ -41,12 +41,12 @@ fn main_entry() -> Result<(), ExitCode> {
         None => bootstrap(),
 
         Some(Command::Version) => {
-            println!("Ophan API Gateway v{}", version);
+            println!("Ophan API Gateway v{version}");
 
             Ok(())
         },
 
-        Some(Command::Config) | Some(Command::Test) => {
+        Some(Command::Config | Command::Test) => {
             let Some(path) = args.config else {
                 eprintln!("Error: --config or -c is required for this command");
                 return Err(ExitCode::Usage);
@@ -66,7 +66,7 @@ fn main_entry() -> Result<(), ExitCode> {
                         Ok(())
                     },
                     Err(e) => {
-                        eprintln!("{}", e);
+                        eprintln!("{e}");
                         Err(ExitCode::Config)
                     },
                 }
@@ -80,7 +80,7 @@ fn main_entry() -> Result<(), ExitCode> {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
 
-            let (pid, _) = read_pid(&args.config)?;
+            let (pid, _) = read_pid(args.config.as_ref())?;
 
             let unix_signal = match signal {
                 cli::Signal::Stop => Signal::SIGTERM,
@@ -90,11 +90,11 @@ fn main_entry() -> Result<(), ExitCode> {
             };
 
             if let Err(e) = kill(Pid::from_raw(pid), unix_signal) {
-                eprintln!("Error: failed to send signal to PID {}: {}", pid, e);
+                eprintln!("Error: failed to send signal to PID {pid}: {e}");
                 return Err(ExitCode::OsErr);
             }
 
-            println!("Signal sent to PID {} ({})", pid, unix_signal);
+            println!("Signal sent to PID {pid} ({unix_signal})");
             Ok(())
         },
 
@@ -103,14 +103,14 @@ fn main_entry() -> Result<(), ExitCode> {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
 
-            let (pid, _) = read_pid(&args.config)?;
+            let (pid, _) = read_pid(args.config.as_ref())?;
 
             if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGQUIT) {
-                eprintln!("Error: failed to send upgrade signal to PID {}: {}", pid, e);
+                eprintln!("Error: failed to send upgrade signal to PID {pid}: {e}");
                 return Err(ExitCode::OsErr);
             }
 
-            println!("Upgrade signal sent to PID {}", pid);
+            println!("Upgrade signal sent to PID {pid}");
             Ok(())
         },
 
@@ -128,12 +128,12 @@ fn main_entry() -> Result<(), ExitCode> {
             match OphanConfig::parse() {
                 Ok(_) => println!("Config:        ✔ valid"),
                 Err(e) => {
-                    println!("Config:        ✘ {}", e);
+                    println!("Config:        ✘ {e}");
                     all_ok = false;
                 },
             }
 
-            let pid_path = resolve_pid_path(&args.config);
+            let pid_path = resolve_pid_path(args.config.as_ref());
             match std::fs::read_to_string(&pid_path) {
                 Ok(s) => {
                     let trimmed = s.trim();
@@ -182,7 +182,7 @@ fn bootstrap() -> Result<(), ExitCode> {
     })?;
 
     let config = OphanConfig::parse().map_err(|e| {
-        eprintln!("Error parsing config: {:#}", e);
+        eprintln!("Error parsing config: {e:#}");
         ExitCode::Config
     })?;
 
@@ -215,14 +215,14 @@ fn bootstrap() -> Result<(), ExitCode> {
 
     let app_state = AppState::new(config).map_err(|errors| {
         for e in &errors {
-            eprintln!("{}", e);
+            eprintln!("{e:?}");
         }
 
         ExitCode::Config
     })?;
 
     server_run(Arc::new(app_state)).map_err(|e| {
-        eprintln!("Error: {:#}", e);
+        eprintln!("Error: {e:#}");
         ExitCode::Config
     })
 }
@@ -249,14 +249,14 @@ fn server_run(app_state: Arc<AppState>) -> Result<(), String> {
 
     server.bootstrap();
 
-    let gateway = OphanGateway::new(app_state.clone(), &config);
+    let gateway = OphanGateway::new(Arc::clone(&app_state), &config);
 
-    let mut proxy = HttpProxy::new(gateway, server.configuration.clone());
+    let mut proxy = HttpProxy::new(gateway, Arc::clone(&server.configuration));
     proxy.handle_init_modules();
 
     let mut proxy_service = Service::new(String::from("Ophan gateway"), proxy);
 
-    for listener in config.listeners.iter() {
+    for listener in &config.listeners {
         match &listener.security {
             SecurityConfig::Plaintext => {
                 for address in &listener.listen {
@@ -267,7 +267,7 @@ fn server_run(app_state: Arc<AppState>) -> Result<(), String> {
                 for address in &listener.listen {
                     proxy_service
                         .add_tls(address, &certs.cert, &certs.key)
-                        .map_err(|e| format!("failed to add TLS listener: {:?}", e))?;
+                        .map_err(|e| format!("failed to add TLS listener: {e:?}"))?;
                 }
             },
         }
@@ -279,7 +279,7 @@ fn server_run(app_state: Arc<AppState>) -> Result<(), String> {
 
     server.run(RunArgs {
         #[cfg(unix)] // Shutdown signal only available en unix systems for now
-        shutdown_signal: Box::new(crate::signals::UnixShutdownSignalWatch { state: app_state.clone() }),
+        shutdown_signal: Box::new(crate::signals::UnixShutdownSignalWatch { state: app_state }),
     });
 
     Ok(())
@@ -305,7 +305,7 @@ impl Drop for PidGuard {
     }
 }
 
-fn resolve_pid_path(config_arg: &Option<String>) -> PathBuf {
+fn resolve_pid_path(config_arg: Option<&String>) -> PathBuf {
     if let Some(path) = config_arg
         && let Ok(content) = std::fs::read_to_string(path)
         && let Ok(master) = parse_master_config(&content)
@@ -319,7 +319,7 @@ fn resolve_pid_path(config_arg: &Option<String>) -> PathBuf {
     PathBuf::from("/run/ophan.pid")
 }
 
-fn read_pid(config_arg: &Option<String>) -> Result<(i32, PathBuf), ExitCode> {
+fn read_pid(config_arg: Option<&String>) -> Result<(i32, PathBuf), ExitCode> {
     let pid_path = resolve_pid_path(config_arg);
     let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
         eprintln!("Error: cannot read PID file '{}': {}", pid_path.display(), e);

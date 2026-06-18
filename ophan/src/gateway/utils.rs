@@ -46,7 +46,6 @@ pub struct StackString {
 }
 
 impl StackString {
-    #[inline(always)]
     pub fn new(s: &str) -> Self {
         let mut bytes = [0u32 as u8; STR_SIZE];
         let len = s.len().min(STR_SIZE);
@@ -55,7 +54,6 @@ impl StackString {
         Self { bytes, len: len as u8 }
     }
 
-    #[inline(always)]
     pub fn as_str(&self) -> &str {
         unsafe { std::str::from_utf8_unchecked(&self.bytes[..self.len as usize]) }
     }
@@ -64,7 +62,6 @@ impl StackString {
 impl std::ops::Deref for StackString {
     type Target = str;
 
-    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.as_str()
     }

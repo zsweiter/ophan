@@ -88,7 +88,7 @@ pub fn parse_cli(version: &str) -> (Option<Command>, CliArgs) {
             },
 
             command => {
-                eprintln!("Error: Unknown command or argument '{}'", command);
+                eprintln!("Error: Unknown command or argument '{command}'");
                 print_help_and_exit(version);
             },
         }

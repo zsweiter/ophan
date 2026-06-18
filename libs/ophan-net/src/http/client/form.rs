@@ -54,7 +54,7 @@ impl MultipartBuilder {
 
     pub fn finish(self) -> (Bytes, String) {
         let boundary = generate_boundary();
-        let mut body = Vec::new();
+        let mut body = Vec::with_capacity(self.fields.len());
 
         for field in &self.fields {
             body.extend_from_slice(b"--");
@@ -87,7 +87,7 @@ impl MultipartBuilder {
         body.extend_from_slice(boundary.as_bytes());
         body.extend_from_slice(b"--\r\n");
 
-        (Bytes::from(body), format!("multipart/form-data; boundary={}", boundary))
+        (Bytes::from(body), format!("multipart/form-data; boundary={boundary}"))
     }
 }
 

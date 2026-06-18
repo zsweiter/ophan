@@ -11,12 +11,12 @@ impl Flags {
     pub const HSTS: Self = Self(0b0000_0000_0010_0000);
     pub const BLOCK_SYMLINKS: Self = Self(0b0000_0000_0100_0000);
 
-    #[inline(always)]
+    #[inline]
     pub const fn empty() -> Self {
         Self(0)
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn bits(&self) -> u16 {
         self.0
     }
@@ -25,22 +25,22 @@ impl Flags {
         Self(Flags::BLOCK_SYMLINKS.bits() | Flags::DOTFILES.bits() | Flags::LISTING.bits())
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn intersects(&self, other: Self) -> bool {
         (self.0 & other.0) != 0
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn remove(&mut self, other: Self) {
         self.0 &= !other.0;
     }
@@ -49,7 +49,7 @@ impl Flags {
 impl std::ops::BitOr for Flags {
     type Output = Self;
 
-    #[inline(always)]
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }

@@ -78,7 +78,7 @@ impl LoadBalancer {
             },
         };
 
-        let server = bucket[idx].clone();
+        let server = Arc::clone(&bucket[idx]);
         server.active_conns.fetch_add(1, Ordering::Relaxed);
         Some(server)
     }

@@ -61,22 +61,22 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Parse { message, file, line, column } => {
                 if let Some(file) = file {
-                    write!(f, "{}", file)?;
+                    write!(f, "{file}")?;
                     if let (Some(l), Some(c)) = (line, column) {
-                        write!(f, ":{}:{}", l, c)?;
+                        write!(f, ":{l}:{c}")?;
                     }
                     writeln!(f, ":")?;
-                    write!(f, "  {}", message)
+                    write!(f, "  {message}")
                 } else if let (Some(l), Some(c)) = (line, column) {
-                    write!(f, "line {}:{}: {}", l, c, message)
+                    write!(f, "line {l}:{c}: {message}")
                 } else {
-                    write!(f, "{}", message)
+                    write!(f, "{message}")
                 }
             },
             Self::Validation { code, message } => {
-                write!(f, "error[{}]: {}", code, message)
+                write!(f, "error[{code}]: {message}")
             },
-            Self::Io { message } => write!(f, "{}", message),
+            Self::Io { message } => write!(f, "{message}"),
         }
     }
 }

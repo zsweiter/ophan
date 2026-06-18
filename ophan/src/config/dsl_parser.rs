@@ -53,7 +53,7 @@ pub fn parse_master_config(input: &str) -> Result<MasterConfig, ConfigError> {
                 user = extract_string(entry.into_inner().next().ok_or("master: expected user value")?);
             },
             Rule::master_workers => {
-                workers = parse_workers_usage(entry.into_inner().next().ok_or("master: expected workers value")?)?;
+                workers = parse_workers_usage(&entry.into_inner().next().ok_or("master: expected workers value")?)?;
             },
             Rule::master_pid => {
                 pid = extract_string(entry.into_inner().next().ok_or("master: expected pid value")?);
@@ -173,16 +173,16 @@ fn validate_limits(config: &GatewayConfig) -> Result<(), ConfigError> {
     }
 
     let policy_count = [
-        config.policies.auth.as_ref().map(|m| m.len()).unwrap_or(0),
-        config.policies.waf.as_ref().map(|m| m.len()).unwrap_or(0),
-        config.policies.cors.as_ref().map(|m| m.len()).unwrap_or(0),
-        config.policies.limiter.as_ref().map(|m| m.len()).unwrap_or(0),
+        config.policies.auth.as_ref().map_or(0, |m| m.len()),
+        config.policies.waf.as_ref().map_or(0, |m| m.len()),
+        config.policies.cors.as_ref().map_or(0, |m| m.len()),
+        config.policies.limiter.as_ref().map_or(0, |m| m.len()),
     ]
     .iter()
     .sum::<usize>();
 
     if policy_count > MAX_POLICIES {
-        return Err(format!("Too many policies: {} (max: {})", policy_count, MAX_POLICIES).into());
+        return Err(format!("Too many policies: {policy_count} (max: {MAX_POLICIES})").into());
     }
 
     Ok(())
@@ -195,7 +195,7 @@ fn extract_string(pair: pest::iterators::Pair<Rule>) -> String {
     }
 }
 
-fn parse_workers_usage(pair: pest::iterators::Pair<Rule>) -> Result<usize, String> {
+fn parse_workers_usage(pair: &pest::iterators::Pair<Rule>) -> Result<usize, String> {
     match pair.as_rule() {
         Rule::string => {
             let val = pair.as_str().trim_matches('"');
@@ -204,28 +204,27 @@ fn parse_workers_usage(pair: pest::iterators::Pair<Rule>) -> Result<usize, Strin
                 Ok(utils::get_parallel_size())
             } else {
                 Err(format!(
-                    "Invalid string value for workers: '{}'. Expected 'auto' or a number.",
-                    val
+                    "Invalid string value for workers: '{val}'. Expected 'auto' or a number."
                 ))
             }
         },
         Rule::number => {
             let val = pair.as_str();
-            val.parse::<usize>().map_err(|e| format!("Failed to parse worker count '{}': {}", val, e))
+            val.parse::<usize>().map_err(|e| format!("Failed to parse worker count '{val}': {e}"))
         },
-        rule => Err(format!("Unexpected value for workers: {:?}", rule)),
+        rule => Err(format!("Unexpected value for workers: {rule:?}")),
     }
 }
 
-fn extract_bool(pair: pest::iterators::Pair<Rule>) -> bool {
+fn extract_bool(pair: &pest::iterators::Pair<Rule>) -> bool {
     pair.as_str() == "true"
 }
 
-fn extract_number(pair: pest::iterators::Pair<Rule>) -> u64 {
+fn extract_number(pair: &pest::iterators::Pair<Rule>) -> u64 {
     pair.as_str().parse().unwrap_or(0)
 }
 
-fn parse_duration_to_secs(pair: pest::iterators::Pair<Rule>) -> u64 {
+fn parse_duration_to_secs(pair: &pest::iterators::Pair<Rule>) -> u64 {
     let s = pair.as_str();
     if let Some(val) = s.strip_suffix("ms") {
         val.parse::<u64>().unwrap_or(0) / 1000
@@ -240,7 +239,7 @@ fn parse_duration_to_secs(pair: pest::iterators::Pair<Rule>) -> u64 {
     }
 }
 
-fn parse_size_to_bytes(pair: pest::iterators::Pair<Rule>) -> usize {
+fn parse_size_to_bytes(pair: &pest::iterators::Pair<Rule>) -> usize {
     let s = pair.as_str();
     if let Some(val) = s.strip_suffix("gb") {
         val.parse::<usize>().unwrap_or(0) * 1024 * 1024 * 1024
@@ -298,12 +297,12 @@ fn parse_transport(addr: &str) -> Result<NetworkTransport, String> {
             }
             // Fallback: store as hostname:port, DNS resolved at connection time
             return Ok(NetworkTransport::Tcp(
-                format!("{}:{}", host, port).parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port))),
+                format!("{host}:{port}").parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], port))),
             ));
         }
-        Err(format!("invalid address '{}': invalid port", addr))
+        Err(format!("invalid address '{addr}': invalid port"))
     } else {
-        Err(format!("invalid address '{}': expected ip:port or unix:path", addr))
+        Err(format!("invalid address '{addr}': expected ip:port or unix:path"))
     }
 }
 
@@ -313,7 +312,7 @@ fn parse_protocol(s: &str) -> Result<NetworkProtocol, String> {
         "websocket" | "ws" => Ok(NetworkProtocol::Http1 { allow_websocket_upgrade: true }),
         "http2" | "h2" => Ok(NetworkProtocol::Http2 { mode: Http2Mode::Standard }),
         "grpc" => Ok(NetworkProtocol::Http2 { mode: Http2Mode::Grpc }),
-        _ => Err(format!("invalid protocol '{}': expected http1, http2, websocket, or grpc", s)),
+        _ => Err(format!("invalid protocol '{s}': expected http1, http2, websocket, or grpc")),
     }
 }
 
@@ -324,8 +323,7 @@ fn parse_balance_strategy(s: &str) -> Result<BalanceStrategy, String> {
         "ip_hash" => Ok(BalanceStrategy::IpHash),
         "random" => Ok(BalanceStrategy::Random),
         _ => Err(format!(
-            "invalid load_balance '{}': expected round_robin, least_connections, ip_hash, or random",
-            s
+            "invalid load_balance '{s}': expected round_robin, least_connections, ip_hash, or random",
         )),
     }
 }
@@ -346,13 +344,13 @@ fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConf
                 match body.as_rule() {
                     Rule::listener_address => {
                         address = extract_string(body.into_inner().next().ok_or("listener: expected address value")?);
-                        transport = parse_transport(&address).map_err(|e| format!("listener '{}': {}", name, e))?;
+                        transport = parse_transport(&address).map_err(|e| format!("listener '{name}': {e}"))?;
                     },
                     Rule::listener_protocols => {
                         let val = body.into_inner().next().ok_or("listener: expected protocols value")?;
                         protocols = extract_array(val)
                             .into_iter()
-                            .map(|s| parse_protocol(&s).map_err(|e| format!("listener '{}': {}", name, e)))
+                            .map(|s| parse_protocol(&s).map_err(|e| format!("listener '{name}': {e}")))
                             .collect::<Result<Vec<_>, String>>()
                             .map_err(|e: String| e)?;
                     },
@@ -377,7 +375,7 @@ fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConf
                         }
                         ssl = Some(SSLConfig { cert, key: key_path, client_ca });
                     },
-                    _ => return Err(parse_err_at(&body, format!("unexpected entry in listener '{}'", name))),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in listener '{name}'"))),
                 }
             }
 
@@ -440,8 +438,7 @@ fn parse_upstreams(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamConf
                     Rule::load_balance_assignment => {
                         let val = body.into_inner().next().ok_or("upstream: expected load_balance value")?;
                         let name_str = extract_string(val);
-                        balance_strategy =
-                            parse_balance_strategy(&name_str).map_err(|e| format!("upstream '{}': {}", name, e))?;
+                        balance_strategy = parse_balance_strategy(&name_str).map_err(|e| format!("upstream '{name}': {e}"))?;
                     },
                     Rule::health_check_assignment => {
                         let obj = body.into_inner().next().unwrap();
@@ -495,15 +492,13 @@ fn parse_inline_server(pair: pest::iterators::Pair<Rule>) -> Result<UpstreamServ
             let val = val_inner.into_inner().next().ok_or("server: expected value inner")?;
             match key.as_str() {
                 "endpoint" => endpoint = extract_string(val),
-                "weight" => weight = extract_number(val) as u32,
+                "weight" => weight = extract_number(&val) as u32,
                 "protocol" => {
                     let proto_str = extract_string(val);
-                    protocol = Some(parse_protocol(&proto_str).map_err(|e| format!("server endpoint '{}': {}", endpoint, e))?);
+                    protocol = Some(parse_protocol(&proto_str).map_err(|e| format!("server endpoint '{endpoint}': {e}"))?);
                 },
                 _ => {
-                    return Err(
-                        ConfigError::parse(format!("unexpected key '{}' in server definition", key)).with_pos(pos.0, pos.1)
-                    );
+                    return Err(ConfigError::parse(format!("unexpected key '{key}' in server definition")).with_pos(pos.0, pos.1));
                 },
             }
         }
@@ -540,13 +535,13 @@ fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckCo
             let val = val_inner.into_inner().next().ok_or("health_check: expected value inner")?;
             match key.as_str() {
                 "path" => path = extract_string(val),
-                "interval" => interval = parse_duration_to_secs(val),
-                "timeout" => timeout = parse_duration_to_secs(val),
-                "unhealthy_threshold" => unhealthy_threshold = extract_number(val) as u32,
-                "healthy_threshold" => healthy_threshold = extract_number(val) as u32,
+                "interval" => interval = parse_duration_to_secs(&val),
+                "timeout" => timeout = parse_duration_to_secs(&val),
+                "unhealthy_threshold" => unhealthy_threshold = extract_number(&val) as u32,
+                "healthy_threshold" => healthy_threshold = extract_number(&val) as u32,
                 _ => {
                     return Err(
-                        ConfigError::parse(format!("unexpected key '{}' in health_check block", key)).with_pos(pos.0, pos.1)
+                        ConfigError::parse(format!("unexpected key '{key}' in health_check block")).with_pos(pos.0, pos.1)
                     );
                 },
             }
@@ -744,10 +739,10 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                 let val = val_inner.into_inner().next().ok_or("waf extends: expected value inner")?;
                                 match key.as_str() {
                                     "enabled" => {
-                                        enabled_explicitly_false = !extract_bool(val);
+                                        enabled_explicitly_false = !extract_bool(&val);
                                     },
-                                    "max_body_size" => cfg.max_body_size = parse_size_to_bytes(val),
-                                    "anomaly_threshold" => cfg.anomaly_threshold = extract_number(val) as u32,
+                                    "max_body_size" => cfg.max_body_size = parse_size_to_bytes(&val),
+                                    "anomaly_threshold" => cfg.anomaly_threshold = extract_number(&val) as u32,
                                     "mode" => {
                                         cfg.mode = match extract_string(val).as_str() {
                                             "detection_only" => WafMode::DetectionOnly,
@@ -813,8 +808,8 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                     "allow_origin" => cfg.allow_origins = extract_array(val),
                                     "allow_methods" => cfg.allow_methods = extract_array(val),
                                     "allow_headers" => cfg.allow_headers = extract_array(val),
-                                    "allow_credentials" => cfg.allow_credentials = extract_bool(val),
-                                    "max_age" => cfg.max_age = Some(parse_duration_to_secs(val)),
+                                    "allow_credentials" => cfg.allow_credentials = extract_bool(&val),
+                                    "max_age" => cfg.max_age = Some(parse_duration_to_secs(&val)),
                                     "excludes" => cfg.excludes = extract_array(val),
                                     _ => {},
                                 }
@@ -832,7 +827,7 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                 let val = val_inner.into_inner().next().ok_or("limiter extends: expected value inner")?;
                                 match key.as_str() {
                                     "rate" => cfg.rate = parse_rate(val),
-                                    "burst" => cfg.burst = extract_number(val),
+                                    "burst" => cfg.burst = extract_number(&val),
                                     "algorithm" => {
                                         cfg.algorithm = match extract_string(val).as_str() {
                                             "token_bucket" => RateLimitAlgorithm::TokenBucket,
@@ -870,7 +865,7 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                 let val = val_inner.into_inner().next().ok_or("limiter local: expected value inner")?;
                                 match key.as_str() {
                                     "rate" => cfg.rate = parse_rate(val),
-                                    "burst" => cfg.burst = extract_number(val),
+                                    "burst" => cfg.burst = extract_number(&val),
                                     "algorithm" => {
                                         cfg.algorithm = match extract_string(val).as_str() {
                                             "token_bucket" => RateLimitAlgorithm::TokenBucket,
@@ -901,10 +896,10 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                 let val = val_inner.into_inner().next().ok_or("waf local: expected value inner")?;
                                 match key.as_str() {
                                     "enabled" => {
-                                        enabled_explicitly_false = !extract_bool(val);
+                                        enabled_explicitly_false = !extract_bool(&val);
                                     },
-                                    "max_body_size" => cfg.max_body_size = parse_size_to_bytes(val),
-                                    "anomaly_threshold" => cfg.anomaly_threshold = extract_number(val) as u32,
+                                    "max_body_size" => cfg.max_body_size = parse_size_to_bytes(&val),
+                                    "anomaly_threshold" => cfg.anomaly_threshold = extract_number(&val) as u32,
                                     "mode" => {
                                         cfg.mode = match extract_string(val).as_str() {
                                             "detection_only" => WafMode::DetectionOnly,
@@ -932,8 +927,8 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
                                     "allow_origin" => cfg.allow_origins = extract_array(val),
                                     "allow_methods" => cfg.allow_methods = extract_array(val),
                                     "allow_headers" => cfg.allow_headers = extract_array(val),
-                                    "allow_credentials" => cfg.allow_credentials = extract_bool(val),
-                                    "max_age" => cfg.max_age = Some(parse_duration_to_secs(val)),
+                                    "allow_credentials" => cfg.allow_credentials = extract_bool(&val),
+                                    "max_age" => cfg.max_age = Some(parse_duration_to_secs(&val)),
                                     "excludes" => cfg.excludes = extract_array(val),
                                     _ => {},
                                 }
@@ -995,7 +990,9 @@ fn parse_timeouts_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteTimeou
         } else {
             raw
         };
-        let secs = parse_duration_to_secs(unquoted);
+
+        let secs = parse_duration_to_secs(&unquoted);
+
         match rule {
             Rule::timeout_connect => connect = Some(Duration::from_secs(secs)),
             Rule::timeout_read => read = Some(Duration::from_secs(secs)),
@@ -1016,8 +1013,8 @@ fn parse_streaming_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteStrea
         let pos = kv.line_col();
         let val = kv.into_inner().next().ok_or("streaming: expected value")?;
         match rule {
-            Rule::streaming_buffering => buffering = extract_bool(val),
-            Rule::streaming_chunked => chunked = extract_bool(val),
+            Rule::streaming_buffering => buffering = extract_bool(&val),
+            Rule::streaming_chunked => chunked = extract_bool(&val),
             _ => return Err(ConfigError::parse("unexpected key in streaming block").with_pos(pos.0, pos.1)),
         }
     }
@@ -1043,10 +1040,10 @@ fn parse_backend(pair: pest::iterators::Pair<Rule>) -> Result<BackendTarget, Con
                         root = extract_string(kv.into_inner().next().ok_or("static: expected root value")?);
                     },
                     Rule::static_listing => {
-                        listing = extract_bool(kv.into_inner().next().ok_or("static: expected listing value")?);
+                        listing = extract_bool(&kv.into_inner().next().ok_or("static: expected listing value")?);
                     },
                     Rule::static_dotfiles => {
-                        dotfiles = extract_bool(kv.into_inner().next().ok_or("static: expected dotfiles value")?);
+                        dotfiles = extract_bool(&kv.into_inner().next().ok_or("static: expected dotfiles value")?);
                     },
                     Rule::static_permissions => {
                         permissions =
@@ -1122,7 +1119,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::refresh_block => {
                         oauth.refresh_token = Some(parse_refresh_block(body));
                     },
-                    _ => return Err(parse_err_at(&body, format!("unexpected entry in auth policy '{}'", pname))),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in auth policy '{pname}'"))),
                 }
             }
 
@@ -1137,7 +1134,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
             for body in inner {
                 match body.as_rule() {
                     Rule::waf_enabled => {
-                        waf.enabled = extract_bool(body.into_inner().next().ok_or("waf: expected enabled value")?);
+                        waf.enabled = extract_bool(&body.into_inner().next().ok_or("waf: expected enabled value")?);
                     },
                     Rule::waf_mode => {
                         let pos = body.line_col();
@@ -1147,8 +1144,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                             "blocking" => WafMode::Blocking,
                             _ => {
                                 return Err(ConfigError::parse(format!(
-                                    "invalid waf mode '{}': expected detection_only or blocking",
-                                    mode_str,
+                                    "invalid waf mode '{mode_str}': expected detection_only or blocking",
                                 ))
                                 .with_pos(pos.0, pos.1));
                             },
@@ -1156,11 +1152,11 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     },
                     Rule::waf_max_body_size => {
                         waf.max_body_size =
-                            parse_size_to_bytes(body.into_inner().next().ok_or("waf: expected max_body_size value")?);
+                            parse_size_to_bytes(&body.into_inner().next().ok_or("waf: expected max_body_size value")?);
                     },
                     Rule::waf_anomaly_threshold => {
                         waf.anomaly_threshold =
-                            extract_number(body.into_inner().next().ok_or("waf: expected anomaly_threshold value")?) as u32;
+                            extract_number(&body.into_inner().next().ok_or("waf: expected anomaly_threshold value")?) as u32;
                     },
                     Rule::waf_excludes => {
                         waf.excludes = extract_array(body.into_inner().next().ok_or("waf: expected excludes value")?);
@@ -1168,7 +1164,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::rules_block => {
                         rules = parse_rules_block(body)?;
                     },
-                    _ => return Err(parse_err_at(&body, format!("unexpected entry in waf policy '{}'", pname))),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in waf policy '{pname}'"))),
                 }
             }
             waf.rules = rules;
@@ -1191,17 +1187,17 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     },
                     Rule::cors_allow_credentials => {
                         cors.allow_credentials =
-                            extract_bool(body.into_inner().next().ok_or("cors: expected allow_credentials value")?);
+                            extract_bool(&body.into_inner().next().ok_or("cors: expected allow_credentials value")?);
                     },
                     Rule::cors_max_age => {
                         cors.max_age = Some(parse_duration_to_secs(
-                            body.into_inner().next().ok_or("cors: expected max_age value")?,
+                            &body.into_inner().next().ok_or("cors: expected max_age value")?,
                         ));
                     },
                     Rule::cors_excludes => {
                         cors.excludes = extract_array(body.into_inner().next().ok_or("cors: expected excludes value")?);
                     },
-                    _ => return Err(parse_err_at(&body, format!("unexpected entry in cors policy '{}'", pname))),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in cors policy '{pname}'"))),
                 }
             }
             let mut cors_map = HashMap::new();
@@ -1218,7 +1214,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                         limiter.rate = parse_rate(inner);
                     },
                     Rule::limiter_burst => {
-                        limiter.burst = extract_number(body.into_inner().next().ok_or("limiter: expected burst value")?);
+                        limiter.burst = extract_number(&body.into_inner().next().ok_or("limiter: expected burst value")?);
                     },
                     Rule::limiter_algorithm => {
                         let pos = body.line_col();
@@ -1228,8 +1224,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                             "sliding_window" => RateLimitAlgorithm::SlidingWindow,
                             _ => {
                                 return Err(ConfigError::parse(format!(
-                                    "invalid limiter algorithm '{}': expected token_bucket or sliding_window",
-                                    alg,
+                                    "invalid limiter algorithm '{alg}': expected token_bucket or sliding_window",
                                 ))
                                 .with_pos(pos.0, pos.1));
                             },
@@ -1245,14 +1240,14 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::limiter_excludes => {
                         limiter.excludes = extract_array(body.into_inner().next().ok_or("limiter: expected excludes value")?);
                     },
-                    _ => return Err(parse_err_at(&body, format!("unexpected entry in limiter policy '{}'", pname))),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in limiter policy '{pname}'"))),
                 }
             }
             let mut limiter_map = HashMap::new();
             limiter_map.insert(pname.clone(), limiter);
             policy.limiter = Some(limiter_map);
         },
-        _ => return Err(ConfigError::parse(format!("unknown policy type '{}'", ptype)).with_pos(pos.0, pos.1)),
+        _ => return Err(ConfigError::parse(format!("unknown policy type '{ptype}'")).with_pos(pos.0, pos.1)),
     }
 
     Ok((ptype, pname, policy))
@@ -1305,7 +1300,7 @@ fn parse_refresh_block(pair: pest::iterators::Pair<Rule>) -> RefreshTokenConfig 
         match body.as_rule() {
             Rule::refresh_enabled => {
                 if let Some(val) = body.into_inner().next() {
-                    enabled = extract_bool(val);
+                    enabled = extract_bool(&val);
                 }
             },
             Rule::refresh_endpoint => {
@@ -1354,8 +1349,7 @@ fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, 
                             "response_headers" => WafPhase::ResponseHeaders,
                             "response_body" => WafPhase::ResponseBody,
                             _ => return Err(ConfigError::parse(format!(
-                                "invalid phase '{}': expected request_headers, request_body, response_headers, or response_body",
-                                p
+                                "invalid phase '{p}': expected request_headers, request_body, response_headers, or response_body",
                             ))
                             .with_pos(pos.0, pos.1)),
                         };
@@ -1368,8 +1362,7 @@ fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, 
                             "sql_token_match" => WafCondition::SqlTokenMatch,
                             _ => {
                                 return Err(ConfigError::parse(format!(
-                                    "invalid condition '{}': expected sql_token_match",
-                                    cond_str
+                                    "invalid condition '{cond_str}': expected sql_token_match",
                                 ))
                                 .with_pos(pos.0, pos.1));
                             },
@@ -1385,15 +1378,14 @@ fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, 
                             "allow" => WafAction::Allow,
                             _ => {
                                 return Err(ConfigError::parse(format!(
-                                    "invalid action '{}': expected block, log, challenge, or allow",
-                                    a
+                                    "invalid action '{a}': expected block, log, challenge, or allow",
                                 ))
                                 .with_pos(pos.0, pos.1));
                             },
                         };
                     },
                     Rule::rule_score => {
-                        score = extract_number(kv.into_inner().next().ok_or("rule: expected score value")?) as u32;
+                        score = extract_number(&kv.into_inner().next().ok_or("rule: expected score value")?) as u32;
                     },
                     _ => return Err(parse_err_at(&kv, format!("unexpected entry in rule '{}'", id))),
                 }

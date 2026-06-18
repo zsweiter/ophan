@@ -77,7 +77,7 @@ pub fn build_app_context(config: &OphanConfig) -> Result<AppContext, Vec<ConfigE
     let mut upstreams = HashMap::with_capacity(config.upstreams.len());
 
     for upstream in &config.upstreams {
-        upstreams.insert(upstream.name.clone(), upstream.clone());
+        upstreams.insert(upstream.name.clone(), Arc::clone(upstream));
     }
 
     for route_cfg in &config.routes {
@@ -126,7 +126,7 @@ pub fn build_app_context(config: &OphanConfig) -> Result<AppContext, Vec<ConfigE
         } else {
             for host in &route_cfg.hosts {
                 router
-                    .add_route(Some(host), &route_cfg.path, route_cfg.methods.clone(), compiled.clone())
+                    .add_route(Some(host), &route_cfg.path, route_cfg.methods.clone(), Arc::clone(&compiled))
                     .unwrap_or_else(|e| {
                         tracing::error!("failed to add route '{}' on host '{}': {}", route_cfg.path, host, e);
                     });

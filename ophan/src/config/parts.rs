@@ -160,11 +160,9 @@ pub struct UpstreamServer {
 
 impl UpstreamServer {
     pub fn http(address: impl Into<String>) -> Self {
-        let address = address.into();
-
         Self {
             protocol: NetworkProtocol::Http1 { allow_websocket_upgrade: false },
-            address: address.clone(),
+            address: address.into(),
             transport: NetworkTransport::default(),
             ssl: None,
             weight: 1,
@@ -693,8 +691,8 @@ impl fmt::Display for TlsVersion {
 impl fmt::Display for NetworkTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NetworkTransport::Tcp(addr) => write!(f, "tcp://{}", addr),
-            NetworkTransport::Uds(path) => write!(f, "unix://{}", path),
+            NetworkTransport::Tcp(addr) => write!(f, "tcp://{addr}"),
+            NetworkTransport::Uds(path) => write!(f, "unix://{path}"),
         }
     }
 }
@@ -703,11 +701,11 @@ impl fmt::Display for NetworkProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NetworkProtocol::Http1 { allow_websocket_upgrade } => {
-                write!(f, "HTTP/1.1 (websocket_upgrade={})", allow_websocket_upgrade)
+                write!(f, "HTTP/1.1 (websocket_upgrade={allow_websocket_upgrade})")
             },
 
             NetworkProtocol::Http2 { mode } => {
-                write!(f, "HTTP/2 ({:?})", mode)
+                write!(f, "HTTP/2 ({mode:?})")
             },
         }
     }
@@ -738,7 +736,7 @@ impl fmt::Display for ListenerConfig {
         writeln!(f, "  protocols:")?;
 
         for protocol in &self.protocols {
-            writeln!(f, "    - {}", protocol)?;
+            writeln!(f, "    - {protocol}")?;
         }
 
         Ok(())
@@ -761,7 +759,7 @@ impl fmt::Display for UpstreamConfig {
         writeln!(f, "  strategy: {:?}", self.balance_strategy)?;
 
         for server in &self.servers {
-            writeln!(f, "    - {}", server)?;
+            writeln!(f, "    - {server}")?;
         }
 
         Ok(())
@@ -772,7 +770,7 @@ impl fmt::Display for BackendTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BackendTarget::Static(_) => write!(f, "static"),
-            BackendTarget::Upstream(name) => write!(f, "upstream({})", name),
+            BackendTarget::Upstream(name) => write!(f, "upstream({name})"),
         }
     }
 }
@@ -802,17 +800,17 @@ impl fmt::Display for GatewayConfig {
 
         writeln!(f, "Listeners:")?;
         for listener in &self.listeners {
-            writeln!(f, "{}", listener)?;
+            writeln!(f, "{listener}")?;
         }
 
         writeln!(f, "Upstreams:")?;
         for upstream in &self.upstreams {
-            writeln!(f, "{}", upstream)?;
+            writeln!(f, "{upstream}")?;
         }
 
         writeln!(f, "Routes:")?;
         for route in &self.routes {
-            writeln!(f, "{}", route)?;
+            writeln!(f, "{route}")?;
         }
 
         Ok(())

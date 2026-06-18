@@ -32,27 +32,27 @@ impl HttpMethod {
             | Self::CONNECT.0,
     );
 
-    #[inline(always)]
+    #[inline]
     pub const fn bits(self) -> u16 {
         self.0
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn intersects(self, other: Self) -> bool {
         (self.0 & other.0) != 0
     }
 
-    #[inline(always)]
+    #[inline]
     pub const fn from_bits(bits: u16) -> Self {
         Self(bits & Self::ALL.0)
     }
@@ -143,7 +143,7 @@ impl FromIterator<HttpMethod> for HttpMethod {
 impl BitOr for HttpMethod {
     type Output = Self;
 
-    #[inline(always)]
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }
@@ -152,21 +152,21 @@ impl BitOr for HttpMethod {
 impl BitAnd for HttpMethod {
     type Output = Self;
 
-    #[inline(always)]
+    #[inline]
     fn bitand(self, rhs: Self) -> Self::Output {
         Self(self.0 & rhs.0)
     }
 }
 
 impl BitOrAssign for HttpMethod {
-    #[inline(always)]
+    #[inline]
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
 }
 
 impl BitAndAssign for HttpMethod {
-    #[inline(always)]
+    #[inline]
     fn bitand_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0;
     }

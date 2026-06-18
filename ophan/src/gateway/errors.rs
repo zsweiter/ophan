@@ -159,11 +159,11 @@ impl GatewayError {
 
     pub fn message(&self) -> String {
         match self {
-            Self::BadRequest(msg) => msg.to_string(),
-            Self::Conflict(msg) => msg.to_string(),
-            Self::BadGateway(msg) => msg.to_string(),
-            Self::ServiceUnavailable(msg) => msg.to_string(),
-            Self::InternalServerError(msg) => msg.to_string(),
+            Self::BadRequest(msg)
+            | Self::Conflict(msg)
+            | Self::BadGateway(msg)
+            | Self::ServiceUnavailable(msg)
+            | Self::InternalServerError(msg) => msg.to_string(),
 
             Self::Unauthorized(msg) => {
                 if msg.is_empty() {
@@ -191,7 +191,7 @@ impl GatewayError {
         let status = error.status_code();
 
         let request_id: Cow<'_, str> = match session.req_header().headers.get("x-request-id") {
-            Some(value) => value.to_str().map(Cow::Borrowed).unwrap_or_else(|_| Cow::Owned(Uuid::new_v4().to_string())),
+            Some(value) => value.to_str().map_or_else(|_| Cow::Owned(Uuid::new_v4().to_string()), Cow::Borrowed),
             None => Cow::Owned(Uuid::new_v4().to_string()),
         };
 
@@ -214,10 +214,7 @@ impl GatewayError {
             Some(accept) if accept.contains("application/json") => {
                 let body = format!(
                     "{{\"status_code\":{},\"message\":\"{}\",\"error\":\"{}\",\"request_id\":\"{}\"}}\n",
-                    response.status_code,
-                    response.message,
-                    response.error,
-                    response.request_id.clone()
+                    response.status_code, response.message, response.error, response.request_id
                 )
                 .into_bytes();
 

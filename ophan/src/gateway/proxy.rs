@@ -95,7 +95,7 @@ impl ProxyHttp for OphanGateway {
                 ctx.backend_candidate = candidate.map(BackendCandidate::Upstream);
             },
             BackendTarget::Static(cfg) => {
-                ctx.backend_candidate = Some(BackendCandidate::Static(cfg.clone()));
+                ctx.backend_candidate = Some(BackendCandidate::Static(Arc::clone(cfg)));
             },
         }
 
@@ -117,7 +117,7 @@ impl ProxyHttp for OphanGateway {
                 let status = resp.status().as_u16();
                 let mut header = pingora::http::ResponseHeader::build(status, None)?;
 
-                for (name, value) in resp.headers().iter() {
+                for (name, value) in resp.headers() {
                     let _ = header.append_header(name, value);
                 }
 
@@ -142,7 +142,7 @@ impl ProxyHttp for OphanGateway {
                         Ok(response) => {
                             let mut header = pingora::http::ResponseHeader::build(200, None)?;
 
-                            for (name, value) in response.headers().iter() {
+                            for (name, value) in response.headers() {
                                 let _ = header.append_header(name, value);
                             }
 

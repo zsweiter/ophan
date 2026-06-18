@@ -25,13 +25,11 @@ fn read_config_file(path: &PathBuf) -> Result<String, ConfigError> {
 }
 
 #[derive(Clone)]
-#[allow(unused)] // For now 
 pub struct ConfigFileTracker {
     pub path: PathBuf,
     pub last_mtime: SystemTime,
 }
 
-#[allow(unused)] // For now 
 impl ConfigFileTracker {
     pub fn new(path: PathBuf) -> Result<Self, ConfigError> {
         let mtime = fs::metadata(&path)?.modified()?;
@@ -43,6 +41,7 @@ impl ConfigFileTracker {
         Ok(current > self.last_mtime)
     }
 
+    #[allow(dead_code)]
     pub fn refresh_mtime(&mut self) -> Result<(), ConfigError> {
         self.last_mtime = fs::metadata(&self.path)?.modified()?;
         Ok(())
@@ -79,8 +78,8 @@ impl OphanConfig {
         let master = parse_master_config(&master_str)?;
         let master_tracker = ConfigFileTracker::new(master_path)?;
 
-        let mut gateways = Vec::new();
-        let mut gateway_trackers = Vec::new();
+        let mut gateways = Vec::with_capacity(master.includes.len());
+        let mut gateway_trackers = Vec::with_capacity(master.includes.len());
 
         for include in &master.includes {
             let include_path = PathBuf::from(include);
@@ -109,30 +108,35 @@ impl OphanConfig {
             }
         }
 
+        let total_listeners: usize = gateways.iter().map(|gw| gw.listeners.len()).sum();
+        let total_upstreams: usize = gateways.iter().map(|gw| gw.upstreams.len()).sum();
+        let total_routes: usize = gateways.iter().map(|gw| gw.routes.len()).sum();
+
         let mut policies = PolicyConfig::default();
-        let mut listeners = Vec::new();
-        let mut routes = Vec::new();
-        let mut upstreams = Vec::new();
-        let mut upstreams_index = HashMap::new();
-        let mut routes_fast_match = Vec::new();
+        let mut listeners = Vec::with_capacity(total_listeners);
+        let mut routes = Vec::with_capacity(total_routes);
+        let mut upstreams = Vec::with_capacity(total_upstreams);
+        let mut upstreams_index = HashMap::with_capacity(total_upstreams);
+        let mut routes_fast_match = Vec::with_capacity(total_routes);
 
         for gw in &gateways {
             policies.merge_all(gw.policies.clone());
 
-            for l in &gw.listeners {
-                listeners.push(Arc::new(l.clone()));
+            for listener in &gw.listeners {
+                listeners.push(Arc::new(listener.clone()));
             }
 
-            for u in &gw.upstreams {
-                let shared_u = Arc::new(u.clone());
-                upstreams.push(shared_u.clone());
-                upstreams_index.insert(u.name.clone(), shared_u);
+            for upstream in &gw.upstreams {
+                let shared_u = Arc::new(upstream.clone());
+                upstreams.push(Arc::clone(&shared_u));
+                upstreams_index.insert(upstream.name.clone(), shared_u);
             }
 
-            for r in &gw.routes {
-                let shared_r = Arc::new(r.clone());
-                routes.push(shared_r.clone());
-                let match_path = r.path.trim_end_matches('*').to_string();
+            for route in &gw.routes {
+                let shared_r = Arc::new(route.clone());
+                routes.push(Arc::clone(&shared_r));
+
+                let match_path = route.path.trim_end_matches('*').to_string();
                 routes_fast_match.push((match_path, shared_r));
             }
         }
@@ -152,88 +156,6 @@ impl OphanConfig {
             routes_fast_match,
         })
     }
-
-    #[allow(unused)] // For now (gracefull reload)
-    pub fn reload_if_changed(&mut self, force: bool) -> Result<bool, Box<dyn std::error::Error>> {
-        if force || self.master_tracker.has_changed()? {
-            let new = Self::parse()?;
-            *self = new;
-            return Ok(true);
-        }
-
-        let mut changed = false;
-        let mut changed_indices = Vec::new();
-
-        for (idx, tracker) in self.gateway_trackers.iter().enumerate() {
-            if force || tracker.has_changed()? {
-                changed_indices.push(idx);
-            }
-        }
-
-        for idx in changed_indices {
-            let tracker = &mut self.gateway_trackers[idx];
-            let content = read_config_file(&tracker.path)?;
-            let new_gw =
-                parse_gateway_config(&content).map_err(|e| format!("Error parsing {}: {}", tracker.path.display(), e))?;
-
-            self.gateways[idx] = new_gw.clone();
-            tracker.refresh_mtime()?;
-            self.rebuild_from_gateway(idx, &new_gw);
-            changed = true;
-        }
-
-        if changed {
-            self.policies = self.merge_all_policies();
-        }
-
-        Ok(changed)
-    }
-
-    #[allow(unused)] // For now (gracefull reload)
-    fn rebuild_from_gateway(&mut self, idx: usize, gw: &GatewayConfig) {
-        for l in &gw.listeners {
-            self.listeners.push(Arc::new(l.clone()));
-        }
-
-        for u in &gw.upstreams {
-            let name = u.name.clone();
-            if let Some(existing) = self.upstreams.iter().position(|a| a.name == name) {
-                let shared = Arc::new(u.clone());
-                self.upstreams[existing] = shared.clone();
-                self.upstreams_index.insert(name, shared);
-            } else {
-                let shared = Arc::new(u.clone());
-                self.upstreams.push(shared.clone());
-                self.upstreams_index.insert(name, shared);
-            }
-        }
-
-        for r in &gw.routes {
-            let path = r.path.clone();
-            if let Some(existing) = self.routes.iter().position(|a| a.path == path) {
-                let shared = Arc::new(r.clone());
-                self.routes[existing] = shared.clone();
-                if let Some(match_entry) = self.routes_fast_match.iter_mut().find(|(p, _)| *p == path.trim_end_matches('*')) {
-                    match_entry.1 = shared;
-                }
-            } else {
-                let shared = Arc::new(r.clone());
-                self.routes.push(shared.clone());
-                let match_path = r.path.trim_end_matches('*').to_string();
-                self.routes_fast_match.push((match_path, shared));
-            }
-        }
-
-        self.routes_fast_match.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    }
-
-    fn merge_all_policies(&self) -> PolicyConfig {
-        let mut merged = PolicyConfig::default();
-        for gw in &self.gateways {
-            merged.merge_all(gw.policies.clone());
-        }
-        merged
-    }
 }
 
 static CONFIG_PATH_CELL: OnceLock<PathBuf> = OnceLock::new();
@@ -244,6 +166,10 @@ pub fn set_config_path(path: &str) -> Result<(), PathBuf> {
 
 pub fn get_config_path() -> &'static PathBuf {
     CONFIG_PATH_CELL.get_or_init(|| {
+        if let Ok(cfg) = std::env::var("CONFIG_PATH") {
+            return PathBuf::from(cfg);
+        }
+
         if cfg!(debug_assertions) {
             PathBuf::from(".config")
         } else if cfg!(target_os = "windows") {

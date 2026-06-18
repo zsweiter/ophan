@@ -7,7 +7,7 @@ fn bench_insert_exact(c: &mut Criterion) {
         b.iter(|| {
             let mut router = Router::<u32>::new();
             for i in 0..10_000 {
-                let path = format!("/route/{}", i);
+                let path = format!("/route/{i}");
                 black_box(router.add_route(None, &path, HttpMethodSet::all(), i).unwrap());
             }
         });
@@ -17,7 +17,7 @@ fn bench_insert_exact(c: &mut Criterion) {
 fn bench_match_exact(c: &mut Criterion) {
     let mut router = Router::<u32>::new();
     for i in 0..10_000 {
-        let path = format!("/route/{}", i);
+        let path = format!("/route/{i}");
         router.add_route(None, &path, HttpMethodSet::all(), i).unwrap();
     }
     c.bench_function("match_10k_exact_hit", |b| {
@@ -34,7 +34,7 @@ fn bench_match_exact(c: &mut Criterion) {
 fn bench_match_exact_miss(c: &mut Criterion) {
     let mut router = Router::<u32>::new();
     for i in 0..1_000 {
-        let path = format!("/route/{}", i);
+        let path = format!("/route/{i}");
         router.add_route(None, &path, HttpMethodSet::all(), i).unwrap();
     }
     c.bench_function("match_1k_exact_miss", |b| {
@@ -47,7 +47,7 @@ fn bench_match_exact_miss(c: &mut Criterion) {
 fn bench_match_param(c: &mut Criterion) {
     let mut router = Router::<u32>::new();
     for i in 0..1_000 {
-        let path = format!("/users/{}/posts/{}", i, i);
+        let path = format!("/users/{i}/posts/{i}");
         router.add_route(None, &path, HttpMethodSet::all(), i).unwrap();
     }
     // Also add a param route
@@ -79,7 +79,7 @@ fn bench_match_catch_all(c: &mut Criterion) {
     let mut router = Router::<u32>::new();
     // Many specific routes + catch-all
     for i in 0..1_000 {
-        let path = format!("/specific/route/{}", i);
+        let path = format!("/specific/route/{i}");
         router.add_route(None, &path, HttpMethodSet::all(), i).unwrap();
     }
     router.add_route(None, "/*", HttpMethodSet::all(), 999).unwrap();
@@ -118,7 +118,7 @@ fn bench_match_regex_miss(c: &mut Criterion) {
 fn bench_host_resolution(c: &mut Criterion) {
     let mut router = Router::<u32>::new();
     for i in 0..5_000 {
-        let host = format!("host{}.example.com", i);
+        let host = format!("host{i}.example.com");
         router.add_route(Some(&host), "/", HttpMethodSet::all(), i).unwrap();
     }
     router.add_route(Some("*.wild.com"), "/", HttpMethodSet::all(), 999).unwrap();
@@ -176,7 +176,7 @@ fn bench_insert_and_match_many_vhosts(c: &mut Criterion) {
         b.iter(|| {
             let mut router = Router::<u32>::new();
             for v in 0..100 {
-                let host = format!("vhost{}.test.com", v);
+                let host = format!("vhost{v}.test.com");
                 for r in 0..100 {
                     let path = format!("/route/{}", r);
                     router.add_route(Some(&host), &path, HttpMethodSet::new(HttpMethod::GET), v * 100 + r).unwrap();
@@ -184,9 +184,9 @@ fn bench_insert_and_match_many_vhosts(c: &mut Criterion) {
             }
             // Verify a few
             for v in 0..100 {
-                let host = format!("vhost{}.test.com", v);
+                let host = format!("vhost{v}.test.com");
                 for r in (0..100).step_by(10) {
-                    let path = format!("/route/{}", r);
+                    let path = format!("/route/{r}");
                     let m = router.find_route(Some(&host), "GET", &path).unwrap();
                     black_box(*m.value);
                 }

@@ -38,7 +38,6 @@ impl ShutdownSignalWatch for UnixShutdownSignalWatch {
                         },
                         ReloadOutcome::NoChange => {},
                     }
-                    continue;
                 },
                 _ = sigterm.recv() => {
                     return ShutdownSignal::GracefulTerminate

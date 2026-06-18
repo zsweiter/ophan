@@ -61,7 +61,7 @@ impl fmt::Display for ConfigError {
 /// (SSL certs), port conflicts, and duplicate names. Accumulates ALL errors
 /// in a single pass so the user gets complete feedback.
 pub fn validate_config(config: &OphanConfig) -> Vec<ConfigError> {
-    let mut errors = Vec::new();
+    let mut errors = Vec::with_capacity(2);
 
     validate_upstream_refs(&mut errors, &config.routes, &config.upstreams_index);
     validate_policy_refs(&mut errors, &config.routes, config);
@@ -126,8 +126,7 @@ fn check_waf_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &O
                 ));
             }
         },
-        Some(RouteWafPolicy::Local(_)) => {}, // inline config, always valid
-        None => {},
+        Some(RouteWafPolicy::Local(_)) | None => {}, // inline config, always valid
     }
 }
 
@@ -154,8 +153,7 @@ fn check_auth_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
                 ));
             }
         },
-        Some(RouteAuthPolicy::Local(_)) => {},
-        None => {},
+        Some(RouteAuthPolicy::Local(_)) | None => {},
     }
 }
 
@@ -182,8 +180,7 @@ fn check_cors_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
                 ));
             }
         },
-        Some(RouteCorsPolicy::Local(_)) => {},
-        None => {},
+        Some(RouteCorsPolicy::Local(_)) | None => {},
     }
 }
 
@@ -213,8 +210,7 @@ fn check_limiter_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config
                 ));
             }
         },
-        Some(RouteLimiterPolicy::Local(_)) => {},
-        None => {},
+        Some(RouteLimiterPolicy::Local(_)) | None => {},
     }
 }
 
@@ -354,7 +350,7 @@ mod tests {
             balance_strategy: crate::config::parts::BalanceStrategy::RoundRobin,
             health_check: None,
         });
-        cfg.upstreams.push(upstream.clone());
+        cfg.upstreams.push(Arc::clone(&upstream));
         cfg.upstreams_index.insert("api".into(), upstream);
         let route = RoutesConfig {
             path: "/secure/*".into(),

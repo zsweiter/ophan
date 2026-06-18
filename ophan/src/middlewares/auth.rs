@@ -39,7 +39,7 @@ impl AuthMiddleware {
         }
     }
 
-    fn map_auth_error(err: AuthError) -> GatewayError {
+    fn map_auth_error(err: &AuthError) -> GatewayError {
         match err {
             AuthError::JwtValidation { kind: JwtErrorKind::Expired, .. }
             | AuthError::InvalidAccessToken
@@ -81,7 +81,11 @@ impl AuthMiddleware {
             is_mutated: false,
         };
 
-        let claims = self.auth_service.authenticate(&mut auth_ctx, auth_config).await.map_err(Self::map_auth_error)?;
+        let claims = self
+            .auth_service
+            .authenticate(&mut auth_ctx, auth_config)
+            .await
+            .map_err(|e| Self::map_auth_error(&e))?;
         Ok(AuthClaims { claims: Some(claims), refresh_token: auth_ctx.refresh_token })
     }
 
@@ -100,7 +104,7 @@ impl AuthMiddleware {
             Ok(claims) => Ok(AuthClaims { claims: Some(claims), refresh_token: auth_ctx.refresh_token }),
             Err(err) => {
                 tracing::warn!(error = %err, "refresh and authenticate failed");
-                Err(Self::map_auth_error(err))
+                Err(Self::map_auth_error(&err))
             },
         }
     }
@@ -112,13 +116,13 @@ impl AuthMiddleware {
         if let Some(ref_cfg) = oauth_cfg.refresh_token.as_ref()
             && ref_cfg.enabled
         {
-            refresh_token = Self::extract_token_from(headers, uri, std::slice::from_ref(&ref_cfg.source))
+            refresh_token = Self::extract_token_from(headers, uri, std::slice::from_ref(&ref_cfg.source));
         }
 
         PartialTokens { acces_token, refresh_token }
     }
 
-    fn strip_prefix<'a>(value: &'a str, prefix: &Option<String>) -> Option<&'a str> {
+    fn strip_prefix<'a>(value: &'a str, prefix: Option<&String>) -> Option<&'a str> {
         match prefix {
             Some(p) => value.strip_prefix(p.as_str()),
             None => Some(value),
@@ -129,18 +133,18 @@ impl AuthMiddleware {
         for source in sources {
             let token: Option<&str> = match source {
                 TokenSource::Header { name, prefix } => {
-                    headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| Self::strip_prefix(v, prefix))
+                    headers.get(name).and_then(|v| v.to_str().ok()).and_then(|v| Self::strip_prefix(v, prefix.as_ref()))
                 },
                 TokenSource::QueryParam { name, prefix } => uri.query().and_then(|query| {
                     query.split('&').find_map(|pair| {
                         let (k, v) = pair.split_once('=')?;
-                        (k == name).then(|| Self::strip_prefix(v, prefix)).flatten()
+                        (k == name).then(|| Self::strip_prefix(v, prefix.as_ref())).flatten()
                     })
                 }),
                 TokenSource::Cookie { name, prefix } => headers.get("cookie").and_then(|v| v.to_str().ok()).and_then(|cookies| {
                     cookies.split(';').find_map(|cookie| {
                         let (k, v) = cookie.trim().split_once('=')?;
-                        (k == name).then(|| Self::strip_prefix(v, prefix)).flatten()
+                        (k == name).then(|| Self::strip_prefix(v, prefix.as_ref())).flatten()
                     })
                 }),
             };
