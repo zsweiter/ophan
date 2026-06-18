@@ -1,6 +1,6 @@
 [package]
 name = "ophan"
-version = "0.1.1"
+version = "0.1.22"
 edition = "2024"
 
 [dependencies]
@@ -10,10 +10,7 @@ ophan-waf = { path = "../libs/ophan-waf" }
 ophan-static = { path = "../libs/ophan-static" }
 ophan-router = { path = "../libs/ophan-router" }
 
-pingora = { workspace = true, features = [
-    "proxy",
-    "s2n",
-] }
+pingora = { workspace = true, features = ["proxy", "s2n"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -44,9 +41,24 @@ parking_lot = { workspace = true }
 ahash = { workspace = true }
 
 ## Used for loggs
-tracing = { workspace = true, features = ["max_level_debug", "release_max_level_warn"]}
+tracing = { workspace = true, features = [
+    "max_level_debug",
+    "release_max_level_warn",
+] }
 tracing-log = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "~0.31.1", default-features = false, features = [
+    "signal",
+    "user",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
 
 [dev-dependencies]
 httpmock = "0.8.3"

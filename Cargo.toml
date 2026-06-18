@@ -42,7 +42,7 @@ parking_lot = "0.12.5"
 ahash = "0.8.12"
 
 ## Used for loggs
-tracing = { version = "0.1.44", features = ["release_max_level_warn"]}
+tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 tracing-log = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 

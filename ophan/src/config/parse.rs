@@ -1,8 +1,8 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
-use std::{env, fs};
 
 use crate::config::dsl_parser::{MasterConfig, parse_gateway_config, parse_master_config};
 use crate::config::errors::ConfigError;
@@ -86,7 +86,7 @@ impl OphanConfig {
             let include_path = PathBuf::from(include);
 
             if include.ends_with("*.conf") || include.ends_with(".conf") {
-                let parent = include_path.parent().unwrap_or(&config_base);
+                let parent = include_path.parent().unwrap_or(config_base);
 
                 if parent.is_dir() && parent.exists() {
                     let entries = fs::read_dir(parent)?;
@@ -236,23 +236,27 @@ impl OphanConfig {
     }
 }
 
-fn get_config_path() -> PathBuf {
-    if let Ok(path) = env::var("CONFIG_PATH") {
-        return PathBuf::from(path);
-    }
+static CONFIG_PATH_CELL: OnceLock<PathBuf> = OnceLock::new();
 
-    if cfg!(debug_assertions) {
-        PathBuf::from(".config")
-    } else if cfg!(target_os = "windows") {
-        PathBuf::from("C:\\ophan-gateway\\conf")
-    } else if cfg!(target_os = "macos") {
-        let homebrew = PathBuf::from("/opt/homebrew/etc/ophan");
-        if homebrew.exists() {
-            homebrew
+pub fn set_config_path(path: &str) -> Result<(), PathBuf> {
+    CONFIG_PATH_CELL.set(PathBuf::from(path))
+}
+
+pub fn get_config_path() -> &'static PathBuf {
+    CONFIG_PATH_CELL.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            PathBuf::from(".config")
+        } else if cfg!(target_os = "windows") {
+            PathBuf::from("C:\\ophan-gateway\\conf")
+        } else if cfg!(target_os = "macos") {
+            let homebrew = PathBuf::from("/opt/homebrew/etc/ophan");
+            if homebrew.exists() {
+                homebrew
+            } else {
+                PathBuf::from("/usr/local/etc/ophan")
+            }
         } else {
-            PathBuf::from("/usr/local/etc/ophan")
+            PathBuf::from("/etc/ophan")
         }
-    } else {
-        PathBuf::from("/etc/ophan")
-    }
+    })
 }

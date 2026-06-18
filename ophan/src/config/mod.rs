@@ -10,8 +10,9 @@ mod parse_test;
 
 #[allow(unused)]
 pub use dsl_parser::MasterConfig;
+pub use dsl_parser::parse_master_config;
 #[allow(unused)]
-pub use parse::{ConfigFileTracker, OphanConfig};
+pub use parse::{ConfigFileTracker, OphanConfig, set_config_path};
 
 pub use errors::ConfigError;
 

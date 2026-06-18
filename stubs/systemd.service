@@ -10,7 +10,7 @@ Type=simple
 EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
 Environment="CONFIG_PATH=@CONFIGDIR@"
-ExecStart=@SBINDIR@/ophan
+ExecStart=@SBINDIR@/ophan -c @CONFIGDIR@
 ExecReload=@SBINDIR@/ophan
 ExecReload=/bin/kill -USR2 $MAINPID
 KillMode=mixed
