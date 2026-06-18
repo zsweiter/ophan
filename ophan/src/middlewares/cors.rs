@@ -4,6 +4,7 @@ use crate::middlewares::RequestOutcome;
 use http::{HeaderValue, Method, Response, header, request::Parts as RequestParts, response::Parts as ResponseParts};
 use pingora::ErrorType;
 
+#[derive(Default)]
 pub struct CorsMiddleware;
 
 impl CorsMiddleware {

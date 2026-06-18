@@ -45,6 +45,7 @@ pub struct GcraState {
     tat: Instant,
 }
 
+#[derive(Default)]
 pub struct RateLimiter {
     states: DashMap<LimiterKey, GcraState>,
 }
