@@ -61,8 +61,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rayon = "1.12.0"
 
 [profile.dev]
+debug = 1
 opt-level = 0
-debug = true
 
 [profile.bench]
 debug = true
@@ -73,3 +73,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.test]
+debug = 1
