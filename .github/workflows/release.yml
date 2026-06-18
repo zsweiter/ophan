@@ -64,10 +64,14 @@ jobs:
               uses: actions-rust-lang/setup-rust-toolchain@v1
               with:
                   target: ${{ matrix.target }}
+                  cache: true
 
             - name: Build release
               run: cargo build --release --target ${{ matrix.target }}
+              env:
+                  CARGO_BUILD_JOBS: ${{ matrix.os == 'ubuntu-latest' && 4 || 3 }}
 
+            
             - name: Install UPX
               if: matrix.os == 'ubuntu-latest'
               run: sudo apt-get update && sudo apt-get install -y upx
@@ -113,10 +117,38 @@ jobs:
                     zip -r "$NAME.zip" "$NAME"
                   fi
 
-                  sha256sum "$NAME.${{ matrix.ext }}" > "$NAME.${{ matrix.ext }}.sha256" || true
+                  if command -v sha256sum >/dev/null 2>&1; then
+                    sha256sum "$NAME.${{ matrix.ext }}" > "$NAME.${{ matrix.ext }}.sha256"
+                  elif command -v shasum >/dev/null 2>&1; then
+                    shasum -a 256 "$NAME.${{ matrix.ext }}" > "$NAME.${{ matrix.ext }}.sha256"
+                  fi
 
             - name: Upload artifact
               uses: actions/upload-artifact@v7
               with:
                   name: ${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
-                  path: dist/*
+                  path: dist/ophan-*
+
+    release:
+        name: Upload to GitHub Release
+        needs: build
+        runs-on: ubuntu-latest
+        steps:
+            - name: Download all artifacts
+              uses: actions/download-artifact@v8
+              with:
+                  path: all_artifacts
+                  merge-multiple: true
+
+            - name: Publish Assets
+              uses: softprops/action-gh-release@v6
+              with:
+                  tag_name: ${{ github.ref_name }}
+                  files: |
+                      all_artifacts/*.tar.gz
+                      all_artifacts/*.zip
+                      all_artifacts/*.sha256
+                  fail_on_unmatched_files: false
+                  overwrite: true
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

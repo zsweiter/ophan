@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "ophan"
-version = "0.1.16"
+version = "0.1.17"
 dependencies = [
  "ahash",
  "aho-corasick",
