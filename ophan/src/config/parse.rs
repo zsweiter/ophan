@@ -5,9 +5,10 @@ use std::time::SystemTime;
 use std::{env, fs};
 
 use crate::config::dsl_parser::{MasterConfig, parse_gateway_config, parse_master_config};
+use crate::config::errors::ConfigError;
 use crate::config::parts::{GatewayConfig, ListenerConfig, MAX_CONFIG_FILE_SIZE, PolicyConfig, RoutesConfig, UpstreamConfig};
 
-fn read_config_file(path: &PathBuf) -> Result<String, Box<dyn std::error::Error>> {
+fn read_config_file(path: &PathBuf) -> Result<String, ConfigError> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > MAX_CONFIG_FILE_SIZE {
         let message = format!(
@@ -32,17 +33,17 @@ pub struct ConfigFileTracker {
 
 #[allow(unused)] // For now 
 impl ConfigFileTracker {
-    pub fn new(path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(path: PathBuf) -> Result<Self, ConfigError> {
         let mtime = fs::metadata(&path)?.modified()?;
         Ok(Self { path, last_mtime: mtime })
     }
 
-    pub fn has_changed(&self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn has_changed(&self) -> Result<bool, ConfigError> {
         let current = fs::metadata(&self.path)?.modified()?;
         Ok(current > self.last_mtime)
     }
 
-    pub fn refresh_mtime(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn refresh_mtime(&mut self) -> Result<(), ConfigError> {
         self.last_mtime = fs::metadata(&self.path)?.modified()?;
         Ok(())
     }
@@ -66,7 +67,7 @@ pub struct OphanConfig {
 }
 
 impl OphanConfig {
-    pub fn parse() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn parse() -> Result<Self, ConfigError> {
         let config_base = get_config_path();
         let master_path = config_base.join("master.conf");
 
@@ -92,7 +93,7 @@ impl OphanConfig {
                     let mut paths: Vec<PathBuf> = entries
                         .filter_map(|e| e.ok())
                         .map(|e| e.path())
-                        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("conf"))
+                        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("conf"))
                         .collect();
 
                     paths.sort();

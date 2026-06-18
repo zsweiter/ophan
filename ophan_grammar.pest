@@ -35,7 +35,7 @@ gateway_file = { SOI ~ gateway_body* ~ EOI }
 master_block = { "master" ~ string ~ "{" ~ master_entry* ~ "}" }
 master_entry = _{ master_user | master_workers | master_pid | master_error_log | master_includes }
 master_user = { "user" ~ "=" ~ string }
-master_workers = { "workers" ~ "=" ~ string }
+master_workers = { "workers" ~ "=" ~ ( string | number ) }
 master_pid = { "pid" ~ "=" ~ string }
 master_error_log = { "error_log" ~ "=" ~ string }
 master_includes = { "includes" ~ "=" ~ string }

@@ -44,6 +44,7 @@ scripts/copy-certs.sh
 perf.data
 perf.data.old
 scripts/bench.sh
+scripts/benches.sh
 
 
 dist/

@@ -51,7 +51,6 @@ impl From<StatusCode> for GatewayError {
             StatusCode::SERVICE_UNAVAILABLE => GatewayError::ServiceUnavailable(Cow::Borrowed("Service Unavailable")),
             StatusCode::GATEWAY_TIMEOUT => GatewayError::GatewayTimeout,
 
-            // Cualquier otro error 5xx o no mapeado explícitamente caerá aquí por seguridad
             _ => GatewayError::InternalServerError(Cow::Borrowed("Internal Server Error")),
         }
     }

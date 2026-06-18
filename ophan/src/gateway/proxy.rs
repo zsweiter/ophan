@@ -1,4 +1,3 @@
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use pingora::http::RequestHeader;
 use pingora::prelude::*;
@@ -10,7 +9,7 @@ use std::time::Duration;
 use crate::config::{
     BackendTarget, BalanceStrategy, Http2Mode, NetworkProtocol, NetworkTransport, OphanConfig, StaticUpstream, UpstreamConfig,
 };
-use crate::gateway::app_ctx::{AppContext, CompiledRoute};
+use crate::gateway::app_ctx::CompiledRoute;
 use crate::gateway::balancer::{Backend, LoadBalancer};
 use crate::gateway::errors::GatewayError;
 use crate::gateway::utils::{StackString, get_real_client_ip};
@@ -19,6 +18,7 @@ use crate::middlewares::cors::CorsMiddleware;
 use crate::middlewares::limiter::{RateLimitMiddleware, RateLimiter};
 use crate::middlewares::waf::WafEngineMiddleware;
 use crate::middlewares::{Pipeline, RequestOutcome};
+use crate::state::AppState;
 
 use ophan_auth::{AuthService, Claims, JwksManager, JwtConfig, JwtValidator, OAuth2Client};
 use ophan_net::proxy::Session;
@@ -48,7 +48,7 @@ pub struct OphanCtx {
 }
 
 pub struct OphanGateway {
-    pub app_state: ArcSwap<AppContext>,
+    pub app_state: Arc<AppState>,
     pub load_balancer: LoadBalancer,
     pub pipeline: Pipeline,
     pub file_server: FileServer,
@@ -75,7 +75,7 @@ impl ProxyHttp for OphanGateway {
         let request_host = request_headers.headers.get("Host").and_then(|v| v.to_str().ok());
         let request_method = request_headers.method.as_str();
 
-        let state = self.app_state.load();
+        let state = self.app_state.context.load();
 
         let matched = match state.router.find_route(request_host, request_method, request_path) {
             Ok(m) => m,
@@ -360,7 +360,7 @@ impl ProxyHttp for OphanGateway {
 }
 
 impl OphanGateway {
-    pub fn new(app_state: ArcSwap<AppContext>, config: &OphanConfig) -> Self {
+    pub fn new(app_state: Arc<AppState>, config: &OphanConfig) -> Self {
         let load_balancer = LoadBalancer::new();
 
         for upstream in &config.upstreams {

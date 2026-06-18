@@ -6,6 +6,7 @@ Wants=network-online.target
 ConditionFileIsExecutable=@SBINDIR@/ophan
 
 [Service]
+Type=simple
 EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
 Environment="CONFIG_PATH=@CONFIGDIR@"
@@ -15,7 +16,6 @@ ExecReload=/bin/kill -USR2 $MAINPID
 KillMode=mixed
 Restart=always
 SuccessExitStatus=143
-Type=simple
 #Type=notify
 LimitNOFILE=65535
 

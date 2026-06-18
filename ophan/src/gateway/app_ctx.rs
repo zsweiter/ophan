@@ -8,7 +8,8 @@ use ophan_waf::config::WafConfig;
 use ophan_auth::AuthConfig;
 use ophan_net::http::{HttpMethod, HttpMethodSet};
 
-use crate::config::validate::{ConfigError, validate_config};
+use crate::config::ConfigError;
+use crate::config::validate;
 use crate::config::{
     BackendTarget, CorsConfig, LimiterConfig, OAuthConfig, OphanConfig, RouteStreaming, RouteTimeouts, UpstreamConfig,
 };
@@ -67,13 +68,13 @@ impl CompiledRoute {
 /// 3. Constructs the radix tree router with `Arc<CompiledRoute>` values
 /// 4. Builds the upstreams map
 pub fn build_app_context(config: &OphanConfig) -> Result<AppContext, Vec<ConfigError>> {
-    let errors = validate_config(config);
+    let errors = validate::validate_config(config);
     if !errors.is_empty() {
-        return Err(errors);
+        return Err(errors.into_iter().map(Into::into).collect());
     }
 
-    let mut router = Router::new();
-    let mut upstreams = HashMap::new();
+    let mut router = Router::with_capacity(config.routes.len());
+    let mut upstreams = HashMap::with_capacity(config.upstreams.len());
 
     for upstream in &config.upstreams {
         upstreams.insert(upstream.name.clone(), upstream.clone());

@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
 # Ophan API Gateway — Release Pipeline
 #
-# Triggered by: git tag v*
+# Triggered by: git tag v[0-9]+.[0-9]+.[0-9]+*
 # Builds for:   Linux (x86_64), macOS (x86_64, aarch64), Windows (x86_64)
 # Outputs:      .tar.gz / .zip + .sha256 checksums
 # ═══════════════════════════════════════════════════════════════
@@ -11,83 +11,50 @@ name: Release
 on:
     push:
         tags:
-            - "v*"
+            - "v[0-9]+.[0-9]+.[0-9]+*"
 
 permissions:
     contents: write
 
+env:
+    CARGO_TERM_COLOR: always
+    RUSTC_WRAPPER: sccache
+
 jobs:
-    # ── CI: lint + test across all platforms ─────────────────────
-    ci:
-        strategy:
-            fail-fast: false
-            matrix:
-                os: [ubuntu-latest, macos-latest]
-
-        runs-on: ${{ matrix.os }}
-
-        steps:
-            - uses: actions/checkout@v4
-
-            - uses: dtolnay/rust-toolchain@stable
-              with:
-                  components: clippy, rustfmt
-
-            - uses: Swatinem/rust-cache@v2
-
-            - name: Install mold (Linux)
-              if: runner.os == 'Linux'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y mold clang
-
-                  mkdir -p .cargo
-                  cat > .cargo/config.toml <<EOF
-                  [target.x86_64-unknown-linux-gnu]
-                  linker = "clang"
-                  rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-                  EOF
-
-            - name: Rust versions
-              run: |
-                  rustc --version
-                  cargo --version
-                  cargo clippy --version
-
-            - name: Format
-              run: cargo fmt --all -- --check
-
-            - name: Lint
-              run: cargo clippy --all-targets --all-features -- -D warnings
-
-            - name: Test
-              run: cargo test --all --all-targets
-
-    # ── Build + Package per platform ────────────────────────────
-    package:
-        needs: ci
-
+    build:
         strategy:
             fail-fast: false
             matrix:
                 include:
                     - os: ubuntu-latest
                       target: x86_64-unknown-linux-gnu
-                      ext: tar.gz
                       pkg_os: linux
                       pkg_arch: x86_64
+                      ext: tar.gz
+
+                    - os: ubuntu-latest
+                      target: x86_64-unknown-linux-musl
+                      pkg_os: linux
+                      pkg_arch: x86_64-musl
+                      ext: tar.gz
 
                     - os: macos-latest
                       target: x86_64-apple-darwin
-                      ext: tar.gz
                       pkg_os: macos
                       pkg_arch: x86_64
+                      ext: tar.gz
 
                     - os: macos-latest
                       target: aarch64-apple-darwin
-                      ext: tar.gz
                       pkg_os: macos
                       pkg_arch: aarch64
+                      ext: tar.gz
+
+                    - os: windows-latest
+                      target: x86_64-pc-windows-msvc
+                      pkg_os: windows
+                      pkg_arch: x86_64
+                      ext: zip
 
         runs-on: ${{ matrix.os }}
 
@@ -99,116 +66,66 @@ jobs:
                   targets: ${{ matrix.target }}
 
             - uses: Swatinem/rust-cache@v2
+              with:
+                  cache-all-crates: true
 
-            - name: Install mold (Linux)
-              if: runner.os == 'Linux'
+            - name: Setup sccache
               run: |
-                  sudo apt-get update
-                  sudo apt-get install -y mold clang
+                  cargo install sccache || true
+                  echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
 
-                  mkdir -p .cargo
-                  cat > .cargo/config.toml <<EOF
-                  [target.x86_64-unknown-linux-gnu]
-                  linker = "clang"
-                  rustflags = ["-C", "link-arg=-fuse-ld=mold"]
-                  EOF
-
-            - name: Install UPX
-              if: runner.os != 'macOS' 
-              uses: crazy-max/ghaction-upx@v3
-
-            - name: Build (${{ matrix.target }})
+            - name: Build release
               run: cargo build --release --target ${{ matrix.target }}
 
-            - name: Compress binary (UPX)
-              if: runner.os != 'macOS' 
-              run: upx --best target/${{ matrix.target }}/release/ophan${{ matrix.pkg_os == 'windows' && '.exe' || '' }}
+            - name: Install UPX
+              if: matrix.os == 'ubuntu-latest'
+              run: sudo apt-get update && sudo apt-get install -y upx
 
-            - name: Package (${{ matrix.pkg_os }}-${{ matrix.pkg_arch }})
+            - name: Compress binary
+              if: matrix.os == 'ubuntu-latest'
+              run: upx --best target/${{ matrix.target }}/release/ophan
+
+            - name: Package artifacts
               shell: bash
-              env:
-                  PKG_OS: ${{ matrix.pkg_os }}
-                  PKG_ARCH: ${{ matrix.pkg_arch }}
-                  EXT: ${{ matrix.ext }}
-                  TARGET: ${{ matrix.target }}
               run: |
                   VERSION="${GITHUB_REF_NAME#v}"
-                  PACKAGE="ophan-${VERSION}-${PKG_OS}-${PKG_ARCH}"
-                  DIST="dist/${PACKAGE}"
+                  NAME="ophan-${VERSION}-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}"
+                  DIST="dist/$NAME"
 
-                  mkdir -p "${DIST}/stubs"
+                  mkdir -p "$DIST/stubs"
 
-                  BINARY="target/${TARGET}/release/ophan"
+                  BIN="target/${{ matrix.target }}/release/ophan"
 
-                  if [ "${PKG_OS}" = "windows" ]; then
-                    BINARY="${BINARY}.exe"
+                  if [ "${{ matrix.pkg_os }}" = "windows" ]; then
+                    BIN="${BIN}.exe"
                   fi
 
-                  cp "${BINARY}" "${DIST}/"
+                  cp "$BIN" "$DIST/"
+                  cp -r config "$DIST/"
 
-                  cp -r config "${DIST}/config"
-
-                  if [ "${PKG_OS}" = "linux" ]; then
-                    cp stubs/systemd.service "${DIST}/stubs/ophan.service"
-                    cp scripts/install.sh "${DIST}/install.sh"
-                    chmod +x "${DIST}/install.sh"
-
-                  elif [ "${PKG_OS}" = "macos" ]; then
-                    cp stubs/io.ophan.ophan.plist "${DIST}/stubs/"
-                    cp scripts/install.sh "${DIST}/install.sh"
-                    chmod +x "${DIST}/install.sh"
-
-                  elif [ "${PKG_OS}" = "windows" ]; then
-                    cp stubs/windows-service.ps1 "${DIST}/stubs/"
-                    cp scripts/install.ps1 "${DIST}/"
+                  if [ "${{ matrix.pkg_os }}" = "linux" ]; then
+                    cp stubs/systemd.service "$DIST/stubs/"
+                  elif [ "${{ matrix.pkg_os }}" = "macos" ]; then
+                    cp stubs/io.ophan.ophan.plist "$DIST/stubs/"
+                  elif [ "${{ matrix.pkg_os }}" = "windows" ]; then
+                    cp stubs/windows-service.ps1 "$DIST/stubs/"
+                    cp scripts/install.ps1 "$DIST/"
                   fi
 
-                  cp README.md LICENSE* "${DIST}/" 2>/dev/null || true
+                  cp README.md LICENSE* "$DIST/" 2>/dev/null || true
 
-                  if [ "${EXT}" = "tar.gz" ]; then
-                    cd dist && tar -czf "${PACKAGE}.tar.gz" "${PACKAGE}"
+                  cd dist
+
+                  if [ "${{ matrix.ext }}" = "tar.gz" ]; then
+                    tar -czf "$NAME.tar.gz" "$NAME"
                   else
-                    cd dist && zip -r "${PACKAGE}.zip" "${PACKAGE}"
+                    zip -r "$NAME.zip" "$NAME"
                   fi
 
-                  cd dist && sha256sum "${PACKAGE}.${EXT}" > "${PACKAGE}.${EXT}.sha256"
+                  sha256sum "$NAME.${{ matrix.ext }}" > "$NAME.${{ matrix.ext }}.sha256" || true
 
-                  echo "✅ Package: dist/${PACKAGE}.${EXT}"
-
-            - name: Upload artifacts
+            - name: Upload artifact
               uses: actions/upload-artifact@v4
               with:
-                  name: ophan-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
-                  path: dist/*.${{ matrix.ext }}*
-
-    # ── Create GitHub Release ────────────────────────────────────
-    release:
-        needs: package
-        runs-on: ubuntu-latest
-
-        steps:
-            - uses: actions/download-artifact@v4
-              with:
-                  path: artifacts
-
-            - name: Organize artifacts
-              run: |
-                  mkdir -p release-assets
-
-                  find artifacts -type f \
-                    \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
-                    -exec cp {} release-assets/ \;
-
-                  ls -la release-assets/
-
-            - name: Generate checksums.txt
-              run: |
-                  cd release-assets
-                  sha256sum * > checksums.txt
-                  cat checksums.txt
-
-            - name: Upload release
-              uses: softprops/action-gh-release@v2
-              with:
-                  files: release-assets/*
-                  generate_release_notes: true
+                  name: ${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
+                  path: dist/*

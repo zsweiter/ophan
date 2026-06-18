@@ -46,6 +46,20 @@ impl<T> Router<T> {
         Self::default()
     }
 
+    /// Construct router with routes capacity
+    ///
+    ///  This capacity only applied to routes
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut routes = Vec::with_capacity(capacity + 1);
+        routes.push(VirtualHost::new("__default__", HttpMethodSet::all()));
+
+        Self {
+            hosts_table: SniTableRouter::new(),
+            routes_bucket: routes,
+            default_id: 0,
+        }
+    }
+
     /// Add a route.
     ///
     /// - `host`: if `Some`, routes to the matching vhost (creates it if needed);

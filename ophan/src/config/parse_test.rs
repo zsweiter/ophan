@@ -2,6 +2,7 @@ use crate::config::dsl_parser::{parse_gateway_config, parse_master_config};
 use crate::config::parts::{
     BackendTarget, BalanceStrategy, Http2Mode, LimiterIdentifier, NetworkProtocol, NetworkTransport, SecurityConfig, TokenSource,
 };
+use crate::config::utils;
 use ophan_net::http::HttpMethod;
 
 use ophan_waf::config::WafMode;
@@ -22,7 +23,7 @@ master "ophan-01" {
 
     assert_eq!(master.name, "ophan-01");
     assert_eq!(master.user, "www-data");
-    assert_eq!(master.workers, "auto");
+    assert_eq!(master.workers, utils::get_parallel_size());
     assert_eq!(master.pid, "/run/ophan.pid");
     assert_eq!(master.error_log, "/var/log/ophan/error.log");
     assert_eq!(master.includes.len(), 1);

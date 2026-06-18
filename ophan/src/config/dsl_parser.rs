@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use ophan_net::http::{HttpMethod, HttpMethodSet};
 
+use crate::config::errors::ConfigError;
 use crate::config::parts::{
     BackendTarget, BalanceStrategy, CorsConfig, GatewayConfig, HealthCheckConfig, Http2Mode, LimiterConfig, LimiterIdentifier,
     LimiterRate, ListenerConfig, NetworkProtocol, NetworkTransport, OAuthConfig, PolicyConfig, RateLimitAlgorithm,
@@ -14,6 +15,7 @@ use crate::config::parts::{
     RouteWafPolicy, RoutesConfig, SSLConfig, SecurityConfig, StaticUpstream, TlsVersion, TokenSource, UpstreamConfig,
     UpstreamServer,
 };
+use crate::config::utils;
 
 use ophan_waf::config::{WafAction, WafCondition, WafConfig, WafMode, WafPhase, WafRule};
 
@@ -23,16 +25,16 @@ pub struct OphanConfigParser;
 
 #[derive(Clone)]
 pub struct MasterConfig {
+    #[allow(unused)]
     pub name: String,
     pub user: String,
-    #[allow(unused)]
-    pub workers: String,
+    pub workers: usize,
     pub pid: String,
     pub error_log: String,
     pub includes: Vec<String>,
 }
 
-pub fn parse_master_config(input: &str) -> Result<MasterConfig, Box<dyn std::error::Error>> {
+pub fn parse_master_config(input: &str) -> Result<MasterConfig, ConfigError> {
     let mut parsed = OphanConfigParser::parse(Rule::master_file, input)?;
     let root = parsed.next().unwrap();
     let master_block = root.into_inner().next().unwrap();
@@ -40,10 +42,10 @@ pub fn parse_master_config(input: &str) -> Result<MasterConfig, Box<dyn std::err
 
     let name = extract_string(inner.next().unwrap());
     let mut user = String::from("www-data");
-    let mut workers = String::from("auto");
+    let mut workers = 1;
     let mut pid = String::from("/run/ophan.pid");
     let mut error_log = String::from("/var/log/ophan/error.log");
-    let mut includes = Vec::new();
+    let mut includes = Vec::with_capacity(2);
 
     for entry in inner {
         match entry.as_rule() {
@@ -51,7 +53,7 @@ pub fn parse_master_config(input: &str) -> Result<MasterConfig, Box<dyn std::err
                 user = extract_string(entry.into_inner().next().ok_or("master: expected user value")?);
             },
             Rule::master_workers => {
-                workers = extract_string(entry.into_inner().next().ok_or("master: expected workers value")?);
+                workers = parse_workers_usage(entry.into_inner().next().ok_or("master: expected workers value")?)?;
             },
             Rule::master_pid => {
                 pid = extract_string(entry.into_inner().next().ok_or("master: expected pid value")?);
@@ -64,14 +66,14 @@ pub fn parse_master_config(input: &str) -> Result<MasterConfig, Box<dyn std::err
                     entry.into_inner().next().ok_or("master: expected includes value")?,
                 ));
             },
-            _ => return Err("unexpected entry in master block".into()),
+            _ => return Err(parse_err_at(&entry, "unexpected entry in master block")),
         }
     }
 
     Ok(MasterConfig { name, user, workers, pid, error_log, includes })
 }
 
-pub fn parse_gateway_config(input: &str) -> Result<GatewayConfig, Box<dyn std::error::Error>> {
+pub fn parse_gateway_config(input: &str) -> Result<GatewayConfig, ConfigError> {
     let mut parsed = OphanConfigParser::parse(Rule::gateway_file, input)?;
     let root = parsed.next().unwrap();
 
@@ -157,7 +159,7 @@ pub fn parse_gateway_config(input: &str) -> Result<GatewayConfig, Box<dyn std::e
     Ok(config)
 }
 
-fn validate_limits(config: &GatewayConfig) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_limits(config: &GatewayConfig) -> Result<(), ConfigError> {
     use crate::config::parts::{MAX_LISTENERS, MAX_POLICIES, MAX_ROUTES, MAX_UPSTREAMS};
 
     if config.listeners.len() > MAX_LISTENERS {
@@ -190,6 +192,28 @@ fn extract_string(pair: pest::iterators::Pair<Rule>) -> String {
     match pair.as_rule() {
         Rule::string => pair.into_inner().next().unwrap().as_str().to_string(),
         _ => pair.as_str().to_string(),
+    }
+}
+
+fn parse_workers_usage(pair: pest::iterators::Pair<Rule>) -> Result<usize, String> {
+    match pair.as_rule() {
+        Rule::string => {
+            let val = pair.as_str().trim_matches('"');
+
+            if val == "auto" {
+                Ok(utils::get_parallel_size())
+            } else {
+                Err(format!(
+                    "Invalid string value for workers: '{}'. Expected 'auto' or a number.",
+                    val
+                ))
+            }
+        },
+        Rule::number => {
+            let val = pair.as_str();
+            val.parse::<usize>().map_err(|e| format!("Failed to parse worker count '{}': {}", val, e))
+        },
+        rule => Err(format!("Unexpected value for workers: {:?}", rule)),
     }
 }
 
@@ -253,6 +277,11 @@ fn parse_rate(pair: pest::iterators::Pair<Rule>) -> LimiterRate {
     }
 }
 
+fn parse_err_at(pair: &pest::iterators::Pair<Rule>, msg: impl Into<String>) -> ConfigError {
+    let (line, col) = pair.line_col();
+    ConfigError::parse(msg).with_pos(line, col)
+}
+
 fn parse_transport(addr: &str) -> Result<NetworkTransport, String> {
     if addr.starts_with("unix:") {
         let path = addr.strip_prefix("unix:").unwrap_or(addr).to_string();
@@ -301,7 +330,7 @@ fn parse_balance_strategy(s: &str) -> Result<BalanceStrategy, String> {
     }
 }
 
-fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConfig>, Box<dyn std::error::Error>> {
+fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConfig>, ConfigError> {
     let mut listeners = Vec::new();
     for def in pair.into_inner() {
         if def.as_rule() == Rule::listener_def {
@@ -343,12 +372,12 @@ fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConf
                                     client_ca =
                                         Some(extract_string(kv.into_inner().next().ok_or("ssl: expected client_ca value")?));
                                 },
-                                _ => return Err("unexpected entry in ssl block".into()),
+                                _ => return Err(parse_err_at(&kv, "unexpected entry in ssl block")),
                             }
                         }
                         ssl = Some(SSLConfig { cert, key: key_path, client_ca });
                     },
-                    _ => return Err(format!("unexpected entry in listener '{}'", name).into()),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in listener '{}'", name))),
                 }
             }
 
@@ -365,6 +394,7 @@ fn parse_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<ListenerConf
             listeners.push(ListenerConfig { name, listen: vec![address], transport, security, protocols });
         }
     }
+
     Ok(listeners)
 }
 
@@ -389,7 +419,7 @@ fn extract_array(pair: pest::iterators::Pair<Rule>) -> Vec<String> {
         .collect()
 }
 
-fn parse_upstreams(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamConfig>, Box<dyn std::error::Error>> {
+fn parse_upstreams(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamConfig>, ConfigError> {
     let mut upstreams = Vec::new();
     for def in pair.into_inner() {
         if def.as_rule() == Rule::upstream_def {
@@ -427,36 +457,38 @@ fn parse_upstreams(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamConf
     Ok(upstreams)
 }
 
-fn parse_servers_value(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamServer>, Box<dyn std::error::Error>> {
-    let mut servers = Vec::new();
+fn parse_servers_value(pair: pest::iterators::Pair<Rule>) -> Result<Vec<UpstreamServer>, ConfigError> {
     let inner = pair.into_inner().next().ok_or("servers: expected value")?;
 
     match inner.as_rule() {
         Rule::string => {
             let addr = extract_string(inner);
-            servers.push(make_upstream_server(&addr, 1, None)?);
+            Ok(vec![make_upstream_server(&addr, 1, None)?])
         },
-        Rule::inline_object => {
-            servers.push(parse_inline_server(inner)?);
-        },
+        Rule::inline_object => Ok(vec![parse_inline_server(inner)?]),
         Rule::array => {
-            for item in inner.into_inner() {
+            let items = inner.into_inner();
+            let mut servers = Vec::with_capacity(items.len());
+
+            for item in items {
                 let obj = item.into_inner().next().ok_or("servers: expected inline object")?;
                 servers.push(parse_inline_server(obj)?);
             }
+
+            Ok(servers)
         },
-        _ => return Err("unexpected servers value format".to_string().into()),
+        _ => Err(parse_err_at(&inner, "unexpected servers value format")),
     }
-    Ok(servers)
 }
 
-fn parse_inline_server(pair: pest::iterators::Pair<Rule>) -> Result<UpstreamServer, Box<dyn std::error::Error>> {
-    let mut endpoint = String::new();
+fn parse_inline_server(pair: pest::iterators::Pair<Rule>) -> Result<UpstreamServer, ConfigError> {
+    let mut endpoint = String::with_capacity(50);
     let mut weight = 1u32;
     let mut protocol: Option<NetworkProtocol> = None;
 
     for kv in pair.into_inner() {
         if kv.as_rule() == Rule::inline_kv {
+            let pos = kv.line_col();
             let mut kv_inner = kv.into_inner();
             let key = kv_inner.next().ok_or("server: expected key")?.as_str().to_string();
             let val_inner = kv_inner.next().ok_or("server: expected value")?;
@@ -468,7 +500,11 @@ fn parse_inline_server(pair: pest::iterators::Pair<Rule>) -> Result<UpstreamServ
                     let proto_str = extract_string(val);
                     protocol = Some(parse_protocol(&proto_str).map_err(|e| format!("server endpoint '{}': {}", endpoint, e))?);
                 },
-                _ => return Err(format!("unexpected key '{}' in server definition", key).into()),
+                _ => {
+                    return Err(
+                        ConfigError::parse(format!("unexpected key '{}' in server definition", key)).with_pos(pos.0, pos.1)
+                    );
+                },
             }
         }
     }
@@ -488,7 +524,7 @@ fn make_upstream_server(addr: &str, weight: u32, protocol: Option<NetworkProtoco
     })
 }
 
-fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckConfig, Box<dyn std::error::Error>> {
+fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckConfig, ConfigError> {
     let mut path = "/".to_string();
     let mut interval = 10u64;
     let mut timeout = 5u64;
@@ -497,6 +533,7 @@ fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckCo
 
     for kv in pair.into_inner() {
         if kv.as_rule() == Rule::inline_kv {
+            let pos = kv.line_col();
             let mut kv_inner = kv.into_inner();
             let key = kv_inner.next().ok_or("health_check: expected key")?.as_str().to_string();
             let val_inner = kv_inner.next().ok_or("health_check: expected value")?;
@@ -507,7 +544,11 @@ fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckCo
                 "timeout" => timeout = parse_duration_to_secs(val),
                 "unhealthy_threshold" => unhealthy_threshold = extract_number(val) as u32,
                 "healthy_threshold" => healthy_threshold = extract_number(val) as u32,
-                _ => return Err(format!("unexpected key '{}' in health_check block", key).into()),
+                _ => {
+                    return Err(
+                        ConfigError::parse(format!("unexpected key '{}' in health_check block", key)).with_pos(pos.0, pos.1)
+                    );
+                },
             }
         }
     }
@@ -521,13 +562,16 @@ fn parse_health_check(pair: pest::iterators::Pair<Rule>) -> Result<HealthCheckCo
     })
 }
 
-fn parse_routes(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RoutesConfig>, Box<dyn std::error::Error>> {
-    let mut routes = Vec::new();
-    for def in pair.into_inner() {
+fn parse_routes(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RoutesConfig>, ConfigError> {
+    let items = pair.into_inner();
+    let mut routes = Vec::with_capacity(items.len());
+
+    for def in items {
         if def.as_rule() == Rule::route_def {
             routes.push(parse_single_route(def)?);
         }
     }
+
     Ok(routes)
 }
 
@@ -538,7 +582,7 @@ type DslRoutesPolicy = (
     Option<RouteLimiterPolicy>,
 );
 
-fn parse_single_route(pair: pest::iterators::Pair<Rule>) -> Result<RoutesConfig, Box<dyn std::error::Error>> {
+fn parse_single_route(pair: pest::iterators::Pair<Rule>) -> Result<RoutesConfig, ConfigError> {
     let mut inner = pair.into_inner();
     let path = extract_string(inner.next().unwrap());
 
@@ -616,7 +660,7 @@ fn parse_single_route(pair: pest::iterators::Pair<Rule>) -> Result<RoutesConfig,
                             let val = entry.into_inner().next().ok_or("headers: expected array")?;
                             _remove_headers = extract_array(val);
                         },
-                        _ => return Err("unexpected entry in headers block".into()),
+                        _ => return Err(parse_err_at(&entry, "unexpected entry in headers block")),
                     }
                 }
                 let existing = rewrite.get_or_insert(RouteRewrites {
@@ -663,7 +707,7 @@ fn parse_single_route(pair: pest::iterators::Pair<Rule>) -> Result<RoutesConfig,
     })
 }
 
-fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPolicy, Box<dyn std::error::Error>> {
+fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPolicy, ConfigError> {
     let mut auth: Option<RouteAuthPolicy> = None;
     let mut waf: Option<RouteWafPolicy> = None;
     let mut cors: Option<RouteCorsPolicy> = None;
@@ -936,13 +980,14 @@ fn parse_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<DslRoutesPo
     Ok((auth, waf, cors, limiter))
 }
 
-fn parse_timeouts_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteTimeouts, Box<dyn std::error::Error>> {
+fn parse_timeouts_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteTimeouts, ConfigError> {
     let mut connect: Option<Duration> = None;
     let mut read: Option<Duration> = None;
     let mut send: Option<Duration> = None;
 
     for kv in pair.into_inner() {
         let rule = kv.as_rule();
+        let pos = kv.line_col();
         let val_inner = kv.into_inner().next().ok_or("timeouts: expected value")?;
         let raw = val_inner.into_inner().next().ok_or("timeouts: expected value inner")?;
         let unquoted = if raw.as_rule() == Rule::string {
@@ -955,37 +1000,38 @@ fn parse_timeouts_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteTimeou
             Rule::timeout_connect => connect = Some(Duration::from_secs(secs)),
             Rule::timeout_read => read = Some(Duration::from_secs(secs)),
             Rule::timeout_send => send = Some(Duration::from_secs(secs)),
-            _ => return Err("unexpected key in timeouts block".into()),
+            _ => return Err(ConfigError::parse("unexpected key in timeouts block").with_pos(pos.0, pos.1)),
         }
     }
 
     Ok(RouteTimeouts { connect, read, send })
 }
 
-fn parse_streaming_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteStreaming, Box<dyn std::error::Error>> {
+fn parse_streaming_block(pair: pest::iterators::Pair<Rule>) -> Result<RouteStreaming, ConfigError> {
     let mut buffering = true;
     let mut chunked = true;
 
     for kv in pair.into_inner() {
         let rule = kv.as_rule();
+        let pos = kv.line_col();
         let val = kv.into_inner().next().ok_or("streaming: expected value")?;
         match rule {
             Rule::streaming_buffering => buffering = extract_bool(val),
             Rule::streaming_chunked => chunked = extract_bool(val),
-            _ => return Err("unexpected key in streaming block".into()),
+            _ => return Err(ConfigError::parse("unexpected key in streaming block").with_pos(pos.0, pos.1)),
         }
     }
 
     Ok(RouteStreaming { buffering, chunked })
 }
 
-fn parse_backend(pair: pest::iterators::Pair<Rule>) -> Result<BackendTarget, Box<dyn std::error::Error>> {
+fn parse_backend(pair: pest::iterators::Pair<Rule>) -> Result<BackendTarget, ConfigError> {
     let target = pair.into_inner().next().unwrap();
     let inner = target.into_inner().next().unwrap();
 
     match inner.as_rule() {
         Rule::backend_static => {
-            let mut root = String::new();
+            let mut root = String::with_capacity(255);
             let mut listing = false;
             let mut dotfiles = false;
             let mut permissions: Option<String> = None;
@@ -1009,7 +1055,7 @@ fn parse_backend(pair: pest::iterators::Pair<Rule>) -> Result<BackendTarget, Box
                     Rule::static_disallow => {
                         blacklist = extract_array(kv.into_inner().next().ok_or("static: expected disallow value")?);
                     },
-                    _ => return Err("unexpected key in static backend".into()),
+                    _ => return Err(parse_err_at(&kv, "unexpected key in static backend")),
                 }
             }
 
@@ -1025,11 +1071,12 @@ fn parse_backend(pair: pest::iterators::Pair<Rule>) -> Result<BackendTarget, Box
             let name_pair = inner.into_inner().next().unwrap();
             Ok(BackendTarget::Upstream(extract_string(name_pair)))
         },
-        _ => Err("Unknown backend type".into()),
+        _ => Err(parse_err_at(&inner, "Unknown backend type")),
     }
 }
 
-fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, String, PolicyConfig), Box<dyn std::error::Error>> {
+fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, String, PolicyConfig), ConfigError> {
+    let pos = pair.line_col();
     let mut inner = pair.into_inner();
     let ptype = inner.next().unwrap().as_str().to_string();
     let pname = extract_string(inner.next().unwrap());
@@ -1075,7 +1122,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::refresh_block => {
                         oauth.refresh_token = Some(parse_refresh_block(body));
                     },
-                    _ => return Err(format!("unexpected entry in auth policy '{}'", pname).into()),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in auth policy '{}'", pname))),
                 }
             }
 
@@ -1093,14 +1140,17 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                         waf.enabled = extract_bool(body.into_inner().next().ok_or("waf: expected enabled value")?);
                     },
                     Rule::waf_mode => {
+                        let pos = body.line_col();
                         let mode_str = extract_string(body.into_inner().next().ok_or("waf: expected mode value")?);
                         waf.mode = match mode_str.as_str() {
                             "detection_only" => WafMode::DetectionOnly,
                             "blocking" => WafMode::Blocking,
                             _ => {
-                                return Err(
-                                    format!("invalid waf mode '{}': expected detection_only or blocking", mode_str).into(),
-                                );
+                                return Err(ConfigError::parse(format!(
+                                    "invalid waf mode '{}': expected detection_only or blocking",
+                                    mode_str,
+                                ))
+                                .with_pos(pos.0, pos.1));
                             },
                         };
                     },
@@ -1118,7 +1168,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::rules_block => {
                         rules = parse_rules_block(body)?;
                     },
-                    _ => return Err(format!("unexpected entry in waf policy '{}'", pname).into()),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in waf policy '{}'", pname))),
                 }
             }
             waf.rules = rules;
@@ -1151,7 +1201,7 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::cors_excludes => {
                         cors.excludes = extract_array(body.into_inner().next().ok_or("cors: expected excludes value")?);
                     },
-                    _ => return Err(format!("unexpected entry in cors policy '{}'", pname).into()),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in cors policy '{}'", pname))),
                 }
             }
             let mut cors_map = HashMap::new();
@@ -1171,16 +1221,17 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                         limiter.burst = extract_number(body.into_inner().next().ok_or("limiter: expected burst value")?);
                     },
                     Rule::limiter_algorithm => {
+                        let pos = body.line_col();
                         let alg = extract_string(body.into_inner().next().ok_or("limiter: expected algorithm value")?);
                         limiter.algorithm = match alg.as_str() {
                             "token_bucket" => RateLimitAlgorithm::TokenBucket,
                             "sliding_window" => RateLimitAlgorithm::SlidingWindow,
                             _ => {
-                                return Err(format!(
+                                return Err(ConfigError::parse(format!(
                                     "invalid limiter algorithm '{}': expected token_bucket or sliding_window",
-                                    alg
-                                )
-                                .into());
+                                    alg,
+                                ))
+                                .with_pos(pos.0, pos.1));
                             },
                         };
                     },
@@ -1194,21 +1245,22 @@ fn parse_policy_block(pair: pest::iterators::Pair<Rule>) -> Result<(String, Stri
                     Rule::limiter_excludes => {
                         limiter.excludes = extract_array(body.into_inner().next().ok_or("limiter: expected excludes value")?);
                     },
-                    _ => return Err(format!("unexpected entry in limiter policy '{}'", pname).into()),
+                    _ => return Err(parse_err_at(&body, format!("unexpected entry in limiter policy '{}'", pname))),
                 }
             }
             let mut limiter_map = HashMap::new();
             limiter_map.insert(pname.clone(), limiter);
             policy.limiter = Some(limiter_map);
         },
-        _ => return Err(format!("unknown policy type '{}'", ptype).into()),
+        _ => return Err(ConfigError::parse(format!("unknown policy type '{}'", ptype)).with_pos(pos.0, pos.1)),
     }
 
     Ok((ptype, pname, policy))
 }
 
 fn parse_sources_block(pair: pest::iterators::Pair<Rule>) -> Vec<TokenSource> {
-    let mut sources = Vec::new();
+    let mut sources = Vec::with_capacity(3);
+
     for item in pair.into_inner() {
         if item.as_rule() == Rule::source_item {
             let mut inner = item.into_inner();
@@ -1240,6 +1292,7 @@ fn parse_sources_block(pair: pest::iterators::Pair<Rule>) -> Vec<TokenSource> {
             }
         }
     }
+
     sources
 }
 
@@ -1278,7 +1331,7 @@ fn parse_refresh_block(pair: pest::iterators::Pair<Rule>) -> RefreshTokenConfig 
     }
 }
 
-fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, Box<dyn std::error::Error>> {
+fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, ConfigError> {
     let mut rules = Vec::new();
     for def in pair.into_inner() {
         if def.as_rule() == Rule::rule_def {
@@ -1293,41 +1346,56 @@ fn parse_rules_block(pair: pest::iterators::Pair<Rule>) -> Result<Vec<WafRule>, 
             for kv in inner {
                 match kv.as_rule() {
                     Rule::rule_phase => {
+                        let pos = kv.line_col();
                         let p = extract_string(kv.into_inner().next().ok_or("rule: expected phase value")?);
                         phase = match p.as_str() {
                             "request_headers" => WafPhase::RequestHeaders,
                             "request_body" => WafPhase::RequestBody,
                             "response_headers" => WafPhase::ResponseHeaders,
                             "response_body" => WafPhase::ResponseBody,
-                            _ => return Err(format!(
+                            _ => return Err(ConfigError::parse(format!(
                                 "invalid phase '{}': expected request_headers, request_body, response_headers, or response_body",
                                 p
-                            )
-                            .into()),
+                            ))
+                            .with_pos(pos.0, pos.1)),
                         };
                     },
                     Rule::rule_condition => {
+                        let pos = kv.line_col();
                         let val = kv.into_inner().next().ok_or("rule: expected condition value")?;
                         let cond_str = val.as_str();
                         condition = match cond_str {
                             "sql_token_match" => WafCondition::SqlTokenMatch,
-                            _ => return Err(format!("invalid condition '{}': expected sql_token_match", cond_str).into()),
+                            _ => {
+                                return Err(ConfigError::parse(format!(
+                                    "invalid condition '{}': expected sql_token_match",
+                                    cond_str
+                                ))
+                                .with_pos(pos.0, pos.1));
+                            },
                         };
                     },
                     Rule::rule_action => {
+                        let pos = kv.line_col();
                         let a = extract_string(kv.into_inner().next().ok_or("rule: expected action value")?);
                         action = match a.as_str() {
                             "block" => WafAction::Block,
                             "log" => WafAction::Log,
                             "challenge" => WafAction::Challenge,
                             "allow" => WafAction::Allow,
-                            _ => return Err(format!("invalid action '{}': expected block, log, challenge, or allow", a).into()),
+                            _ => {
+                                return Err(ConfigError::parse(format!(
+                                    "invalid action '{}': expected block, log, challenge, or allow",
+                                    a
+                                ))
+                                .with_pos(pos.0, pos.1));
+                            },
                         };
                     },
                     Rule::rule_score => {
                         score = extract_number(kv.into_inner().next().ok_or("rule: expected score value")?) as u32;
                     },
-                    _ => return Err(format!("unexpected entry in rule '{}'", id).into()),
+                    _ => return Err(parse_err_at(&kv, format!("unexpected entry in rule '{}'", id))),
                 }
             }
 

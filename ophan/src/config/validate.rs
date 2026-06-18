@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -9,15 +9,42 @@ use crate::config::parts::{
 };
 use crate::config::{OphanConfig, UpstreamConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    E001, // Upstream references
+    E002, // Policy references
+    E003, // SSL certificate / key file existence
+    E004, // Port conflicts
+    E005, // Duplicate upstreams
+}
+
+impl ErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::E001 => "E001",
+            ErrorCode::E002 => "E002",
+            ErrorCode::E003 => "E003",
+            ErrorCode::E004 => "E004",
+            ErrorCode::E005 => "E005",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 /// A single configuration validation error.
 #[derive(Debug, Clone)]
 pub struct ConfigError {
-    pub code: &'static str,
+    pub code: ErrorCode,
     pub message: String,
 }
 
 impl ConfigError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
     }
 }
@@ -52,14 +79,14 @@ pub fn validate_config(config: &OphanConfig) -> Vec<ConfigError> {
 fn validate_upstream_refs(
     errors: &mut Vec<ConfigError>,
     routes: &[Arc<RoutesConfig>],
-    upstreams_index: &std::collections::HashMap<String, Arc<UpstreamConfig>>,
+    upstreams_index: &HashMap<String, Arc<UpstreamConfig>>,
 ) {
     for route in routes {
         if let BackendTarget::Upstream(name) = &route.backend
             && !upstreams_index.contains_key(name.as_str())
         {
             errors.push(ConfigError::new(
-                "E001",
+                ErrorCode::E001,
                 format!("route '{}' references upstream '{}' which is not defined", route.path, name,),
             ));
         }
@@ -85,7 +112,7 @@ fn check_waf_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &O
             let found = config.policies.waf.as_ref().and_then(|m| m.get(name)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!("route '{}' references waf policy '{}' which is not defined", route.path, name,),
                 ));
             }
@@ -94,7 +121,7 @@ fn check_waf_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &O
             let found = config.policies.waf.as_ref().and_then(|m| m.get(base)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!("route '{}' extends waf policy '{}' which is not defined", route.path, base,),
                 ));
             }
@@ -110,7 +137,7 @@ fn check_auth_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
             let found = config.policies.auth.as_ref().and_then(|m| m.get(name)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!(
                         "route '{}' references auth policy '{}' which is not defined",
                         route.path, name,
@@ -122,7 +149,7 @@ fn check_auth_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
             let found = config.policies.auth.as_ref().and_then(|m| m.get(base)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!("route '{}' extends auth policy '{}' which is not defined", route.path, base,),
                 ));
             }
@@ -138,7 +165,7 @@ fn check_cors_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
             let found = config.policies.cors.as_ref().and_then(|m| m.get(name)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!(
                         "route '{}' references cors policy '{}' which is not defined",
                         route.path, name,
@@ -150,7 +177,7 @@ fn check_cors_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config: &
             let found = config.policies.cors.as_ref().and_then(|m| m.get(base)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!("route '{}' extends cors policy '{}' which is not defined", route.path, base,),
                 ));
             }
@@ -166,7 +193,7 @@ fn check_limiter_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config
             let found = config.policies.limiter.as_ref().and_then(|m| m.get(name)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!(
                         "route '{}' references limiter policy '{}' which is not defined",
                         route.path, name,
@@ -178,7 +205,7 @@ fn check_limiter_ref(errors: &mut Vec<ConfigError>, route: &RoutesConfig, config
             let found = config.policies.limiter.as_ref().and_then(|m| m.get(base)).is_some();
             if !found {
                 errors.push(ConfigError::new(
-                    "E002",
+                    ErrorCode::E002,
                     format!(
                         "route '{}' extends limiter policy '{}' which is not defined",
                         route.path, base,
@@ -200,7 +227,7 @@ fn validate_ssl_files(errors: &mut Vec<ConfigError>, listeners: &[Arc<ListenerCo
         if let SecurityConfig::Tls { certs, .. } = &listener.security {
             if !Path::new(&certs.cert).exists() {
                 errors.push(ConfigError::new(
-                    "E003",
+                    ErrorCode::E003,
                     format!(
                         "listener '{}' references SSL cert '{}' which does not exist",
                         listener.name, certs.cert,
@@ -209,7 +236,7 @@ fn validate_ssl_files(errors: &mut Vec<ConfigError>, listeners: &[Arc<ListenerCo
             }
             if !Path::new(&certs.key).exists() {
                 errors.push(ConfigError::new(
-                    "E003",
+                    ErrorCode::E003,
                     format!(
                         "listener '{}' references SSL key '{}' which does not exist",
                         listener.name, certs.key,
@@ -223,14 +250,14 @@ fn validate_ssl_files(errors: &mut Vec<ConfigError>, listeners: &[Arc<ListenerCo
 // ---------------------------------------------------------------------------
 // E004: Port conflicts
 // ---------------------------------------------------------------------------
-
 fn validate_port_conflicts(errors: &mut Vec<ConfigError>, listeners: &[Arc<ListenerConfig>]) {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(listeners.len());
+
     for listener in listeners {
         for addr in &listener.listen {
             if !seen.insert(addr) {
                 errors.push(ConfigError::new(
-                    "E004",
+                    ErrorCode::E004,
                     format!("port '{}' is already bound by listener '{}'", addr, listener.name,),
                 ));
             }
@@ -241,13 +268,13 @@ fn validate_port_conflicts(errors: &mut Vec<ConfigError>, listeners: &[Arc<Liste
 // ---------------------------------------------------------------------------
 // E005: Duplicate upstream names
 // ---------------------------------------------------------------------------
-
 fn validate_duplicate_upstreams(errors: &mut Vec<ConfigError>, upstreams: &[Arc<UpstreamConfig>]) {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::with_capacity(upstreams.len());
+
     for upstream in upstreams {
         if !seen.insert(&upstream.name) {
             errors.push(ConfigError::new(
-                "E005",
+                ErrorCode::E005,
                 format!("upstream '{}' is defined multiple times", upstream.name,),
             ));
         }
@@ -272,7 +299,7 @@ mod tests {
                 pid: "/tmp/ophan.pid".into(),
                 error_log: "/tmp/ophan.log".into(),
                 user: "nobody".into(),
-                workers: String::new(),
+                workers: 1,
                 includes: vec![],
             },
             gateways: vec![],
@@ -313,7 +340,7 @@ mod tests {
         cfg.routes.push(Arc::new(route));
         let errors = validate_config(&cfg);
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code, "E001");
+        assert_eq!(errors[0].code, ErrorCode::E001);
         assert!(errors[0].message.contains("missing-upstream"));
     }
 
@@ -346,7 +373,7 @@ mod tests {
         cfg.routes.push(Arc::new(route));
         let errors = validate_config(&cfg);
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code, "E002");
+        assert_eq!(errors[0].code, ErrorCode::E002);
         assert!(errors[0].message.contains("waf"));
         assert!(errors[0].message.contains("nonexistent-waf"));
     }
@@ -371,6 +398,6 @@ mod tests {
         };
         cfg.listeners.push(Arc::new(listener));
         let errors = validate_config(&cfg);
-        assert!(errors.iter().any(|e| e.code == "E003"));
+        assert!(errors.iter().any(|e| e.code == ErrorCode::E003));
     }
 }
