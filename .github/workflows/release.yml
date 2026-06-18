@@ -18,7 +18,6 @@ permissions:
 
 env:
     CARGO_TERM_COLOR: always
-    RUSTC_WRAPPER: sccache
 
 jobs:
     build:
