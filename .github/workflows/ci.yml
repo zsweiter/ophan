@@ -53,11 +53,6 @@ jobs:
               with:
                   cache-all-crates: true
 
-            - name: Setup sccache
-              run: |
-                  cargo install sccache || true
-                  echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-
             - name: Format check
               run: cargo fmt --all -- --check
 

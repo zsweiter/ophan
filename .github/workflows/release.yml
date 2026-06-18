@@ -69,11 +69,6 @@ jobs:
               with:
                   cache-all-crates: true
 
-            - name: Setup sccache
-              run: |
-                  cargo install sccache || true
-                  echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
-
             - name: Build release
               run: cargo build --release --target ${{ matrix.target }}
 
