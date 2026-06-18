@@ -74,7 +74,7 @@ jobs:
 
             - name: Compress binary
               if: matrix.os == 'ubuntu-latest'
-              run: upx --1 target/${{ matrix.target }}/release/ophan
+              run: upx -1 target/${{ matrix.target }}/release/ophan
 
             - name: Package artifacts
               shell: bash
@@ -116,7 +116,7 @@ jobs:
                   sha256sum "$NAME.${{ matrix.ext }}" > "$NAME.${{ matrix.ext }}.sha256" || true
 
             - name: Upload artifact
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: ${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
                   path: dist/*
