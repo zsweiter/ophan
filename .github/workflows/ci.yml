@@ -12,7 +12,7 @@ jobs:
     lint:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Install rust
               uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -42,12 +42,12 @@ jobs:
         runs-on: ${{ matrix.os }}
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v5
 
             - name: Install rust
               uses: actions-rust-lang/setup-rust-toolchain@v1
               with:
-                  targets: ${{ matrix.target }}
+                  target: ${{ matrix.target }}
 
             - uses: Swatinem/rust-cache@v2
               with:
