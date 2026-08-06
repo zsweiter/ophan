@@ -55,6 +55,7 @@ impl SniTableRouter {
     /// - no route matches.
     ///
     /// Exact routes take precedence over wildcards.
+    /// TODO: Handle error like MAX_SNI_LEN and MAX_LABELS
     #[inline]
     pub fn route(&self, sni: &str) -> Option<u32> {
         let len = sni.len();

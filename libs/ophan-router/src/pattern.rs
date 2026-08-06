@@ -2,7 +2,7 @@
 ///
 /// | Input             | Output            | Type                    |
 /// |-------------------|-------------------|-------------------------|
-/// | `/users/:id`      | `/users/{id}`     | nginx param             |
+/// | `/users/:id`      | `/users/{id}`     | path-to-regex           |
 /// | `/users/{id}`     | `/users/{id}`     | matchit (passthrough)   |
 /// | `/static/*`       | `/static/{*_}`    | multi-segment catch-all |
 /// | `/api/*/action`   | `/api/{_}/action` | single-segment wildcard |
@@ -32,7 +32,7 @@ pub fn normalize_pattern(pattern: &str) -> String {
             },
             b':' if !in_brace => {
                 let start = i + 1;
-                let end = bytes[start..].iter().position(|&b| b == b'/').map(|p| start + p).unwrap_or(bytes.len());
+                let end = bytes[start..].iter().position(|&b| b == b'/').map_or(bytes.len(), |p| start + p);
                 if end > start {
                     result.push('{');
                     result.push_str(&pattern[start..end]);
@@ -79,11 +79,6 @@ fn has_matchit_wildcard(pattern: &str) -> bool {
         i += 1;
     }
     false
-}
-
-/// Returns true if the pattern is a raw regex (starts with `^`).
-pub fn is_raw_regex(pattern: &str) -> bool {
-    pattern.starts_with('^')
 }
 
 #[cfg(test)]
@@ -148,14 +143,5 @@ mod tests {
     #[test]
     fn root_path() {
         assert_eq!(normalize_pattern("/"), "/");
-    }
-
-    #[test]
-    fn is_raw_regex_detection() {
-        assert!(is_raw_regex("^/assets/.*\\.(png|jpg)$"));
-        assert!(is_raw_regex("^/api/v[0-9]+/.*$"));
-        assert!(!is_raw_regex("/api/users"));
-        assert!(!is_raw_regex("/api/files/*"));
-        assert!(!is_raw_regex("/users/:id"));
     }
 }

@@ -622,7 +622,7 @@ impl<T> Node<T> {
 
             // If this is a parameter node, we have to find the matching suffix.
             if matches!(node.node_type, NodeType::Param { .. }) {
-                let terminator = remaining.iter().position(|&b| b == b'/').map(|b| b + 1).unwrap_or(remaining.len());
+                let terminator = remaining.iter().position(|&b| b == b'/').map_or(remaining.len(), |b| b + 1);
 
                 let suffix = &remaining[..terminator];
 
@@ -872,7 +872,7 @@ impl<T> Node<T> {
                             None => path.len(),
                         };
 
-                        for child in node.children.iter() {
+                        for child in &node.children {
                             // Ensure there is a possible match with a non-zero suffix.
                             if child.prefix.len() >= terminator {
                                 continue;
@@ -912,12 +912,11 @@ impl<T> Node<T> {
                     NodeType::CatchAll => {
                         // Catch-all segments are only allowed at the end of the route, meaning
                         // this node must contain the value.
-                        let value = match node.value {
-                            // Found the matching value.
-                            Some(ref value) => value,
-
+                        //
+                        // Found the matching value.
+                        let Some(ref value) = node.value else {
                             // Otherwise, there are no matching routes in the tree.
-                            None => return Err(MatchError::NotFound),
+                            return Err(MatchError::NotFound);
                         };
 
                         // Remap the keys of any route parameters we accumulated during the search.
@@ -971,10 +970,8 @@ fn normalize_params(mut path: UnescapedRoute) -> Result<(UnescapedRoute, ParamRe
 
     loop {
         // Find a wildcard to normalize.
-        let mut wildcard = match find_wildcard(path.as_ref().slice_off(start))? {
-            Some(wildcard) => wildcard,
-            // No wildcard, we are done.
-            None => return Ok((path, original)),
+        let Some(mut wildcard) = find_wildcard(path.as_ref().slice_off(start))? else {
+            return Ok((path, original));
         };
 
         wildcard.start += start;
@@ -1001,9 +998,7 @@ fn normalize_params(mut path: UnescapedRoute) -> Result<(UnescapedRoute, ParamRe
         original.push(removed);
 
         next += 1;
-        if next > b'z' {
-            panic!("Too many route parameters.");
-        }
+        assert!(next <= b'z', "Too many route parameters.");
 
         // Continue the search after the parameter we just normalized.
         start = wildcard.start + 3;
@@ -1017,9 +1012,8 @@ pub(crate) fn denormalize_params(route: &mut UnescapedRoute, params: &ParamRemap
 
     loop {
         // Find a wildcard to denormalize.
-        let mut wildcard = match find_wildcard(route.as_ref().slice_off(start)).unwrap() {
-            Some(w) => w,
-            None => return,
+        let Some(mut wildcard) = find_wildcard(route.as_ref().slice_off(start)).unwrap() else {
+            return;
         };
 
         wildcard.start += start;
@@ -1092,14 +1086,14 @@ impl<T> Clone for Node<T>
 where
     T: Clone,
 {
-    fn clone(&self) -> Node<T> {
+    fn clone(&self) -> Self {
         let value = self.value.as_ref().map(|value| {
             // Safety: We only expose `&mut T` through `&mut self`.
             let value = unsafe { &*value.get() };
             UnsafeCell::new(value.clone())
         });
 
-        Node {
+        Self {
             value,
             prefix: self.prefix.clone(),
             wild_child: self.wild_child,
@@ -1113,8 +1107,8 @@ where
 }
 
 impl<T> Default for Node<T> {
-    fn default() -> Node<T> {
-        Node {
+    fn default() -> Self {
+        Self {
             remapping: ParamRemapping::new(),
             prefix: UnescapedRoute::default(),
             wild_child: false,

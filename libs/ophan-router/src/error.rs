@@ -1,6 +1,8 @@
 use std::fmt;
 use std::ops::Deref;
 
+use http::StatusCode;
+
 use super::{
     escape::{UnescapedRef, UnescapedRoute},
     tree::{Node, denormalize_params},
@@ -58,7 +60,7 @@ impl InsertError {
         // The route is conflicting with the current node.
         if prefix.unescaped() == current.prefix.unescaped() {
             denormalize_params(&mut route, &current.remapping);
-            return InsertError::Conflict { with: String::from_utf8(route.into_unescaped()).unwrap() };
+            return Self::Conflict { with: String::from_utf8(route.into_unescaped()).unwrap() };
         }
 
         // Remove the non-matching suffix from the route.
@@ -84,7 +86,7 @@ impl InsertError {
         denormalize_params(&mut route, &last.remapping);
 
         // Return the conflicting route.
-        InsertError::Conflict { with: String::from_utf8(route.into_unescaped()).unwrap() }
+        Self::Conflict { with: String::from_utf8(route.into_unescaped()).unwrap() }
     }
 }
 
@@ -97,6 +99,7 @@ pub struct MergeError(pub(crate) Vec<InsertError>);
 impl MergeError {
     /// Returns a list of [`InsertError`] for every insertion that failed
     /// during the merge.
+    #[must_use]
     pub fn into_errors(self) -> Vec<InsertError> {
         self.0
     }
@@ -104,7 +107,7 @@ impl MergeError {
 
 impl fmt::Display for MergeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for error in self.0.iter() {
+        for error in &self.0 {
             writeln!(f, "{error}")?;
         }
 
@@ -131,6 +134,18 @@ pub enum MatchError {
     MethodNotAllowed,
     /// No virtual host matched the provided host.
     HostNotFound,
+}
+
+impl MatchError {
+    #[inline]
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            MatchError::NotFound => StatusCode::NOT_FOUND,
+            MatchError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
+            // 421 Misdirected Request is the RFC-compliant standard for host/domain mismatch
+            MatchError::HostNotFound => StatusCode::MISDIRECTED_REQUEST,
+        }
+    }
 }
 
 impl fmt::Display for MatchError {

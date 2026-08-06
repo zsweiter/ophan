@@ -4,10 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ophan-net = { path = "../ophan-net" }
-regex = { workspace = true }
+ophan-net = { workspace = true }
 ahash = { workspace = true }
-tracing = { workspace = true }
+http = { workspace = true }
 
 [dev-dependencies]
 rayon = { workspace = true }

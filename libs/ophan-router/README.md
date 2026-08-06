@@ -19,15 +19,15 @@ impl<T> Router<T> {
     pub fn new() -> Self;
 
     /// Add a route to the matching vhost (creates one if needed).
-    /// - `host`: SNI hostname (`None` = default vhost).
-    /// - `path`: DSL pattern (e.g. `/users/:id`, `/api/*`, `^/regex$`).
+    /// - `path`: DSL pattern (e.g. `/users/:id`, `/api/*`).
     /// - `methods`: HTTP methods allowed (merged into vhost via OR).
+    /// - `hosts`: SNI hostnames (`empty` = default vhost).
     /// - `value`: stored value returned on match.
     pub fn add_route(
         &mut self,
-        host: Option<&str>,
         path: &str,
         methods: HttpMethodSet,
+        hosts: Vec<&str>,
         value: T,
     ) -> Result<(), InsertError>
     where
@@ -35,7 +35,7 @@ impl<T> Router<T> {
 
     /// Resolve a request.
     /// Returns the matched value and extracted path parameters.
-    pub fn find_route<'path>(
+    pub fn match_route<'path>(
         &self,
         host: Option<&str>,
         method: &'path str,
@@ -94,7 +94,6 @@ pub struct VirtualHost<T> {
     pub name: String,
     pub tree: Node<T>,
     pub methods: HttpMethodSet,
-    pub regex_routes: Vec<(Regex, T)>,
 }
 
 impl<T> VirtualHost<T> {
@@ -104,7 +103,7 @@ impl<T> VirtualHost<T> {
 
 ### Pattern DSL
 
-Normalize nginx-style patterns to matchit-style.
+User partial path-to-regex syntax for captur named params, and wildcard. Don't support complex regex patterns
 
 ```rust
 /// Converts pattern syntax:
@@ -114,9 +113,6 @@ Normalize nginx-style patterns to matchit-style.
 ///   /exact/path       → /exact/path     (static)
 ///   /*                → /{*_}           (catch-all)
 pub fn normalize_pattern(pattern: &str) -> String;
-
-/// Returns true if pattern starts with `^` (raw regex).
-pub fn is_raw_regex(pattern: &str) -> bool;
 ```
 
 ### Errors
@@ -138,11 +134,10 @@ pub enum MatchError {
 
 ## Route Pattern Reference
 
-| Type | DSL Pattern | Example Match | Example No Match |
-|------|------------|--------------|-----------------|
-| Exact | `/api/users` | `/api/users` | `/api/users/123` |
-| Param simple | `/api/users/:id` | `/api/users/1` | `/api/users/1/x` |
-| Multi-segment wildcard | `/api/files/*` | `/api/files/a/b/c` | — |
-| Raw regex | `^/assets/.*\.(png\|jpg)$` | `/assets/a.png` | `/assets/a.txt` |
-| Param + wildcard mix | `/users/:id/posts/*` | `/users/1/posts/a/b` | `/users/1/posts` |
-| Catch-all | `/*` | any path | — |
+| Type                   | DSL Pattern          | Example Match        | Example No Match |
+| ---------------------- | -------------------- | -------------------- | ---------------- |
+| Exact                  | `/api/users`         | `/api/users`         | `/api/users/123` |
+| Param simple           | `/api/users/:id`     | `/api/users/1`       | `/api/users/1/x` |
+| Multi-segment wildcard | `/api/files/*`       | `/api/files/a/b/c`   | —                |
+| Param + wildcard mix   | `/users/:id/posts/*` | `/users/1/posts/a/b` | `/users/1/posts` |
+| Catch-all              | `/*`                 | any path             | —                |

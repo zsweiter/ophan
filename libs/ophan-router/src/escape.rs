@@ -13,7 +13,7 @@ pub struct UnescapedRoute {
 
 impl UnescapedRoute {
     /// Unescapes escaped brackets ('{{' or '}}') in a route.
-    pub fn new(mut inner: Vec<u8>) -> UnescapedRoute {
+    pub fn new(mut inner: Vec<u8>) -> Self {
         let mut escaped = Vec::new();
         let mut i = 0;
 
@@ -26,7 +26,7 @@ impl UnescapedRoute {
             i += 1;
         }
 
-        UnescapedRoute { inner, escaped }
+        Self { inner, escaped }
     }
 
     /// Returns true if the character at the given index was escaped.
@@ -40,7 +40,7 @@ impl UnescapedRoute {
         self.escaped.retain(|x| !range.contains(x));
 
         // Update the escaped indices.
-        let offset = (replace.len() as isize) - (range.len() as isize);
+        let offset = replace.len().cast_signed() - range.len().cast_signed();
         for i in &mut self.escaped {
             if *i > range.end {
                 *i = i.checked_add_signed(offset).unwrap();
@@ -134,7 +134,7 @@ impl<'a> UnescapedRef<'a> {
         UnescapedRef {
             inner: &self.inner[start..],
             escaped: self.escaped,
-            offset: self.offset - (start as isize),
+            offset: self.offset - start.cast_signed(),
         }
     }
 
