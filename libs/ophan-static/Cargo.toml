@@ -18,7 +18,6 @@ tracing = { workspace = true }
 ahash = { workspace = true }
 itoa = { workspace = true }
 httpdate = { workspace = true }
-memchr = { workspace = true }
 
 bitflags = { workspace = true }
 
