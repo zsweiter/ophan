@@ -13,6 +13,7 @@ http = { workspace = true }
 itoa = { workspace = true }
 bytes = { workspace = true }
 bitflags = { workspace = true }
+httpdate = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
