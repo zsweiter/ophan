@@ -232,12 +232,6 @@ impl HttpMethodSet {
     }
 
     #[inline]
-    pub fn with_custom(mut self, method: &[u8]) -> Self {
-        self.custom.push(method.into());
-        self
-    }
-
-    #[inline]
     pub fn add_custom(&mut self, method: &[u8]) {
         self.custom.push(method.into());
     }
@@ -250,6 +244,25 @@ impl HttpMethodSet {
     #[inline]
     pub fn contains_http(&self, method: HttpMethod) -> bool {
         self.standard.contains(method)
+    }
+
+    #[inline(always)]
+    pub fn contains_method(&self, method: &Method) -> bool {
+        let std_method = match *method {
+            Method::GET => HttpMethod::GET,
+            Method::POST => HttpMethod::POST,
+            Method::PUT => HttpMethod::PUT,
+            Method::DELETE => HttpMethod::DELETE,
+            Method::PATCH => HttpMethod::PATCH,
+            Method::HEAD => HttpMethod::HEAD,
+            Method::OPTIONS => HttpMethod::OPTIONS,
+            Method::TRACE => HttpMethod::TRACE,
+            Method::CONNECT => HttpMethod::CONNECT,
+
+            _ => return self.contains_bytes(method.as_str().as_bytes()),
+        };
+
+        self.standard.contains(std_method)
     }
 
     #[inline]
@@ -275,11 +288,6 @@ impl HttpMethodSet {
     }
 
     #[inline]
-    pub fn contains_method(&self, method: &Method) -> bool {
-        self.contains_bytes(method.as_str().as_bytes())
-    }
-
-    #[inline]
     pub fn is_any(&self) -> bool {
         self.standard == HttpMethod::ALL && self.custom.is_empty()
     }
@@ -292,6 +300,42 @@ impl HttpMethodSet {
     #[inline]
     pub fn custom(&self) -> &[Box<[u8]>] {
         &self.custom
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.custom.is_empty() && self.standard.is_empty()
+    }
+}
+
+impl<S> FromIterator<S> for HttpMethodSet
+where
+    S: AsRef<str>,
+{
+    fn from_iter<T: IntoIterator<Item = S>>(iter: T) -> Self {
+        let mut set = HttpMethodSet::new(HttpMethod::NONE);
+
+        for method in iter {
+            let method = method.as_ref();
+
+            if let Some(std_method) = HttpMethod::from_bytes(method.as_bytes()) {
+                set.add_standard(std_method);
+            } else {
+                set.add_custom(method.as_bytes());
+            }
+        }
+
+        set
+    }
+}
+
+impl HttpMethodSet {
+    pub fn from_str_iter<I, S>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        iter.into_iter().collect()
     }
 }
 

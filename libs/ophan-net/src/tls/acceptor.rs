@@ -16,6 +16,7 @@ impl TlsAcceptor {
         let config = s2n_tls::config::Config::builder();
         let config = config.build().map_err(|e| Error::new(ErrorKind::HandshakeFailed(e.to_string())))?;
         let inner = s2n_tls_tokio::TlsAcceptor::new(config);
+
         Ok(Self { inner })
     }
 

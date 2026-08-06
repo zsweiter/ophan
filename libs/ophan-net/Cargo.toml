@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 tokio = { workspace = true, features = ["io-util", "net"] }
-async-trait = { workspace = true }
 
 httparse = { workspace = true }
 s2n-tls = { workspace = true }
@@ -13,15 +12,17 @@ s2n-tls-tokio = { workspace = true }
 http = { workspace = true }
 itoa = { workspace = true }
 bytes = { workspace = true }
-
-thiserror = { workspace = true }
+bitflags = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
+memchr = { workspace = true }
 
 serde_urlencoded = "0.7"
 pingora = { workspace = true, features = ["proxy"] }
+async-trait = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 httpmock = { workspace = true }

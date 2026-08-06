@@ -1,14 +1,14 @@
-use std::sync::atomic::AtomicU64;
-
 use bytes::Bytes;
 
-static BOUNDARY_COUNTER: AtomicU64 = AtomicU64::new(0);
+fn gen_boundary() -> String {
+    use super::common::fast_random as random;
 
-fn generate_boundary() -> String {
-    let count = BOUNDARY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    format!("ophan_boundary_{pid}_{time}_{count}")
+    let a = random();
+    let b = random();
+    let c = random();
+    let d = random();
+
+    format!("{a:016x}-{b:016x}-{c:016x}-{d:016x}")
 }
 
 enum MultipartField {
@@ -53,8 +53,24 @@ impl MultipartBuilder {
     }
 
     pub fn finish(self) -> (Bytes, String) {
-        let boundary = generate_boundary();
-        let mut body = Vec::with_capacity(self.fields.len());
+        let boundary = gen_boundary();
+        let boundary_len = boundary.len();
+
+        let mut estimated = 0;
+        for field in &self.fields {
+            estimated += 2 + boundary_len + 2;
+            match field {
+                MultipartField::Text { name, value } => {
+                    estimated += 37 + name.len() + 2 + 2 + value.len() + 2;
+                },
+                MultipartField::File { name, filename, content_type, data } => {
+                    estimated += 40 + name.len() + 13 + filename.len() + 18 + content_type.len() + 2 + 2 + data.len() + 2;
+                },
+            }
+        }
+        estimated += 2 + boundary_len + 2 + 2;
+
+        let mut body = Vec::with_capacity(estimated);
 
         for field in &self.fields {
             body.extend_from_slice(b"--");

@@ -16,10 +16,11 @@ impl TlsConnector {
         let config = s2n_tls::config::Config::builder();
         let config = config.build().map_err(|e| Error::new(ErrorKind::HandshakeFailed(e.to_string())))?;
         let inner = s2n_tls_tokio::TlsConnector::new(config);
+
         Ok(Self { inner })
     }
 
-    pub async fn connect(self, host: &str, stream: TcpStream) -> Result<TlsStream<TcpStream>> {
+    pub async fn connect(&self, host: &str, stream: TcpStream) -> Result<TlsStream<TcpStream>> {
         self.inner
             .connect(host, stream)
             .await

@@ -3,11 +3,18 @@ use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode, Version};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::http::wire::error::{ErrorKind, Result};
+use crate::http::protocol::error::{ErrorKind, Result};
 
 const MAX_HEADERS: usize = 64;
 const HEADER_BUF_SIZE: usize = 8192;
 const READ_BUF_SIZE: usize = 4096;
+
+// pub(super) const MAX_HEADERS: usize = 256;
+
+// pub(super) const INIT_HEADER_BUF_SIZE: usize = 4096;
+// pub(super) const MAX_HEADER_SIZE: usize = 1048575;
+
+// pub(crate) const BODY_BUF_LIMIT: usize = 1024 * 64;
 
 /// A parsed HTTP response: status line, headers, and body.
 pub struct ParsedResponse {

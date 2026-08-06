@@ -1,27 +1,27 @@
 use std::fmt;
 
-/// A transport-level error with an optional peer address.
+/// A transport-level error (TCP or Unix socket).
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
     pub peer: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// The kind of transport error.
+#[derive(Debug)]
 pub enum ErrorKind {
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("unsupported protocol")]
+    Io(std::io::Error),
     Unsupported,
-    #[error("dns resolution failed: {0}")]
     DnsFailed(String),
 }
 
 impl Error {
+    /// Create a new transport error with the given kind.
     pub fn new(kind: ErrorKind) -> Self {
         Self { kind, peer: None }
     }
 
+    /// Attach the peer identifier to the error.
     pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
         self.peer = Some(peer.into());
         self
@@ -30,13 +30,39 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind)
+        if let Some(ref peer) = self.peer {
+            write!(f, "{} (peer: {})", self.kind, peer)
+        } else {
+            write!(f, "{}", self.kind)
+        }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match &self.kind {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::Io(e) => write!(f, "io: {e}"),
+            ErrorKind::Unsupported => write!(f, "unsupported protocol"),
+            ErrorKind::DnsFailed(msg) => write!(f, "dns resolution failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ErrorKind {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
     }
 }
 

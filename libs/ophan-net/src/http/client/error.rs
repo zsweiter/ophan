@@ -2,7 +2,7 @@ use std::fmt;
 
 use http::StatusCode;
 
-/// A client-level error with optional HTTP status and URL context.
+/// An HTTP client error.
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -10,34 +10,33 @@ pub struct Error {
     pub url: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// The kind of client error.
+#[derive(Debug)]
 pub enum ErrorKind {
-    #[error("request timeout")]
     Timeout,
-    #[error("status code: {0}")]
     StatusCode(u16),
-    #[error("connection failed")]
     ConnectFailed,
-    #[error("invalid url: {0}")]
-    InvalidUrl(String),
-    #[error("decode: {0}")]
+    Tls(String),
+    InvalidUrl(url::ParseError),
+    InvalidUri(http::uri::InvalidUri),
     Decode(String),
-    #[error("encode: {0}")]
     Encode(String),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 }
 
 impl Error {
+    /// Create a new `Error` with the given kind.
     pub fn new(kind: ErrorKind) -> Self {
         Self { kind, status: None, url: None }
     }
 
+    /// Attach an HTTP status code to the error.
     pub fn with_status(mut self, status: StatusCode) -> Self {
         self.status = Some(status);
         self
     }
 
+    /// Attach the request URL to the error.
     pub fn with_url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
@@ -46,13 +45,48 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind)
+        write!(f, "{}", self.kind)?;
+        if let Some(ref url) = self.url {
+            write!(f, " (url: {url})")?;
+        }
+        if let Some(ref status) = self.status {
+            write!(f, " (http {status})")?;
+        }
+        Ok(())
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match &self.kind {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::Timeout => write!(f, "request timeout"),
+            ErrorKind::StatusCode(code) => write!(f, "status code: {code}"),
+            ErrorKind::ConnectFailed => write!(f, "connection failed"),
+            ErrorKind::Tls(msg) => write!(f, "tls: {msg}"),
+            ErrorKind::InvalidUrl(msg) => write!(f, "invalid url: {msg}"),
+            ErrorKind::Decode(msg) => write!(f, "decode: {msg}"),
+            ErrorKind::Encode(msg) => write!(f, "encode: {msg}"),
+            ErrorKind::Io(e) => write!(f, "io: {e}"),
+            ErrorKind::InvalidUri(e) => write!(f, "invalid uri: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ErrorKind {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
     }
 }
 
@@ -68,8 +102,8 @@ impl From<std::io::Error> for Error {
     }
 }
 
-impl From<crate::http::wire::Error> for Error {
-    fn from(e: crate::http::wire::Error) -> Self {
+impl From<crate::http::protocol::Error> for Error {
+    fn from(e: crate::http::protocol::Error) -> Self {
         Self::new(ErrorKind::Decode(e.to_string()))
     }
 }
@@ -82,13 +116,19 @@ impl From<crate::transport::Error> for Error {
 
 impl From<url::ParseError> for Error {
     fn from(e: url::ParseError) -> Self {
-        Self::new(ErrorKind::InvalidUrl(e.to_string()))
+        Self::new(ErrorKind::InvalidUrl(e))
     }
 }
 
 impl From<http::uri::InvalidUri> for Error {
-    fn from(_: http::uri::InvalidUri) -> Self {
-        Self::new(ErrorKind::InvalidUrl("invalid uri".into()))
+    fn from(e: http::uri::InvalidUri) -> Self {
+        Self::new(ErrorKind::InvalidUri(e))
+    }
+}
+
+impl From<crate::tls::error::Error> for Error {
+    fn from(e: crate::tls::error::Error) -> Self {
+        Self::new(ErrorKind::Tls(e.to_string()))
     }
 }
 

@@ -1,27 +1,27 @@
 use std::fmt;
 
-/// A TLS error with an optional peer address.
+/// A TLS error.
 #[derive(Debug)]
 pub struct Error {
     pub kind: ErrorKind,
     pub peer: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
+/// The kind of TLS error.
+#[derive(Debug)]
 pub enum ErrorKind {
-    #[error("handshake failed: {0}")]
     HandshakeFailed(String),
-    #[error("certificate error: {0}")]
     CertError(String),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 }
 
 impl Error {
+    /// Create a new TLS error with the given kind.
     pub fn new(kind: ErrorKind) -> Self {
         Self { kind, peer: None }
     }
 
+    /// Attach the peer identifier to the error.
     pub fn with_peer(mut self, peer: impl Into<String>) -> Self {
         self.peer = Some(peer.into());
         self
@@ -30,13 +30,39 @@ impl Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind)
+        if let Some(ref peer) = self.peer {
+            write!(f, "{} (peer: {})", self.kind, peer)
+        } else {
+            write!(f, "{}", self.kind)
+        }
     }
 }
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match &self.kind {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorKind::HandshakeFailed(msg) => write!(f, "handshake failed: {msg}"),
+            ErrorKind::CertError(msg) => write!(f, "certificate error: {msg}"),
+            ErrorKind::Io(e) => write!(f, "io: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ErrorKind {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ErrorKind::Io(e) => Some(e),
+            _ => None,
+        }
     }
 }
 

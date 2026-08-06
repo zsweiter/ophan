@@ -1,7 +1,15 @@
+mod cache_policy;
 pub mod client;
+pub mod cookies;
+pub mod header;
 pub mod ingress;
 pub mod method;
-pub mod wire;
+pub mod protocol;
+pub mod status_code;
+pub mod utils;
+pub mod vary;
 
-pub use client::error::Error;
+pub use cache_policy::CachePolicy;
+pub use client::{Client, error::Error};
 pub use method::{HttpMethod, HttpMethodSet};
+pub use status_code::{StatusCodeSet, StatusPattern};
