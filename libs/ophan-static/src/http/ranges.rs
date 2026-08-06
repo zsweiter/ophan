@@ -17,6 +17,16 @@ pub enum HttpRangeParseError {
     NoOverlap,
 }
 
+impl HttpRangeParseError {
+    pub const fn is_invalid_range(&self) -> bool {
+        matches!(self, Self::InvalidRange)
+    }
+
+    pub const fn is_overlap_error(&self) -> bool {
+        matches!(self, Self::NoOverlap)
+    }
+}
+
 impl fmt::Display for HttpRangeParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

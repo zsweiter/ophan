@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use ophan_net::http::header as vheader;
-use ophan_net::http::session::{RequestParts, Response, StreamingResponse};
+use ophan_net::proxy::{HttpResponse, RequestParts};
 use std::borrow::Cow;
 use std::io::{self, SeekFrom};
 use std::path::Path;
@@ -16,17 +16,10 @@ use crate::fs::cache::{CacheObject, Filesystem};
 use crate::fs::file::{DirObject, FileObject};
 use crate::fs::security::{FsFlags, SecurityHeaders};
 use crate::http::conditional;
-use crate::http::ranges::{HttpRange, HttpRangeParseError};
+use crate::http::ranges::{HttpRange};
 use crate::listing::DirectoryListing;
 
 const DEFAULT_CHUNK: usize = 64 * 1024;
-
-pub type FileStream = ReaderStream<tokio::io::Take<tokio::fs::File>>;
-
-pub enum Resource {
-    Bytes(Response),
-    Stream(StreamingResponse<FileStream>),
-}
 
 pub struct StaticService {
     filesystem: Filesystem,
@@ -41,33 +34,31 @@ impl StaticService {
         }
     }
 
-    fn apply_security_headers(&self, mut response: Response, headers: &SecurityHeaders) -> Response {
+    fn apply_security_headers(&self, response: &mut HttpResponse, headers: &SecurityHeaders) {
         if headers.contains(SecurityHeaders::X_FRAME_OPTS) {
-            response = response.insert_header(header::X_FRAME_OPTIONS, vheader::DENY);
+            response.insert_header(header::X_FRAME_OPTIONS, vheader::DENY);
         }
         if headers.contains(SecurityHeaders::X_CONTENT_TYPE) {
-            response = response.insert_header(header::X_CONTENT_TYPE_OPTIONS, vheader::NOSNIFF);
+            response.insert_header(header::X_CONTENT_TYPE_OPTIONS, vheader::NOSNIFF);
         }
         if headers.contains(SecurityHeaders::HSTS) {
-            response = response.insert_header(
+            response.insert_header(
                 header::STRICT_TRANSPORT_SECURITY,
                 HeaderValue::from_static("max-age=31536000; includeSubDomains"),
             );
         }
         if headers.contains(SecurityHeaders::REFERRER) {
-            response = response.insert_header(
+            response.insert_header(
                 header::REFERRER_POLICY,
                 HeaderValue::from_static("strict-origin-when-cross-origin"),
             );
         }
         if headers.contains(SecurityHeaders::CSP) {
-            response = response.insert_header(
+            response.insert_header(
                 header::CONTENT_SECURITY_POLICY,
                 HeaderValue::from_static("default-src 'self'"),
             );
         }
-
-        response
     }
 
     /// Invalidate a cached path. Call after file modifications to force re-read on next request.
@@ -75,7 +66,7 @@ impl StaticService {
         self.filesystem.invalidate(path);
     }
 
-    pub async fn serve(&self, config: &ServeConfig, req: &RequestParts) -> Result<Resource> {
+    pub async fn serve(&self, config: &ServeConfig, req: &RequestParts) -> Result<HttpResponse> {
         let uri_path = req.uri.path();
         let relative_path = flatkit::path::normalize_path(Path::new(uri_path));
         let fs_path = config.root.join(&relative_path);
@@ -120,7 +111,7 @@ impl StaticService {
         dir_object: &DirObject,
         conf: &ServeConfig,
         headers: &http::HeaderMap,
-    ) -> Result<Resource> {
+    ) -> Result<HttpResponse> {
         if conf.flags.contains(FsFlags::INDEX_FILES)
             && let Some(index) = self.find_index(dir_object, conf).await?
         {
@@ -157,7 +148,7 @@ impl StaticService {
         Ok(None)
     }
 
-    async fn resolve_file(&self, object: &FileObject, config: &ServeConfig, headers: &HeaderMap) -> Result<Resource> {
+    async fn resolve_file(&self, object: &FileObject, config: &ServeConfig, headers: &HeaderMap) -> Result<HttpResponse> {
         let file_size = object.metadata.len();
 
         let etag = object.etag.clone();
@@ -165,18 +156,19 @@ impl StaticService {
 
         // Conditional: If-None-Match / If-Modified-Since → 304
         if conditional::is_not_modified(headers, &etag, last_mod.as_ref()) {
-            let mut response = Response::new(StatusCode::NOT_MODIFIED)
-                .insert_header(header::ETAG, etag)
-                .insert_header(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
+            let mut response = HttpResponse::with_capacity(StatusCode::NOT_MODIFIED, 3)
+                .with_header(header::ETAG, etag)
+                .with_header(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
 
             if let Some(lm) = last_mod {
-                response = response.insert_header(header::LAST_MODIFIED, lm);
+                response.insert_header(header::LAST_MODIFIED, lm);
             }
 
             tracing::info!(path = ?object.path, "conditional request matched, returning 304 Not Modified");
-            response = self.apply_security_headers(response, &config.security_headers);
 
-            return Ok(Resource::Bytes(response));
+            self.apply_security_headers(&mut response, &config.security_headers);
+
+            return Ok(response);
         }
 
         let ranges = if config.flags.contains(FsFlags::RANGE_REQUESTS) {
@@ -189,22 +181,22 @@ impl StaticService {
 
                         ranges_set.into_iter().next()
                     },
-                    Err(e) => {
-                        tracing::warn!(error = ?e, "failed to parse Range header");
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "failed to parse Range header");
 
-                        let response = if matches!(e, HttpRangeParseError::NoOverlap) {
-                            Response::new(StatusCode::RANGE_NOT_SATISFIABLE)
-                                .insert_header(
+                        let response = if err.is_invalid_range() || err.is_overlap_error() {
+                            HttpResponse::new(StatusCode::RANGE_NOT_SATISFIABLE)
+                                .with_header(
                                     header::CONTENT_RANGE,
                                     HeaderValue::from_str(&format!("bytes */{file_size}"))
                                         .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
                                 )
-                                .insert_header(header::CONTENT_LENGTH, HeaderValue::from_static("0"))
+                                .with_header(header::CONTENT_LENGTH, HeaderValue::from_static("0"))
                         } else {
-                            Response::new(StatusCode::BAD_REQUEST)
+                            HttpResponse::new(StatusCode::BAD_REQUEST)
                         };
 
-                        return Ok(Resource::Bytes(response));
+                        return Ok(response);
                     },
                 },
                 None => None,
@@ -241,38 +233,40 @@ impl StaticService {
             DEFAULT_CHUNK
         };
 
-        let mut response = Response::new(status)
-            .insert_header(header::ETAG, etag)
-            .insert_header(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"))
-            .insert_header(header::CONTENT_TYPE, object.content_type.clone())
-            .insert_header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
-            .insert_header(header::CONTENT_LENGTH, HeaderValue::from(content_length));
+        let mut response = HttpResponse::with_capacity(status, 5)
+            .with_header(header::ETAG, etag)
+            .with_header(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"))
+            .with_header(header::CONTENT_TYPE, object.content_type.clone())
+            .with_header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+            .with_header(header::CONTENT_LENGTH, HeaderValue::from(content_length));
 
         if let Some(lm) = last_mod {
-            response = response.insert_header(header::LAST_MODIFIED, lm);
+            response.insert_header(header::LAST_MODIFIED, lm);
         }
         if let Some(cr) = content_range {
-            response = response.insert_header(header::CONTENT_RANGE, cr);
+            response.insert_header(header::CONTENT_RANGE, cr);
         }
 
-        response = self.apply_security_headers(response, &config.security_headers);
+        self.apply_security_headers(&mut response, &config.security_headers);
 
-        let stream = ReaderStream::with_capacity(reader, chunk_size);
-        Ok(Resource::Stream(response.stream(stream)))
+        response.stream(ReaderStream::with_capacity(reader, chunk_size));
+
+        Ok(response)
     }
 
-    async fn build_directory_response(&self, req_path: &str, dir_object: &DirObject, conf: &ServeConfig) -> Result<Resource> {
+    async fn build_directory_response(&self, req_path: &str, dir_object: &DirObject, conf: &ServeConfig) -> Result<HttpResponse> {
         let html = DirectoryListing::build(req_path, &dir_object.path, conf)
             .await
             .map_err(|e| Error::from_io(e, req_path))?;
 
-        let response = Response::new(StatusCode::OK)
-            .insert_header(header::CONTENT_TYPE, vheader::CONTENT_TYPE_HTML)
-            .insert_header(header::ACCEPT_RANGES, HeaderValue::from_static("none"))
-            .bytes(Bytes::from(html));
+        let mut response = HttpResponse::with_capacity(StatusCode::OK, 3)
+            .with_header(header::CONTENT_TYPE, vheader::CONTENT_TYPE_HTML)
+            .with_header(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
 
-        let response = self.apply_security_headers(response, &conf.security_headers);
+        self.apply_security_headers(&mut response, &conf.security_headers);
 
-        Ok(Resource::Bytes(response))
+        response.bytes(Bytes::from(html));
+
+        Ok(response)
     }
 }

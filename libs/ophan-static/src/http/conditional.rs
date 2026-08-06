@@ -16,11 +16,13 @@ pub fn create_etag(meta: &Metadata) -> HeaderValue {
     {
         let mut etag = String::with_capacity(64);
 
+        etag.push('"');
         push_hex(meta.size(), &mut etag);
         etag.push('-');
         push_hex(meta.mtime() as u64, &mut etag);
         etag.push('-');
         push_hex(meta.ino(), &mut etag);
+        etag.push('"');
 
         HeaderValue::from_maybe_shared(etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\""))
     }
@@ -38,11 +40,13 @@ pub fn create_etag(meta: &Metadata) -> HeaderValue {
 
         let mut etag = String::with_capacity(64);
 
+        etag.push('"');
         push_hex(meta.size(), &mut etag);
         etag.push('-');
         push_hex(mtime as u64, &mut etag);
         etag.push('-');
         push_hex(0, &mut etag);
+        etag.push('"');
 
         HeaderValue::from_maybe_shared(etag).unwrap_or_else(|_| HeaderValue::from_static("\"0\""))
     }
