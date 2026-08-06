@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use cache::MemoryCache;
 use http::HeaderValue;
-use ophan_net::http::header::CONTENT_TYPE_OCTET_STREAM;
+use ophan_net::http::header;
 
 use crate::fs::file::DirObject;
 use crate::fs::file::FileObject;
@@ -107,7 +107,7 @@ impl Filesystem {
         } else {
             let etag = conditional::create_etag(&metadata);
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| CONTENT_TYPE_OCTET_STREAM.clone());
+            let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| header::CONTENT_TYPE_OCTET_STREAM.clone());
 
             CacheObject::File(Arc::new(FileObject::new(
                 path.to_path_buf(),

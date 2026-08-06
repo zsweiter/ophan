@@ -28,7 +28,7 @@ impl Error {
     #[inline]
     pub fn from_io(err: io::Error, path: &str) -> Self {
         let status = map_io_kind(err.kind());
- 
+
         Self { status, path: path.into(), source: Some(err) }
     }
 

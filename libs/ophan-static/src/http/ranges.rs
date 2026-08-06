@@ -1,5 +1,8 @@
 use std::{fmt, ops::Range};
 
+use bytes::{BufMut, BytesMut};
+use http::{HeaderValue, header::InvalidHeaderValue};
+
 static PREFIX: &[u8] = b"bytes=";
 const PREFIX_LEN: usize = 6;
 
@@ -194,6 +197,73 @@ impl SliceExt for [u8] {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentRange {
+    pub start: u64,
+    pub length: u64,
+    pub total: u64,
+}
+
+impl ContentRange {
+    #[inline]
+    pub const fn new(start: u64, length: u64, total: u64) -> Self {
+        Self { start, length, total }
+    }
+
+    #[inline]
+    pub fn update(&mut self, start: u64, length: u64, total: u64) {
+        self.start = start;
+        self.length = length;
+        self.total = total;
+    }
+
+    #[inline]
+    pub const fn end(&self) -> u64 {
+        self.start + self.length - 1
+    }
+
+    #[inline]
+    pub fn try_into_header_value(self) -> Result<HeaderValue, InvalidHeaderValue> {
+        // if self.length == 0 {
+        //     return Err(InvalidHeaderValue);
+        // }
+
+        let mut buf = BytesMut::with_capacity(48);
+
+        let mut itoa = itoa::Buffer::new();
+
+        buf.put_slice(b"bytes ");
+        buf.put_slice(itoa.format(self.start).as_bytes());
+
+        buf.put_u8(b'-');
+        buf.put_slice(itoa.format(self.end()).as_bytes());
+
+        buf.put_u8(b'/');
+        buf.put_slice(itoa.format(self.total).as_bytes());
+
+        HeaderValue::from_maybe_shared(buf.freeze())
+    }
+}
+
+impl TryFrom<ContentRange> for HeaderValue {
+    type Error = InvalidHeaderValue;
+
+    #[inline]
+    fn try_from(value: ContentRange) -> Result<Self, Self::Error> {
+        value.try_into_header_value()
+    }
+}
+
+impl fmt::Display for ContentRange {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.length == 0 {
+            return Err(fmt::Error);
+        }
+
+        write!(f, "bytes {}-{}/{}", self.start, self.end(), self.total)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

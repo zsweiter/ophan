@@ -135,7 +135,7 @@ pub fn html_escape(s: &str) -> Cow<'_, str> {
     if !s.as_bytes().iter().any(|&b| matches!(b, b'<' | b'>' | b'&' | b'"' | b'\'')) {
         return Cow::Borrowed(s);
     }
-    
+
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         match c {

@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, StatusCode, header};
-use ophan_net::http::header as vheader;
+use http::{HeaderMap, HeaderValue, StatusCode};
+use ophan_net::http::header;
 use ophan_net::proxy::{HttpResponse, RequestParts};
 use std::borrow::Cow;
 use std::io::{self, SeekFrom};
@@ -16,7 +16,7 @@ use crate::fs::cache::{CacheObject, Filesystem};
 use crate::fs::file::{DirObject, FileObject};
 use crate::fs::security::{FsFlags, SecurityHeaders};
 use crate::http::conditional;
-use crate::http::ranges::{HttpRange};
+use crate::http::ranges::HttpRange;
 use crate::listing::DirectoryListing;
 
 const DEFAULT_CHUNK: usize = 64 * 1024;
@@ -36,10 +36,10 @@ impl StaticService {
 
     fn apply_security_headers(&self, response: &mut HttpResponse, headers: &SecurityHeaders) {
         if headers.contains(SecurityHeaders::X_FRAME_OPTS) {
-            response.insert_header(header::X_FRAME_OPTIONS, vheader::DENY);
+            response.insert_header(header::X_FRAME_OPTIONS, header::DENY);
         }
         if headers.contains(SecurityHeaders::X_CONTENT_TYPE) {
-            response.insert_header(header::X_CONTENT_TYPE_OPTIONS, vheader::NOSNIFF);
+            response.insert_header(header::X_CONTENT_TYPE_OPTIONS, header::NOSNIFF);
         }
         if headers.contains(SecurityHeaders::HSTS) {
             response.insert_header(
@@ -48,10 +48,7 @@ impl StaticService {
             );
         }
         if headers.contains(SecurityHeaders::REFERRER) {
-            response.insert_header(
-                header::REFERRER_POLICY,
-                HeaderValue::from_static("strict-origin-when-cross-origin"),
-            );
+            response.insert_header(header::REFERRER_POLICY, header::STRICT_ORIGIN_WHEN_CROSS_ORIGIN);
         }
         if headers.contains(SecurityHeaders::CSP) {
             response.insert_header(
@@ -151,13 +148,13 @@ impl StaticService {
     async fn resolve_file(&self, object: &FileObject, config: &ServeConfig, headers: &HeaderMap) -> Result<HttpResponse> {
         let file_size = object.metadata.len();
 
-        let etag = object.etag.clone();
+        let etag_header = object.etag.clone();
         let last_mod = conditional::last_modified_header(&object.metadata);
 
         // Conditional: If-None-Match / If-Modified-Since → 304
-        if conditional::is_not_modified(headers, &etag, last_mod.as_ref()) {
+        if conditional::is_not_modified(headers, &etag_header, last_mod.as_ref()) {
             let mut response = HttpResponse::with_capacity(StatusCode::NOT_MODIFIED, 3)
-                .with_header(header::ETAG, etag)
+                .with_header(header::ETAG, etag_header)
                 .with_header(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
 
             if let Some(lm) = last_mod {
@@ -234,10 +231,10 @@ impl StaticService {
         };
 
         let mut response = HttpResponse::with_capacity(status, 5)
-            .with_header(header::ETAG, etag)
+            .with_header(header::ETAG, etag_header)
             .with_header(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=3600"))
             .with_header(header::CONTENT_TYPE, object.content_type.clone())
-            .with_header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+            .with_header(header::ACCEPT_RANGES, header::RANGE_BYTES)
             .with_header(header::CONTENT_LENGTH, HeaderValue::from(content_length));
 
         if let Some(lm) = last_mod {
@@ -260,8 +257,8 @@ impl StaticService {
             .map_err(|e| Error::from_io(e, req_path))?;
 
         let mut response = HttpResponse::with_capacity(StatusCode::OK, 3)
-            .with_header(header::CONTENT_TYPE, vheader::CONTENT_TYPE_HTML)
-            .with_header(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+            .with_header(header::CONTENT_TYPE, header::CONTENT_TYPE_HTML)
+            .with_header(header::ACCEPT_RANGES, header::RANGE_NONE);
 
         self.apply_security_headers(&mut response, &conf.security_headers);
 
