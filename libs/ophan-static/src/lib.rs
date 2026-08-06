@@ -1,4 +1,11 @@
-pub mod flags;
+mod conf;
+mod error;
 mod fs;
+mod http;
+mod listing;
+mod service;
 
-pub use fs::{FileServer, ServeConfig};
+pub use conf::ServeConfig;
+pub use error::{Error, Result};
+pub use fs::security::{FsFlags, SecurityHeaders};
+pub use service::{Resource, StaticService};

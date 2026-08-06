@@ -2,106 +2,136 @@
 
 > ⚠️ **Active Development** — API may change without notice.
 
-Zero-copy static file server with mmap, directory listing, ETag caching, and security controls.
+Async static file server with in-memory caching, directory listing, ETag/Last-Modified conditional requests, byte range requests, and configurable security headers.
+
+## Architecture
+
+```
+src/
+├── conf.rs          # ServeConfig builder
+├── error.rs         # ServeError type mapping I/O → HTTP status
+├── fs/
+│   ├── cache.rs     # Filesystem object cache (MemoryCache)
+│   ├── file.rs      # FileObject / DirObject types
+│   └── security.rs  # FsFlags + SecurityHeaders bitflags
+├── http/
+│   ├── conditional.rs  # ETag generation, If-None-Match / If-Modified-Since
+│   └── ranges.rs       # HTTP Range header parsing (RFC 7233)
+├── listing.rs       # HTML directory listing builder
+├── service.rs       # StaticService — main entry point
+└── lib.rs           # Public re-exports
+```
 
 ## Public API
 
-### FileServer
+### StaticService
 
-Main entry point for serving static files.
+Main entry point. Manages filesystem cache and request routing.
 
 ```rust
-pub struct FileServer;
+pub struct StaticService { /* private */ }
 
-impl FileServer {
+impl StaticService {
+    /// Create with default cache (2048 entries, 300s TTL).
     pub fn new() -> Self;
 
-    /// Handle a static file request.
-    /// - `request`: inbound HTTP request parts (method, path, headers).
-    /// - `request_path`: the URI path from the request.
-    /// - `config`: static serving configuration.
-    pub async fn handle_request(
+    /// Serve a static file request.
+    pub async fn serve(
         &self,
-        request: &http::request::Parts,
-        request_path: &str,
         config: &ServeConfig,
-    ) -> Result<http::Response<Bytes>, (u16, String)>;
+        req: &RequestParts,
+    ) -> Result<Resource, ServeError>;
+
+    /// Invalidate a cached path. Call after file modifications.
+    pub fn invalidate(&self, path: &Path);
+}
+
+pub enum Resource {
+    Bytes(Response),
+    Stream(StreamingResponse<FileStream>),
 }
 ```
 
 ### ServeConfig
 
-Configuration for a static file serving location.
+Configuration for a static file serving location. Builder-style constructors.
 
 ```rust
 pub struct ServeConfig {
-    pub root: String,
-    pub blacklist: Vec<GlobPattern>,
-    pub flags: Flags,
+    pub root: PathBuf,
+    pub skip_patterns: Option<GlobSet>,
+    pub flags: FsFlags,
+    pub security_headers: SecurityHeaders,
+    pub cache_ttl: Option<Duration>,
+    pub indexes: Option<Box<[Cow<'static, str>]>>,
 }
 
 impl ServeConfig {
-    pub fn new(root: impl Into<String>) -> Self;
+    pub fn new(root: impl Into<PathBuf>) -> Self;
+    pub fn with_flags(root: impl Into<PathBuf>, flags: FsFlags) -> Self;
+    pub fn with_skip_patterns(root: impl Into<PathBuf>, patterns: GlobSet) -> Self;
+    pub fn with_options(root: impl Into<PathBuf>, patterns: Option<GlobSet>, flags: FsFlags) -> Self;
+
+    /// Check if a path matches any skip pattern.
+    pub fn is_blacklisted<P: AsRef<Path>>(&self, path: P) -> bool;
 }
 ```
 
-### Flags
+### FsFlags
 
-Bitmask security flags for static file serving behaviour.
+Bitmask flags controlling filesystem serving behaviour.
 
 ```rust
-pub struct Flags(u64);
+pub struct FsFlags: u16;
 
-impl Flags {
-    pub fn empty() -> Self;
-    pub fn bits(&self) -> u64;
-    pub fn contains(&self, other: Self) -> bool;
-    pub fn intersects(&self, other: Self) -> bool;
-    pub fn insert(&mut self, other: Self);
-    pub fn remove(&mut self, other: Self);
+impl FsFlags {
+    const READ_FILES;       // Allow GET/HEAD of regular files
+    const INDEX_FILES;      // Serve index.html / index.htm for directories
+    const DIRECTORY_LIST;   // Generate directory listings
+    const DOTFILES;         // Show hidden files (.git, .env)
+    const FOLLOW_SYMLINKS;  // Allow symbolic links
+    const ESCAPE_ROOT;      // Allow path traversal outside root via symlinks
+    const RANGE_REQUESTS;   // Honor byte range requests
+    const ETAG;             // Generate ETag headers
+    const LAST_MODIFIED;    // Generate Last-Modified headers
 
-    // Constants
-    pub const LISTING: Flags;       // Enable directory listing
-    pub const DOTFILES: Flags;      // Allow dotfiles (.git, .env)
-    pub const SERVER_TOKENS: Flags; // Emit Server header
-    pub const X_FRAME_OPTS: Flags;  // Emit X-Frame-Options: DENY
-    pub const X_CONTENT_TYPE: Flags;// Emit X-Content-Type-Options: nosniff
-    pub const HSTS: Flags;          // Emit Strict-Transport-Security
-    pub const BLOCK_SYMLINKS: Flags;// Reject symlinked files
-
-    /// Returns a secure default set: HSTS + X_FRAME_OPTS + X_CONTENT_TYPE + BLOCK_SYMLINKS.
+    /// Secure defaults: READ_FILES | INDEX_FILES | ETAG | LAST_MODIFIED | RANGE_REQUESTS
     pub fn secure() -> Self;
+
+    /// Check if a file type + name should be blocked.
+    pub fn is_blocked(&self, file_type: FileType, filename: &str) -> bool;
 }
 ```
 
-### GlobPattern
+### SecurityHeaders
 
-Match patterns for blacklisted file names.
+Bitmask flags for HTTP security response headers.
 
 ```rust
-pub enum GlobPattern {
-    Exact(String),
-    Prefix(String),
-    Suffix(String),
-}
+pub struct SecurityHeaders: u8;
 
-impl GlobPattern {
-    /// Parse a pattern string:
-    ///   `*.ext`   → Suffix
-    ///   `prefix*` → Prefix
-    ///   `exact`   → Exact
-    pub fn parse(pattern: &str) -> Self;
+impl SecurityHeaders {
+    const SERVER_TOKENS;    // Server header
+    const X_FRAME_OPTS;    // X-Frame-Options: DENY
+    const X_CONTENT_TYPE;  // X-Content-Type-Options: nosniff
+    const HSTS;            // Strict-Transport-Security (max-age=31536000; includeSubDomains)
+    const REFERRER;        // Referrer-Policy: strict-origin-when-cross-origin
+    const CSP;             // Content-Security-Policy: default-src 'self'
 
-    /// Returns true if file_name matches this pattern.
-    pub fn matches(&self, file_name: &str) -> bool;
+    /// Default: X_FRAME_OPTS | X_CONTENT_TYPE | REFERRER
+    pub fn secure() -> Self;   // + HSTS
+    pub fn none() -> Self;
 }
 ```
 
-## Behaviour
+## Features
 
-- **Path sanitisation**: All paths are canonicalised via `std::fs::canonicalize`. Symlinks outside the root are rejected when `BLOCK_SYMLINKS` is set.
-- **Directory listing**: When `LISTING` is enabled and a directory is requested, a styled HTML index is generated showing file names, sizes, and modification times.
-- **ETag**: Generated from `(mtime, file_size)` for 304 Not Modified responses.
-- **MIME types**: Detected via `mime_guess` based on file extension.
-- **Security headers**: X-Frame-Options, X-Content-Type-Options, HSTS, Content-Security-Policy, Referrer-Policy, Permissions-Policy.
-- **Byte range requests**: Not yet supported. Full file is always served.
+- **Path sanitisation**: Normalised via `flatkit::path::normalize_path`. Dotfiles blocked by default.
+- **In-memory cache**: `pingora_memory-cache` with configurable TTL and size. Supports invalidation.
+- **Conditional requests**: Strong ETag (size-mtime-inode), If-None-Match → 304, If-Modified-Since.
+- **Byte range requests**: Full RFC 7233 parsing. Returns 206 Partial Content with Content-Range.
+- **Directory listing**: Dark-themed HTML table with icons, sizes, file types. Configurable index files.
+- **MIME types**: Detected via `mime_guess` on file extension.
+- **Security headers**: X-Frame-Options, X-Content-Type-Options, HSTS, Referrer-Policy, CSP — applied per config.
+- **Symlink control**: Blocked by default; enabled via `FOLLOW_SYMLINKS` flag.
+- **Streaming**: Large files streamed in 64KB chunks via `ReaderStream`.

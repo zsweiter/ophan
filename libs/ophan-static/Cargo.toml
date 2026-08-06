@@ -4,11 +4,26 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+flatkit = { workspace = true }
+cache = { workspace = true }
+ophan-net = { workspace = true }
+
+tokio = { workspace = true, features = ["fs"] }
+tokio-util = { workspace = true, features = ["io"] }
+futures = { workspace = true }
 mime_guess = { workspace = true }
-memmap2 = { workspace = true }
-thiserror = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
+tracing = { workspace = true }
+ahash = { workspace = true }
+itoa = { workspace = true }
+httpdate = { workspace = true }
+memchr = { workspace = true }
+
+bitflags = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "~0.31.1", default-features = false, features = ["zerocopy"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
