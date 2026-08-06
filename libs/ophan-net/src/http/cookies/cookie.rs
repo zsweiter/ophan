@@ -201,7 +201,7 @@ impl<'c> StrRef<'c> {
 ///
 /// ```
 /// use std::time::Duration;
-/// # use your_crate::{Cookie, SameSite};
+/// # use ophan_net::http::cookies::{Cookie, SameSite};
 ///
 /// let cookie = Cookie::build("session", "abc123")
 ///     .path("/")
@@ -693,7 +693,7 @@ mod tests {
             raw: Some(Cow::Borrowed(raw_cookie_str)),
             name: StrRef::Indexed(0, 3),
             value: StrRef::Indexed(4, 7),
-            path: Some(StrRef::Indexed(15, 19)),
+            path: Some(StrRef::Indexed(14, 18)),
             domain: None,
             max_age: None,
             expires: None,
