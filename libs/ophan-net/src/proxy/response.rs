@@ -45,6 +45,12 @@ impl HttpResponse {
     }
 
     #[inline]
+    pub fn with_body(mut self, body: HttpBody) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    #[inline]
     pub fn insert_header(&mut self, name: impl Into<HeaderName>, value: impl Into<HeaderValue>) -> &mut Self {
         let _ = self.header.insert_header(name.into(), value.into());
         self
