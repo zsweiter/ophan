@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Ophan API Gateway</title>
+        <link rel="icon" href="favicon.svg" type="image/x-icon" />
+
+        <style>
+            * {
+                box-sizing: border-box;
+            }
+
+            :root {
+                color-scheme: light dark;
+
+                --bg: #f8fafc;
+                --surface: #ffffff;
+                --text: #1e293b;
+                --text-muted: #475569;
+                --border: #e2e8f0;
+                --link: #2563eb;
+            }
+
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --bg: #1c1e23;
+                    --surface: #111827;
+                    --text: #f8fafc;
+                    --text-muted: #cbd5e1;
+                    --border: #334155;
+                    --link: #60a5fa;
+                }
+            }
+
+            body {
+                margin: 0;
+                background: var(--bg);
+                color: var(--text);
+                font-family:
+                    Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                line-height: 1.6;
+            }
+
+            p {
+                color: var(--text-muted);
+            }
+
+            a {
+                color: var(--link);
+            }
+
+            footer {
+                border-top: 1px solid var(--border);
+            }
+
+            body {
+                margin: 0;
+                font-family:
+                    Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                background: #f8fafc;
+                color: #1e293b;
+                line-height: 1.6;
+            }
+
+            main {
+                max-width: 900px;
+                margin: 80px auto;
+                padding: 0 32px;
+            }
+
+            h1 {
+                margin: 0;
+                font-size: 3rem;
+                font-weight: 700;
+                color: #0f172a;
+            }
+
+            h2 {
+                margin-top: 3rem;
+                margin-bottom: 0.75rem;
+                color: #0f172a;
+                font-size: 1.75rem;
+            }
+
+            p {
+                color: #475569;
+                font-size: 1.05rem;
+            }
+
+            ul {
+                padding-left: 1.5rem;
+                color: #334155;
+            }
+
+            li {
+                margin: 0.5rem 0;
+            }
+
+            a {
+                color: #2563eb;
+                text-decoration: none;
+            }
+
+            a:hover {
+                text-decoration: underline;
+            }
+
+            footer {
+                margin-top: 4rem;
+                padding-top: 2rem;
+                border-top: 1px solid #e2e8f0;
+                color: #64748b;
+                font-size: 0.9rem;
+            }
+        </style>
+    </head>
+    <body>
+        <main>
+            <svg
+                id="active-brand-svg"
+                width="160"
+                height="120"
+                viewBox="0 0 160 120"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+                <defs>
+                    <linearGradient
+                        id="dynamic-grad"
+                        x1="0%"
+                        y1="0%"
+                        x2="100%"
+                        y2="100%"
+                    >
+                        <stop offset="0%" stop-color="#52525b" />
+                        <stop offset="100%" stop-color="#d4d4d8" />
+                    </linearGradient>
+                </defs>
+
+                <g transform="translate(10, 0)">
+                    <g id="isotipo-group">
+                        <circle
+                            cx="55"
+                            cy="60"
+                            r="28"
+                            fill="none"
+                            stroke="#27272a"
+                            stroke-width="8"
+                        />
+
+                        <circle
+                            cx="85"
+                            cy="60"
+                            r="28"
+                            fill="none"
+                            stroke="url(#dynamic-grad)"
+                            stroke-width="8"
+                        />
+
+                        <path
+                            d="M 55,32 A 28,28 0 0,1 83,60"
+                            fill="none"
+                            stroke="#27272a"
+                            stroke-width="8"
+                        />
+
+                        <path
+                            d="M 57,32 L 53,32"
+                            stroke="#09090b"
+                            stroke-width="12"
+                            stroke-linecap="round"
+                        />
+                        <path
+                            d="M 83,88 L 87,88"
+                            stroke="#09090b"
+                            stroke-width="12"
+                            stroke-linecap="round"
+                        />
+                    </g>
+                </g>
+            </svg>
+            <h1>Ophan API Gateway</h1>
+
+            <p>
+                <strong>Ophan</strong> is a high-performance API Gateway written
+                in Rust, designed to provide a secure, scalable, and low-latency
+                entry point for modern APIs and microservices. It combines
+                reverse proxy capabilities, intelligent routing, authentication,
+                load balancing, caching, traffic management, and an integrated
+                Web Application Firewall (WAF) into a single lightweight server.
+            </p>
+
+            <h2>Features</h2>
+
+            <ul>
+                <li>High-performance reverse proxy with minimal latency.</li>
+                <li>Flexible routing and request rewriting.</li>
+                <li>Load balancing with active health checks.</li>
+                <li>
+                    JWT, OAuth 2.0, OpenID Connect.
+                </li>
+                <li>
+                    TLS termination with HTTP/1.1, HTTP/2 support.
+                </li>
+                <li>Integrated Web Application Firewall (WAF).</li>
+                <li>Rate limiting, CORS, and security policies.</li>
+                <li>Static file serving and response caching.</li>
+                <li>Hot configuration reload without downtime.</li>
+                <li>Built for cloud-native and microservice environments.</li>
+            </ul>
+
+            <h2>Documentation</h2>
+
+            <p>
+                Visit the <a href="docs/index.html">documentation</a> to learn
+                how to install, configure, and deploy Ophan.
+            </p>
+
+            <h2>Open Source</h2>
+
+            <p>
+                Ophan is open source and welcomes contributions from the
+                community. Bug reports, feature requests, and pull requests are
+                always appreciated.
+            </p>
+
+            <footer>Ophan API Gateway • Powered by Rust</footer>
+        </main>
+    </body>
+</html>
