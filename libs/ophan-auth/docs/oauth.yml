@@ -1,0 +1,317 @@
+openapi: 3.0.3
+
+info:
+    title: OAuth 2.0 / OpenID Connect Resource Server
+    version: 2.0.0
+    description: |
+        OAuth 2.1 Resource Server implementing OpenID Connect (OIDC) token validation
+        and Demonstrating Proof-of-Possession (DPoP) per RFC 9449.
+
+        ## DPoP Nonce Flow (RFC 9449 §4.3)
+        The server includes a `DPoP-Nonce` header in responses. Clients MUST include
+        this nonce in subsequent DPoP proofs to prevent replay attacks.
+
+        ## PKCE (RFC 7636)
+        Authorization code exchanges support PKCE via `code_verifier` parameter.
+
+        ## Client Authentication
+        Token requests include `client_id` and optionally `client_secret` for
+        confidential clients.
+
+paths:
+    /.well-known/openid-configuration:
+        get:
+            summary: OpenID Connect Discovery
+            description: |
+                Returns OpenID Provider metadata. The `issuer` field is validated
+                against the discovery URL origin to prevent issuer confusion attacks.
+            responses:
+                "200":
+                    description: OpenID Provider Metadata.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/OidcConfiguration"
+
+    /.well-known/jwks.json:
+        get:
+            summary: JSON Web Key Set (JWKS)
+            description: |
+                Returns the public keys used to verify issued JWTs.
+                The server caches keys respecting the provider's `Cache-Control`
+                `max-age` directive. On key rotation (unknown `kid`), the JWKS
+                is re-fetched automatically.
+            responses:
+                "200":
+                    description: JSON Web Key Set.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/JwksDocument"
+
+    /oauth/token:
+        post:
+            summary: OAuth 2.0 Token Endpoint
+            description: |
+                Issues OAuth 2.0 access tokens and OpenID Connect ID Tokens.
+                Supports DPoP sender-constrained access tokens when the `DPoP`
+                request header is provided.
+
+                ### Refresh Token Authentication
+                Refresh requests include `client_id` and `client_secret` for
+                confidential client authentication per OAuth 2.1 §6.1.1.
+
+                ### PKCE
+                Authorization code exchanges include `code_verifier` for PKCE
+                support per RFC 7636.
+            parameters:
+                - name: DPoP
+                  in: header
+                  required: false
+                  description: DPoP proof JWT as defined by RFC 9449.
+                  schema:
+                      type: string
+            requestBody:
+                required: true
+                content:
+                    application/x-www-form-urlencoded:
+                        schema:
+                            $ref: "#/components/schemas/TokenRequest"
+            responses:
+                "200":
+                    description: Token successfully issued.
+                    headers:
+                        DPoP-Nonce:
+                            description: |
+                                RFC 9449 §4.3: Server-provided nonce. Clients MUST
+                                include this value in the next DPoP proof's `nonce` claim.
+                            schema:
+                                type: string
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/TokenResponse"
+
+                "400":
+                    description: Invalid OAuth or DPoP request.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ErrorResponse"
+
+                "401":
+                    description: Authentication failed.
+                    headers:
+                        WWW-Authenticate:
+                            description: |
+                                RFC 6750 §3: Authentication challenge. Value is
+                                "Bearer" for token errors or "DPoP" for DPoP errors.
+                            schema:
+                                type: string
+                                enum:
+                                    - Bearer
+                                    - DPoP
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+    schemas:
+        OidcConfiguration:
+            type: object
+            required:
+                - issuer
+                - authorization_endpoint
+                - token_endpoint
+                - jwks_uri
+                - response_types_supported
+                - subject_types_supported
+                - id_token_signing_alg_values_supported
+                - dpop_signing_alg_values_supported
+
+            properties:
+                issuer:
+                    type: string
+                    format: uri
+                    description: |
+                        Must match the origin of the discovery URL. Validated
+                        by the resource server to prevent issuer confusion.
+
+                authorization_endpoint:
+                    type: string
+                    format: uri
+
+                token_endpoint:
+                    type: string
+                    format: uri
+
+                jwks_uri:
+                    type: string
+                    format: uri
+
+                response_types_supported:
+                    type: array
+                    items:
+                        type: string
+
+                subject_types_supported:
+                    type: array
+                    items:
+                        type: string
+
+                id_token_signing_alg_values_supported:
+                    type: array
+                    items:
+                        type: string
+
+                dpop_signing_alg_values_supported:
+                    type: array
+                    items:
+                        type: string
+                    example:
+                        - ES256
+                        - RS256
+
+        JwksDocument:
+            type: object
+            required:
+                - keys
+
+            properties:
+                keys:
+                    type: array
+                    items:
+                        type: object
+                        required:
+                            - kty
+                            - kid
+                            - alg
+
+                        properties:
+                            kty:
+                                type: string
+
+                            kid:
+                                type: string
+
+                            alg:
+                                type: string
+
+        TokenRequest:
+            type: object
+            required:
+                - grant_type
+                - client_id
+
+            properties:
+                grant_type:
+                    type: string
+                    enum:
+                        - authorization_code
+                        - refresh_token
+                        - client_credentials
+
+                client_id:
+                    type: string
+                    description: OAuth 2.0 client identifier.
+
+                client_secret:
+                    type: string
+                    description: |
+                        Client secret for confidential clients. Required for
+                        refresh_token and client_credentials grants per OAuth 2.1 §6.1.1.
+
+                code:
+                    type: string
+                    description: Authorization code from the authorization endpoint.
+
+                redirect_uri:
+                    type: string
+                    format: uri
+
+                refresh_token:
+                    type: string
+                    description: |
+                        Refresh token previously issued. The `token_type_hint`
+                        should be "refresh_token" when using this parameter.
+
+                token_type_hint:
+                    type: string
+                    enum:
+                        - access_token
+                        - refresh_token
+                    description: |
+                        OAuth 2.0 §6.1: Hint about the type of token being
+                        refreshed. Helps the authorization server optimize
+                        token lookup.
+
+                code_verifier:
+                    type: string
+                    description: |
+                        RFC 7636 §4.1: PKCE code verifier. The client generates
+                        a cryptographically random string (43-128 chars) and
+                        sends the S256 hash as `code_challenge` in the
+                        authorization request.
+
+        TokenResponse:
+            type: object
+            required:
+                - access_token
+                - token_type
+                - expires_in
+
+            properties:
+                access_token:
+                    type: string
+
+                token_type:
+                    type: string
+                    enum:
+                        - Bearer
+                        - DPoP
+                    description: |
+                        "DPoP" when the access token is sender-constrained
+                        via DPoP. The client MUST present a valid DPoP proof
+                        with this token.
+
+                expires_in:
+                    type: integer
+                    format: int64
+                    description: Token lifetime in seconds.
+
+                refresh_token:
+                    type: string
+                    description: |
+                        Optional rotated refresh token. When present, the
+                        client SHOULD discard the previous refresh token.
+
+                id_token:
+                    type: string
+                    description: OpenID Connect ID Token (JWT).
+
+                scope:
+                    type: string
+
+        ErrorResponse:
+            type: object
+            properties:
+                error:
+                    type: string
+                    enum:
+                        - invalid_request
+                        - invalid_client
+                        - invalid_grant
+                        - unauthorized_client
+                        - unsupported_grant_type
+                        - invalid_scope
+                        - invalid_token
+                        - expired_token
+                        - insufficient_scope
+                        - invalid_dpop_proof
+                        - dpop_nonce_required
+                error_description:
+                    type: string
+                error_uri:
+                    type: string
+                    format: uri
