@@ -203,27 +203,12 @@ mod tests {
 
     #[test]
     fn cache_status_from_pingora() {
-        assert_eq!(
-            CacheStatus::from(PingoraCacheStatus::Hit),
-            CacheStatus::Hit
-        );
-        assert_eq!(
-            CacheStatus::from(PingoraCacheStatus::Miss),
-            CacheStatus::Miss
-        );
-        assert_eq!(
-            CacheStatus::from(PingoraCacheStatus::Expired),
-            CacheStatus::Expired
-        );
-        assert_eq!(
-            CacheStatus::from(PingoraCacheStatus::LockHit),
-            CacheStatus::LockHit
-        );
+        assert_eq!(CacheStatus::from(PingoraCacheStatus::Hit), CacheStatus::Hit);
+        assert_eq!(CacheStatus::from(PingoraCacheStatus::Miss), CacheStatus::Miss);
+        assert_eq!(CacheStatus::from(PingoraCacheStatus::Expired), CacheStatus::Expired);
+        assert_eq!(CacheStatus::from(PingoraCacheStatus::LockHit), CacheStatus::LockHit);
         let d = Duration::from_secs(3);
-        assert_eq!(
-            CacheStatus::from(PingoraCacheStatus::Stale(d)),
-            CacheStatus::Stale(d)
-        );
+        assert_eq!(CacheStatus::from(PingoraCacheStatus::Stale(d)), CacheStatus::Stale(d));
     }
 
     #[test]
