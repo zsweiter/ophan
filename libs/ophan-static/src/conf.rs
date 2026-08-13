@@ -1,4 +1,4 @@
-use flatkit::matchers::GlobSet;
+use flatkit::matchers::PathMatcherSet;
 use std::{
     borrow::Cow,
     path::{Path, PathBuf},
@@ -10,7 +10,7 @@ use crate::fs::security::{FsFlags, SecurityHeaders};
 #[derive(Debug, Clone)]
 pub struct ServeConfig {
     pub root: PathBuf,
-    pub skip_patterns: Option<GlobSet>,
+    pub skip_patterns: Option<PathMatcherSet>,
     pub flags: FsFlags,
     pub security_headers: SecurityHeaders,
     pub cache_ttl: Option<Duration>,
@@ -52,7 +52,7 @@ impl ServeConfig {
 
     /// Create a config with glob-based skip patterns.
     #[inline]
-    pub fn with_skip_patterns<P>(root: P, skip_patterns: GlobSet) -> Self
+    pub fn with_skip_patterns<P>(root: P, skip_patterns: PathMatcherSet) -> Self
     where
         P: Into<PathBuf>,
     {
@@ -68,7 +68,7 @@ impl ServeConfig {
 
     /// Create a config from all options.
     #[inline]
-    pub fn with_options<P>(root: P, skip_patterns: Option<GlobSet>, flags: FsFlags) -> Self
+    pub fn with_options<P>(root: P, skip_patterns: Option<PathMatcherSet>, flags: FsFlags) -> Self
     where
         P: Into<PathBuf>,
     {
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn is_blacklisted_with_matching_pattern() {
-        let glob = GlobSet::try_from(&["**/*.tmp"] as &[&str]).unwrap();
+        let glob = PathMatcherSet::try_from(&["**/*.tmp"] as &[&str]).unwrap();
         let conf = ServeConfig::with_skip_patterns("/tmp", glob);
         assert!(conf.is_blacklisted("/tmp/file.tmp"));
         assert!(conf.is_blacklisted("/tmp/sub/dir/file.tmp"));
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn is_blacklisted_with_non_matching_pattern() {
-        let glob = GlobSet::try_from(&["**/*.tmp"] as &[&str]).unwrap();
+        let glob = PathMatcherSet::try_from(&["**/*.tmp"] as &[&str]).unwrap();
         let conf = ServeConfig::with_skip_patterns("/tmp", glob);
         assert!(!conf.is_blacklisted("/tmp/file.txt"));
         assert!(!conf.is_blacklisted("/tmp/file.html"));
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn is_blacklisted_accepts_string_ref() {
-        let glob = GlobSet::try_from(&["**/secret*"] as &[&str]).unwrap();
+        let glob = PathMatcherSet::try_from(&["**/secret*"] as &[&str]).unwrap();
         let conf = ServeConfig::with_skip_patterns("/tmp", glob);
         assert!(conf.is_blacklisted("/tmp/secret.txt"));
         assert!(!conf.is_blacklisted("/tmp/public.txt"));
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn is_blacklisted_accepts_path_buf() {
-        let glob = GlobSet::try_from(&["**/*.log"] as &[&str]).unwrap();
+        let glob = PathMatcherSet::try_from(&["**/*.log"] as &[&str]).unwrap();
         let conf = ServeConfig::with_skip_patterns("/tmp", glob);
         let path = PathBuf::from("/tmp/app.log");
         assert!(conf.is_blacklisted(path));
