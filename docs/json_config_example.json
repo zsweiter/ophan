@@ -1,0 +1,306 @@
+{
+    "master": {
+        "name": "ophan-master",
+        "user": "ophan",
+        "workers": "auto",
+        "pid": "/var/run/ophan.pid",
+        "error_log": "/var/log/ophan/error.log",
+        "includes": ["/etc/ophan/conf.d/*.json"]
+    },
+    "gateways": {
+        "main_gateway": {
+            "name": "main_gateway",
+            "listeners": [
+                {
+                    "name": "https_listener",
+                    "address": "0.0.0.0:443",
+                    "protocols": ["http1", "http2"],
+                    "tls": {
+                        "cert": "/etc/ssl/certs/ophan.crt",
+                        "key": "/etc/ssl/certs/ophan.key",
+                        "versions": ["TLSv1.2", "TLSv1.3"],
+                        "client_auth": "optional",
+                        "client_ca": "/etc/ssl/certs/ca.crt",
+                        "ciphers": [
+                            "ECDHE-ECDSA-AES128-GCM-SHA256",
+                            "ECDHE-RSA-AES128-GCM-SHA256"
+                        ]
+                    },
+                    "network_policy": {
+                        "allowed_ip_ranges": ["10.0.0.0/8", "192.168.1.0/24"],
+                        "blocked_ip_ranges": ["192.168.1.50/32"],
+                        "real_ip_header": "X-Forwarded-For",
+                        "proxy_allowed_ips": ["10.0.0.1"]
+                    },
+                    "limits": {
+                        "connections": 10000,
+                        "request_size": "10MB"
+                    },
+                    "timeouts": {
+                        "idle": "60s",
+                        "keepalive": "75s"
+                    }
+                }
+            ],
+            "upstreams": [
+                {
+                    "name": "api_backend",
+                    "balance_strategy": "round_robin",
+                    "static_servers": [
+                        {
+                            "endpoint": "127.0.0.1:8081",
+                            "weight": 2,
+                            "protocol": "http"
+                        },
+                        {
+                            "endpoint": "127.0.0.1:8082",
+                            "weight": 1,
+                            "protocol": "http"
+                        }
+                    ],
+                    "security": {
+                        "insecure_skip_verify": false,
+                        "hosts": ["api.internal"],
+                        "cert": "/etc/ssl/certs/client.crt",
+                        "key": "/etc/ssl/certs/client.key",
+                        "client_ca": "/etc/ssl/certs/internal_ca.crt",
+                        "client_auth": "require",
+                        "versions": ["TLSv1.3"]
+                    },
+                    "health_check": {
+                        "path": "/healthz",
+                        "interval": "10s",
+                        "timeout": "2s",
+                        "healthy_threshold": 2,
+                        "unhealthy_threshold": 3
+                    },
+                    "circuit_breaker": {
+                        "consecutive_failures": 5,
+                        "ejection_time": "30s",
+                        "max_ejection_percent": 50
+                    },
+                    "discovery": {
+                        "driver": "dns",
+                        "dns": "1.1.1.1:53",
+                        "refresh_interval": "15s"
+                    },
+                    "registry": {
+                        "driver": "consul",
+                        "security": {
+                            "type": "mtls",
+                            "cert": "/etc/ssl/consul.crt",
+                            "key": "/etc/ssl/consul.key",
+                            "client_ca": "/etc/ssl/ca.crt"
+                        }
+                    }
+                }
+            ],
+            "routes": [
+                {
+                    "type": "path",
+                    "path": "/api/v1",
+                    "hosts": ["api.example.com"],
+                    "methods": ["GET", "POST", "PUT"],
+                    "protocols": ["https"],
+                    "backend": {
+                        "type": "upstream",
+                        "name": "api_backend"
+                    },
+                    "timeouts": {
+                        "connect": "5s",
+                        "read": "30s",
+                        "send": "30s"
+                    },
+                    "streaming": {
+                        "buffering": false,
+                        "chunked": true
+                    },
+                    "policies": {
+                        "auth": {
+                            "type": "ref",
+                            "name": "jwt_auth"
+                        },
+                        "limiter": {
+                            "type": "extends",
+                            "base": "global_limiter",
+                            "overrides": {
+                                "rate": [500, "1m"],
+                                "burst": 50,
+                                "exclude_paths": []
+                            }
+                        },
+                        "cors": {
+                            "type": "inline",
+                            "config": {
+                                "allow_origins": ["https://app.example.com"],
+                                "allow_methods": ["GET", "POST"],
+                                "allow_headers": [
+                                    "Authorization",
+                                    "Content-Type"
+                                ],
+                                "expose_headers": ["X-Request-ID"],
+                                "allow_credentials": true,
+                                "max_age": "3600s",
+                                "exclude_paths": []
+                            }
+                        }
+                    },
+                    "rewrite": {
+                        "strip_prefix": "/api/v1",
+                        "strip_suffix": null,
+                        "replaces": [["/v1/users", "/users_v1"]],
+                        "trailing_slash": "remove"
+                    },
+                    "inbound_headers": {
+                        "opts": {
+                            "set": [["X-Gateway-ID", "ophan-01"]],
+                            "remove": ["Server"]
+                        },
+                        "upstream": {
+                            "set": [["X-Forwarded-Proto", "https"]],
+                            "remove": ["X-Internal-Token"]
+                        }
+                    },
+                    "outbound_headers": {
+                        "opts": {
+                            "set": [["X-Frame-Options", "DENY"]],
+                            "remove": ["X-Powered-By"]
+                        },
+                        "upstream": {
+                            "remove": ["X-Backend-Server"]
+                        }
+                    }
+                },
+                {
+                    "type": "path",
+                    "path": "/static",
+                    "hosts": ["example.com"],
+                    "methods": ["GET"],
+                    "protocols": ["http", "https"],
+                    "backend": {
+                        "type": "static",
+                        "root": "/var/www/static",
+                        "flags": {
+                            "listing": false,
+                            "dotfiles": false,
+                            "index": true,
+                            "symlinks": false
+                        },
+                        "exclude_paths": ["/static/private"]
+                    }
+                },
+                {
+                    "type": "group",
+                    "name": "v2_routes",
+                    "hosts": ["api.example.com"],
+                    "methods": ["GET", "POST"],
+                    "backend": {
+                        "type": "upstream",
+                        "name": "api_backend"
+                    },
+                    "matches": [
+                        {
+                            "pattern": "GET /api/v2/users/*",
+                            "backend": {
+                                "type": "upstream",
+                                "name": "api_backend"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "policies": [
+                {
+                    "type": "auth",
+                    "name": "jwt_auth",
+                    "config": {
+                        "issuer": "https://auth.example.com",
+                        "audience": "api_resource",
+                        "client_id": "ophan_proxy",
+                        "mode": {
+                            "type": "jwks",
+                            "uri": "https://auth.example.com/.well-known/jwks.json",
+                            "ttl": "3600s",
+                            "algorithms": ["RS256", "ES256"]
+                        },
+                        "dpop_proof": "required",
+                        "sources": [
+                            {
+                                "type": "header",
+                                "name": "Authorization",
+                                "prefix": "Bearer "
+                            },
+                            {
+                                "type": "cookie",
+                                "name": "access_token",
+                                "prefix": null
+                            }
+                        ],
+                        "refresh": {
+                            "enabled": true,
+                            "endpoint": "https://auth.example.com/oauth/token",
+                            "sources": {
+                                "type": "cookie",
+                                "name": "refresh_token",
+                                "prefix": null
+                            },
+                            "inject": {
+                                "access_token": [
+                                    {
+                                        "type": "header",
+                                        "name": "Authorization"
+                                    }
+                                ],
+                                "refresh_token": [
+                                    {
+                                        "type": "cookie",
+                                        "config": {
+                                            "name": "refresh_token",
+                                            "path": "/",
+                                            "http_only": true,
+                                            "secure": true,
+                                            "same_site": "Strict"
+                                        }
+                                    }
+                                ]
+                            }
+                        },
+                        "exclude_paths": ["/healthz", "/public"]
+                    }
+                },
+                {
+                    "type": "limiter",
+                    "name": "global_limiter",
+                    "config": {
+                        "rate": [1000, "1s"],
+                        "burst": 100,
+                        "identifier": "client_ip",
+                        "strategy": "token_bucket",
+                        "exclude_paths": ["/metrics"]
+                    }
+                },
+                {
+                    "type": "waf",
+                    "name": "owasp_waf",
+                    "config": {
+                        "mode": "blocking",
+                        "ruleset": "owasp_crs_v3",
+                        "max_body_size": "5MB",
+                        "anomaly_threshold": 5,
+                        "rules": [
+                            {
+                                "name": "sqli_protection",
+                                "phase": "request_body",
+                                "action": "deny",
+                                "score": 5,
+                                "when": "request.body.contains_sqli()",
+                                "message": "SQL Injection Detected"
+                            }
+                        ],
+                        "exclude_paths": ["/upload"]
+                    }
+                }
+            ]
+        }
+    }
+}
