@@ -22,7 +22,7 @@ rate = @{ ASCII_DIGIT+ ~ "/" ~ ("s" | "m" | "h" | "d") }
 value = { size | duration | rate | boolean | number | octal | array | inline_object | string | identifier }
 array = { "[" ~ (value ~ ("," ~ value)* ~ ","?)? ~ "]" }
 inline_object = { "{" ~ (inline_kv ~ ("," ~ inline_kv)* ~ ","?)? ~ "}" | "{" ~ "}" }
-inline_kv = { identifier ~ "=" ~ value }
+inline_kv = { (identifier | string) ~ "=" ~ value }
 
 // Key-value assignment
 key_value = { identifier ~ "=" ~ value }
@@ -47,6 +47,7 @@ gateway_body = _{
   | upstreams_block
   | routes_block
   | policy_block
+  | network_policy_block
 }
 
 name_assignment = { "name" ~ "=" ~ string }
@@ -54,24 +55,46 @@ name_assignment = { "name" ~ "=" ~ string }
 // ========== LISTENERS ==========
 listeners_block = { "listeners" ~ "{" ~ listener_def* ~ "}" }
 listener_def = { "listener" ~ string ~ "{" ~ listener_body* ~ "}" }
-listener_body = _{ ssl_block | listener_address | listener_protocols }
+listener_body = _{ ssl_block | listener_address | listener_protocols | network_policy_block | limits_block | listener_timeouts_block }
 listener_address = { "address" ~ "=" ~ string }
 listener_protocols = { "protocols" ~ "=" ~ array }
-ssl_block = { "ssl" ~ "{" ~ ssl_entry* ~ "}" }
-ssl_entry = _{ ssl_cert | ssl_key | ssl_client_ca }
+
+ssl_block = { ("ssl" | "tls") ~ "{" ~ ssl_entry* ~ "}" }
+ssl_entry = _{ ssl_cert | ssl_key | ssl_client_ca | ssl_versions | ssl_client_auth | ssl_ciphers }
 ssl_cert = { "cert" ~ "=" ~ string }
 ssl_key = { "key" ~ "=" ~ string }
 ssl_client_ca = { "client_ca" ~ "=" ~ string }
+ssl_versions = { "versions" ~ "=" ~ array }
+ssl_client_auth = { "client_auth" ~ "=" ~ string }
+ssl_ciphers = { "ciphers" ~ "=" ~ array }
+
+limits_block = { "limits" ~ "{" ~ limits_entry* ~ "}" }
+limits_entry = _{ limits_connections | limits_request_size }
+limits_connections = { "connections" ~ "=" ~ number }
+limits_request_size = { "request_size" ~ "=" ~ size }
+
+listener_timeouts_block = { "timeouts" ~ "{" ~ listener_timeout_entry* ~ "}" }
+listener_timeout_entry = _{ listener_timeout_idle | listener_timeout_keepalive }
+listener_timeout_idle = { "idle" ~ "=" ~ value }
+listener_timeout_keepalive = { "keepalive" ~ "=" ~ value }
+
+network_policy_block = { "network_policy" ~ "{" ~ network_entry* ~ "}" }
+network_entry        = _{ allowed_ip_ranges | blocked_ip_ranges | real_ip_header | proxy_allowed_ips | tp_policy }
+allowed_ip_ranges    = { "allowed_ip_ranges" ~ "=" ~ array }
+blocked_ip_ranges    = { "blocked_ip_ranges" ~ "=" ~ array }
+real_ip_header       = { "real_ip_header" ~ "=" ~ string }
+proxy_allowed_ips    = { "proxy_allowed_ips" ~ "=" ~ array }
+tp_policy            = { "policy" ~ "=" ~ string }
 
 // ========== UPSTREAMS ==========
 upstreams_block = { "upstreams" ~ "{" ~ upstream_def* ~ "}" }
 upstream_def = { "upstream" ~ string ~ "{" ~ upstream_body* ~ "}" }
 upstream_body = _{ servers_assignment | load_balance_assignment | health_check_assignment }
 
-servers_assignment = { "servers" ~ "=" ~ servers_value }
+servers_assignment = { ("static_servers" | "servers") ~ "=" ~ servers_value }
 servers_value = { array | inline_object | string }
 
-load_balance_assignment = { "load_balance" ~ "=" ~ string }
+load_balance_assignment = { ("balance_strategy" | "load_balance") ~ "=" ~ string }
 health_check_assignment = { "health_check" ~ "=" ~ inline_object }
 
 // ========== ROUTES ==========
@@ -81,15 +104,18 @@ route_body = _{
     backend_assignment
   | route_policies_block
   | rewrite_block
-  | headers_block
+  | inbound_headers_block
+  | outbound_headers_block
   | timeouts_block
   | streaming_block
   | route_hosts
   | route_methods
-  | listener_protocols
+  | route_protocols
+  | static_config_block
 }
 route_hosts = { "hosts" ~ "=" ~ array }
 route_methods = { "methods" ~ "=" ~ array }
+route_protocols = { "protocols" ~ "=" ~ array }
 
 timeouts_block = { "timeouts" ~ "{" ~ (timeout_connect | timeout_read | timeout_send)* ~ "}" }
 timeout_connect = { "connect" ~ "=" ~ value }
@@ -102,14 +128,16 @@ streaming_chunked = { "chunked" ~ "=" ~ boolean }
 
 backend_assignment = { "backend" ~ "=" ~ backend_target }
 backend_target = { backend_static | backend_upstream }
-backend_static = { "static" ~ "{" ~ static_entry* ~ "}" }
-static_entry = _{ static_root | static_listing | static_dotfiles | static_permissions | static_disallow }
-static_root = { "root" ~ "=" ~ string }
-static_listing = { "listing" ~ "=" ~ boolean }
-static_dotfiles = { "dotfiles" ~ "=" ~ boolean }
-static_permissions = { "permissions" ~ "=" ~ octal }
-static_disallow = { "disallow" ~ "=" ~ array }
+backend_static = { "static" ~ "(" ~ string ~ ")" }
 backend_upstream = { "upstream" ~ "(" ~ string ~ ")" }
+
+static_config_block = { "static_config" ~ "{" ~ static_config_entry* ~ "}" }
+static_config_entry = _{ static_config_listing | static_config_dotfiles | static_config_index | static_config_symlinks | static_config_exclude_paths }
+static_config_listing = { "listing" ~ "=" ~ boolean }
+static_config_dotfiles = { "dotfiles" ~ "=" ~ boolean }
+static_config_index = { "index" ~ "=" ~ boolean }
+static_config_symlinks = { "symlinks" ~ "=" ~ boolean }
+static_config_exclude_paths = { "exclude_paths" ~ "=" ~ array }
 
 route_policies_block = { "policies" ~ "{" ~ route_policy_entry* ~ "}" }
 route_policy_entry = _{
@@ -121,55 +149,78 @@ route_policy_entry = _{
 policy_direct = { identifier ~ "=" ~ string }
 policy_extends = { identifier ~ "extends" ~ string ~ "{" ~ (sources_block | refresh_block | key_value)* ~ "}" }
 policy_local_block = { identifier ~ "{" ~ policy_local_body* ~ "}" }
-policy_local_body = _{ key_value }
+policy_local_body = _{ sources_block | refresh_block | rules_block | key_value }
 
-rewrite_block = { "rewrite" ~ "{" ~ rewrite_rule* ~ "}" }
-rewrite_rule = { string ~ "->" ~ string }
+rewrite_block = { "rewrite" ~ "{" ~ rewrite_directive* ~ "}" }
+rewrite_directive = _{ rewrite_strip_prefix | rewrite_strip_suffix | rewrite_replace | rewrite_trailing_slash }
+rewrite_strip_prefix = { "strip_prefix" ~ "="? ~ string }
+rewrite_strip_suffix = { "strip_suffix" ~ "="? ~ string }
+rewrite_replace = { "replace" ~ "="? ~ string ~ "->" ~ string }
+rewrite_trailing_slash = { "trailing_slash" ~ "="? ~ string }
 
-headers_block = { "headers" ~ "{" ~ headers_entry* ~ "}" }
-headers_entry = _{ headers_add | headers_set | headers_remove }
+// Inbound headers block
+inbound_headers_block = { "inbound_headers" ~ "{" ~ headers_entry* ~ "}" }
+outbound_headers_block = { "outbound_headers" ~ "{" ~ headers_entry* ~ "}" }
+headers_entry = _{ headers_add | headers_set | headers_remove | headers_to_upstream | headers_from_upstream }
 headers_add = { "add" ~ "=" ~ inline_object }
 headers_set = { "set" ~ "=" ~ inline_object }
 headers_remove = { "remove" ~ "=" ~ array }
+headers_to_upstream = { "to_upstream" ~ "{" ~ headers_direction_entry* ~ "}" }
+headers_from_upstream = { "from_upstream" ~ "{" ~ headers_direction_entry* ~ "}" }
+headers_direction_entry = _{ headers_direction_set | headers_direction_remove | headers_to_upstream | headers_from_upstream }
+headers_direction_set = { "set" ~ "=" ~ inline_object }
+headers_direction_remove = { "remove" ~ "=" ~ array }
 
 // ========== GLOBAL POLICIES ==========
 policy_block = { "policy" ~ policy_type ~ string ~ "{" ~ policy_body* ~ "}" }
-policy_type = @{ "auth" | "waf" | "cors" | "limiter" }
-policy_body = _{ sources_block | refresh_block | rules_block | auth_field | waf_field | cors_field | limiter_field }
+policy_type = @{ "auth" | "waf" | "cors" | "limiter" | "helmet" }
+policy_body = _{ sources_block | refresh_block | rules_block | auth_field | waf_field | cors_field | limiter_field | helmet_field }
 
 // Auth fields
-auth_field = _{ auth_issuer | auth_client_id | auth_client_secret | auth_jwks_uri | auth_audience | auth_excludes }
+auth_field = _{ auth_issuer | auth_client_id | auth_audience | auth_dpop_proof | auth_exclude_paths | auth_mode }
 auth_issuer = { "issuer" ~ "=" ~ string }
 auth_client_id = { "client_id" ~ "=" ~ string }
-auth_client_secret = { "client_secret" ~ "=" ~ string }
-auth_jwks_uri = { "jwks_uri" ~ "=" ~ string }
 auth_audience = { "audience" ~ "=" ~ string }
-auth_excludes = { "excludes" ~ "=" ~ array }
+auth_dpop_proof = { "dpop_proof" ~ "=" ~ string }
+auth_exclude_paths = { "exclude_paths" ~ "=" ~ array }
+
+// Auth mode block (JWKS configuration)
+auth_mode = { "mode" ~ string ~ "{" ~ auth_mode_body* ~ "}" }
+auth_mode_body = _{ auth_mode_uri | auth_mode_ttl | auth_mode_algorithms }
+auth_mode_uri = { "uri" ~ "=" ~ string }
+auth_mode_ttl = { "ttl" ~ "=" ~ duration }
+auth_mode_algorithms = { "algorithms" ~ "=" ~ array }
 
 // WAF fields
-waf_field = _{ waf_enabled | waf_mode | waf_max_body_size | waf_anomaly_threshold | waf_excludes }
-waf_enabled = { "enabled" ~ "=" ~ boolean }
+waf_field = _{ waf_mode | waf_ruleset | waf_max_body_size | waf_anomaly_threshold | waf_exclude_paths }
 waf_mode = { "mode" ~ "=" ~ string }
+waf_ruleset = { "ruleset" ~ "=" ~ string }
 waf_max_body_size = { "max_body_size" ~ "=" ~ size }
 waf_anomaly_threshold = { "anomaly_threshold" ~ "=" ~ number }
-waf_excludes = { "excludes" ~ "=" ~ array }
+waf_exclude_paths = { "exclude_paths" ~ "=" ~ array }
 
 // CORS fields
-cors_field = _{ cors_allow_origin | cors_allow_methods | cors_allow_headers | cors_allow_credentials | cors_max_age | cors_excludes }
-cors_allow_origin = { "allow_origin" ~ "=" ~ array }
+cors_field = _{ cors_allow_origins | cors_allow_methods | cors_allow_headers | cors_allow_credentials | cors_max_age | cors_expose_headers | cors_exclude_paths }
+cors_allow_origins = { "allow_origins" ~ "=" ~ array }
 cors_allow_methods = { "allow_methods" ~ "=" ~ array }
 cors_allow_headers = { "allow_headers" ~ "=" ~ array }
 cors_allow_credentials = { "allow_credentials" ~ "=" ~ boolean }
 cors_max_age = { "max_age" ~ "=" ~ value }
-cors_excludes = { "excludes" ~ "=" ~ array }
+cors_expose_headers = { "expose_headers" ~ "=" ~ array }
+cors_exclude_paths = { "exclude_paths" ~ "=" ~ array }
 
 // Limiter fields
-limiter_field = _{ limiter_rate | limiter_burst | limiter_algorithm | limiter_identifier | limiter_excludes }
+limiter_field = _{ limiter_rate | limiter_burst | limiter_strategy | limiter_identifier | limiter_exclude_paths }
 limiter_rate = { "rate" ~ "=" ~ value }
 limiter_burst = { "burst" ~ "=" ~ number }
-limiter_algorithm = { "algorithm" ~ "=" ~ string }
+limiter_strategy = { "strategy" ~ "=" ~ string }
 limiter_identifier = { "identifier" ~ "=" ~ string }
-limiter_excludes = { "excludes" ~ "=" ~ array }
+limiter_exclude_paths = { "exclude_paths" ~ "=" ~ array }
+
+// Helmet fields
+helmet_field = _{ helmet_target | helmet_level }
+helmet_target = { "target" ~ "=" ~ string }
+helmet_level = { "level" ~ "=" ~ string }
 
 sources_block = { "sources" ~ "{" ~ source_item* ~ "}" }
 source_item = { source_type ~ "{" ~ (source_name | source_prefix) ~ (","? ~ (source_name | source_prefix))* ~ ","? ~ "}" }
@@ -178,14 +229,31 @@ source_name = { "name" ~ "=" ~ string }
 source_prefix = { "prefix" ~ "=" ~ string }
 
 refresh_block = { "refresh" ~ "{" ~ refresh_body* ~ "}" }
-refresh_body = _{ sources_block | refresh_enabled | refresh_endpoint }
+refresh_body = _{ sources_block | inject_block | refresh_enabled | refresh_endpoint }
 refresh_enabled = { "enabled" ~ "=" ~ boolean }
 refresh_endpoint = { "endpoint" ~ "=" ~ string }
 
+// Inject block (token injection after refresh)
+inject_block = { "inject" ~ "{" ~ inject_target* ~ "}" }
+inject_target = _{ inject_access_token | inject_refresh_token }
+inject_access_token = { "access_token" ~ "{" ~ inject_dest* ~ "}" }
+inject_refresh_token = { "refresh_token" ~ "{" ~ inject_dest* ~ "}" }
+inject_dest = _{ inject_header | inject_cookie }
+inject_header = { "header" ~ "{" ~ inject_header_name ~ "}" }
+inject_header_name = { "name" ~ "=" ~ string }
+inject_cookie = { "cookie" ~ "{" ~ inject_cookie_entry* ~ "}" }
+inject_cookie_entry = _{ inject_cookie_name | inject_cookie_path | inject_cookie_secure | inject_cookie_http_only | inject_cookie_same_site }
+inject_cookie_name = { "name" ~ "=" ~ string }
+inject_cookie_path = { "path" ~ "=" ~ string }
+inject_cookie_secure = { "secure" ~ "=" ~ boolean }
+inject_cookie_http_only = { "http_only" ~ "=" ~ boolean }
+inject_cookie_same_site = { "same_site" ~ "=" ~ string }
+
 rules_block = { "rules" ~ "{" ~ rule_def* ~ "}" }
 rule_def = { "rule" ~ string ~ "{" ~ rule_body* ~ "}" }
-rule_body = _{ rule_phase | rule_condition | rule_action | rule_score }
+rule_body = _{ rule_phase | rule_when | rule_action | rule_score | rule_message }
 rule_phase = { "phase" ~ "=" ~ string }
-rule_condition = { "condition" ~ "=" ~ identifier }
+rule_when = { "when" ~ "=" ~ string }
 rule_action = { "action" ~ "=" ~ string }
 rule_score = { "score" ~ "=" ~ number }
+rule_message = { "message" ~ "=" ~ string }
