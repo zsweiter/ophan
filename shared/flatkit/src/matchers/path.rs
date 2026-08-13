@@ -436,7 +436,6 @@ struct MatchFrame<'a> {
     input: &'a [u8],
     child_start: u32,
     child_end: u32,
-    /// Progreso interno del wildcard actual (para * y **)
     progress: u32,
 }
 

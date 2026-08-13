@@ -318,9 +318,8 @@ mod tests {
 
     #[test]
     fn test_rounding_edge_cases() {
-        // justo debajo del cambio de unidad
         assert_eq!(format_size(1023).as_str(), "1023 B");
-        assert_eq!(format_size((1 << 20) - 1).as_str(), "1023.9 KB"); // dependiendo de tu truncado
+        assert_eq!(format_size((1 << 20) - 1).as_str(), "1023.9 KB"); 
     }
 
     #[test]
