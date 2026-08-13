@@ -1,0 +1,194 @@
+---
+import Logo from "./Logo.astro";
+
+const navLinks = [
+    { href: "/", label: "Overview" },
+    { href: "/quickstart", label: "Getting Started" },
+    { href: "/configuration", label: "Configuration" },
+    { href: "/architecture", label: "Architecture" },
+    { href: "/roadmap", label: "Roadmap" },
+];
+---
+
+<header
+    class="fixed top-6 left-0 right-0 z-50 flex justify-center px-4"
+    id="main-header"
+>
+    <nav
+        class="flex items-center justify-between px-4 py-3 rounded-2xl transition-all duration-300 w-full max-w-7xl"
+        id="nav-container"
+    >
+        <a href="/" class="flex items-center gap-3 pl-2 group cursor-pointer">
+            <Logo />
+        </a>
+
+        <div
+            class="hidden md:flex items-center gap-8 text-sm font-medium text-neutral-400"
+        >
+            {
+                navLinks.map((link) => (
+                    <a
+                        href={link.href}
+                        class="hover:text-white transition-colors duration-200"
+                    >
+                        {link.label}
+                    </a>
+                ))
+            }
+        </div>
+
+        <div class="flex items-center gap-4">
+            <a
+                href="https://github.com/zsweiter/ophan"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="hidden sm:flex items-center gap-2 px-5 py-2.5 border border-white/10 text-neutral-200 font-semibold rounded-full text-sm hover:border-vayload-accent hover:text-white transition-all active:scale-95"
+            >
+                <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <path
+                        d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"
+                    ></path>
+                </svg>
+                Star on GitHub
+            </a>
+
+            <button
+                class="md:hidden text-neutral-300 p-2"
+                id="mobile-menu-btn"
+                aria-label="Toggle menu"
+            >
+                <svg
+                    id="menu-icon"
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <line x1="3" y1="12" x2="21" y2="12"></line>
+                    <line x1="3" y1="6" x2="21" y2="6"></line>
+                    <line x1="3" y1="18" x2="21" y2="18"></line>
+                </svg>
+                <svg
+                    id="close-icon"
+                    class="hidden"
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                >
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+            </button>
+        </div>
+    </nav>
+</header>
+
+<div
+    id="mobile-menu"
+    class="fixed inset-0 z-40 bg-black/95 pt-28 px-8 md:hidden hidden"
+>
+    <div class="flex flex-col gap-8 text-2xl font-medium text-neutral-300">
+        {
+            navLinks.map((link) => (
+                <a
+                    href={link.href}
+                    class="hover:text-white transition-colors"
+                    onclick="closeMobileMenu()"
+                >
+                    {link.label}
+                </a>
+            ))
+        }
+        <a
+            href="https://github.com/zsweiter/ophan"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-vayload-accent-light hover:text-vayload-accent transition-colors"
+        >
+            Star on GitHub
+        </a>
+    </div>
+</div>
+
+<script>
+    document.addEventListener("astro:page-load", () => {
+        const header = document.getElementById("main-header");
+        const navContainer = document.getElementById("nav-container");
+        const mobileMenuBtn = document.getElementById("mobile-menu-btn");
+        const mobileMenu = document.getElementById("mobile-menu");
+        const menuIcon = document.getElementById("menu-icon");
+        const closeIcon = document.getElementById("close-icon");
+        let isMenuOpen = false;
+
+        function handleScroll() {
+            if (window.scrollY > 20) {
+                navContainer?.classList.add(
+                    "vayload-header-glass",
+                    "border-white/20",
+                    "shadow-[0_8px_30px_rgb(0,0,0,0.5)]",
+                );
+                navContainer?.classList.remove(
+                    "border-transparent",
+                    "max-w-7xl",
+                );
+                navContainer?.classList.add("max-w-6xl");
+            } else {
+                navContainer?.classList.remove(
+                    "vayload-header-glass",
+                    "border-white/20",
+                    "shadow-[0_8px_30px_rgb(0,0,0,0.5)]",
+                    "max-w-6xl",
+                );
+                navContainer?.classList.add("border-transparent", "max-w-7xl");
+            }
+        }
+
+        function toggleMobileMenu() {
+            isMenuOpen = !isMenuOpen;
+            if (isMenuOpen) {
+                mobileMenu?.classList.remove("hidden");
+                menuIcon?.classList.add("hidden");
+                closeIcon?.classList.remove("hidden");
+            } else {
+                mobileMenu?.classList.add("hidden");
+                menuIcon?.classList.remove("hidden");
+                closeIcon?.classList.add("hidden");
+            }
+        }
+
+        function closeMobileMenu() {
+            isMenuOpen = false;
+            mobileMenu?.classList.add("hidden");
+            menuIcon?.classList.remove("hidden");
+            closeIcon?.classList.add("hidden");
+        }
+
+        window.addEventListener("scroll", handleScroll);
+        mobileMenuBtn?.addEventListener("click", toggleMobileMenu);
+
+        mobileMenu?.querySelectorAll("a").forEach((link) => {
+            link.addEventListener("click", closeMobileMenu);
+        });
+    });
+</script>

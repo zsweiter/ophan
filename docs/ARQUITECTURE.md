@@ -240,11 +240,9 @@ while focusing on:
 
 - HTTP/1.1
 - HTTP/2
-- HTTP/3
 - WebSocket
 - gRPC
 - TCP proxying
-- UDP proxying
 - IPv4
 - IPv6
 - Unix Domain Sockets (UDS)
@@ -268,11 +266,11 @@ while focusing on:
 
 - JWT authentication
 - OAuth2 / OIDC
-- API keys
-- RBAC
+- API keys (planed)
+- RBAC (planed)
 - CORS
 - Rate limiting
-- Quotas
+- Quotas 
 - Request/response transformations
 - Request validation
 

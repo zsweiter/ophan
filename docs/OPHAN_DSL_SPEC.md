@@ -428,7 +428,6 @@ Transforms the route into a local static file server.
 | `root`     | `String`        | Public root directory    |
 | `listing`  | `Boolean`       | Enable directory listing |
 | `dotfiles` | `Boolean`       | Allow hidden files       |
-| `disallow` | `Array<String>` | Glob block patterns      |
 
 ---
 
@@ -439,10 +438,6 @@ backend = static {
     root     = "/var/www/public"
     listing  = false
     dotfiles = false
-
-    disallow = [
-        "/config/*"
-    ]
 }
 ```
 

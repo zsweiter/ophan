@@ -1,0 +1,19 @@
+---
+import { getEntry, render } from "astro:content";
+import DocsLayout from "@/layouts/DocsLayout.astro";
+
+const entry = await getEntry("docs", "index");
+if (!entry) {
+    throw new Error("Index entry not found");
+}
+
+const { Content, headings } = await render(entry);
+---
+
+<DocsLayout
+    title={entry.data.title}
+    description={entry.data.description}
+    headings={headings}
+>
+    <Content />
+</DocsLayout>

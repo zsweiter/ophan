@@ -1,0 +1,27 @@
+<svg id="active-brand-svg" width="160" height="120" viewBox="0 0 160 120" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="dynamic-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#52525b"/>
+                        <stop offset="100%" stop-color="#d4d4d8"/>
+                    </linearGradient>
+                </defs>
+            
+                    <g transform="translate(10, 0)">
+                        
+                    <g id="isotipo-group">
+                        <!-- Círculo base sólido izquierdo (ancla de marca) -->
+                        <circle cx="55" cy="60" r="28" fill="none" stroke="#27272a" stroke-width="8"/>
+                        
+                        <!-- Círculo derecho ascendente dinámico con degradado sobrio -->
+                        <circle cx="85" cy="60" r="28" fill="none" stroke="url(#dynamic-grad)" stroke-width="8"/>
+                        
+                        <!-- Arco de intersección superior para dar profundidad -->
+                        <path d="M 55,32 A 28,28 0 0,1 83,60" fill="none" stroke="#27272a" stroke-width="8"/>
+                        
+                        <!-- Máscaras de corte sutiles de remate, alineadas a la exactitud milimétrica -->
+                        <path d="M 57,32 L 53,32" stroke="#09090b" stroke-width="12" stroke-linecap="round"/>
+                        <path d="M 83,88 L 87,88" stroke="#09090b" stroke-width="12" stroke-linecap="round"/>
+                    </g>
+                
+                    </g>
+                </svg>

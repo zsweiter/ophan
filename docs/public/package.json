@@ -1,0 +1,22 @@
+{
+    "name": "@vayload/landing",
+    "type": "module",
+    "version": "0.0.9",
+    "scripts": {
+        "dev": "astro dev",
+        "start": "astro dev",
+        "build": "astro build",
+        "preview": "astro preview",
+        "astro": "astro"
+    },
+    "dependencies": {
+        "@astrojs/mdx": "4.3.13",
+        "@fontsource-variable/jetbrains-mono": "5.2.8",
+        "@fontsource-variable/space-grotesk": "5.2.10",
+        "@tailwindcss/vite": "4.1.18",
+        "astro": "5.6.1",
+        "remark-gfm": "4.0.1",
+        "sharp": "0.34.2",
+        "tailwindcss": "4.1.18"
+    }
+}

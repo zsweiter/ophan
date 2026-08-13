@@ -1,0 +1,101 @@
+{
+	"name": "Ophan Warm Dark",
+	"type": "dark",
+	"colors": {
+		"editor.background": "transparent",
+		"editor.foreground": "#e6e3de"
+	},
+	"tokenColors": [
+		{
+			"scope": ["keyword", "storage.type", "storage.modifier", "meta.keyword"],
+			"settings": {
+				"foreground": "#dcae74",
+				"fontStyle": "bold"
+			}
+		},
+		{
+			"scope": ["string", "string.template", "string.regexp"],
+			"settings": {
+				"foreground": "#d19468"
+			}
+		},
+		{
+			"scope": ["constant.numeric", "constant.language", "constant.other"],
+			"settings": {
+				"foreground": "#efe3cf"
+			}
+		},
+		{
+			"scope": ["entity.name.function", "entity.name.section"],
+			"settings": {
+				"foreground": "#f7f1e8",
+				"fontStyle": ""
+			}
+		},
+		{
+			"scope": ["entity.name.type", "support.type", "entity.name.class", "entity.other.attribute-name"],
+			"settings": {
+				"foreground": "#e6dccf"
+			}
+		},
+		{
+			"scope": ["variable", "variable.parameter"],
+			"settings": {
+				"foreground": "#e8e4dc"
+			}
+		},
+		{
+			"scope": ["variable.other.property", "meta.property-name"],
+			"settings": {
+				"foreground": "#e8c287"
+			}
+		},
+		{
+			"scope": ["comment", "comment.block", "comment.line", "comment.documentation"],
+			"settings": {
+				"foreground": "#7d766c",
+				"fontStyle": "italic"
+			}
+		},
+		{
+			"scope": ["punctuation", "punctuation.definition"],
+			"settings": {
+				"foreground": "#9a938a"
+			}
+		},
+		{
+			"scope": ["entity.name.tag", "meta.tag"],
+			"settings": {
+				"foreground": "#e6dccf"
+			}
+		},
+		{
+			"scope": ["strong"],
+			"settings": {
+				"foreground": "#f7f1e8",
+				"fontStyle": "bold"
+			}
+		},
+		{
+			"scope": ["emphasis"],
+			"settings": {
+				"foreground": "#c9956b",
+				"fontStyle": "italic"
+			}
+		},
+		{
+			"scope": ["markup.inserted"],
+			"settings": {
+				"foreground": "#bdcbb0",
+				"background": "#b3c2a326"
+			}
+		},
+		{
+			"scope": ["markup.deleted"],
+			"settings": {
+				"foreground": "#d08a74",
+				"background": "#c97f5f26"
+			}
+		}
+	]
+}

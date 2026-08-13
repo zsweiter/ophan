@@ -30,7 +30,7 @@ Example:
 
 Features:
 
-- Directory mounting
+- Directory mounting (planned)
 - Index files
 - Auto compression
 - Cache headers
@@ -40,7 +40,7 @@ Features:
 
 ---
 
-### CDN Integration
+### CDN Integration (planed)
 
 Ophan should support external CDN-backed asset delivery.
 
@@ -68,7 +68,7 @@ Supported capabilities:
 
 ## Performance
 
-- Zero-copy file serving
+- Zero-copy file serving (sendfile)
 - Streaming
 - Sendfile optimization
 - Brotli compression
@@ -109,7 +109,7 @@ Cache-Control: public, max-age=31536000, immutable
 
 ---
 
-# Edge Caching
+# Edge Caching (planed)
 
 Ophan should support built-in edge caching capabilities.
 
@@ -150,7 +150,7 @@ Edge Gateway / API Gateway
 
 ---
 
-# Supported Features
+# Supported Features Planned
 
 ## Static Content Delivery
 
