@@ -1,0 +1,40 @@
+[package]
+name = "ophan-bpf"
+version = "0.1.0"
+edition = "2024"
+description = "XDP-based ingress firewall for the Ophan reverse proxy"
+license = "MIT"
+repository = "https://github.com/alex/ophan"
+
+[features]
+default = []
+xdp = []
+blackbox = []
+
+[lib]
+name = "ophan_bpf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ophan-bpf"
+path = "src/main.rs"
+required-features = ["xdp"]
+test = false
+
+[[test]]
+name = "black_box"
+required-features = ["blackbox"]
+
+[dependencies]
+aya-ebpf = "0.2.1"
+aya-log-ebpf = "0.2.0"
+network-types = "0.2"
+
+[dev-dependencies]
+anyhow = "1"
+aya = "0.14"
+tokio = { version = "1", features = ["full"] }
+aya-log = "0.3.0"
+clap = "4"
+log = "0.4"
+env_logger = "0.11"
