@@ -1,4 +1,4 @@
-mod tls;
+pub mod tls;
 mod transport;
 
 pub mod http;

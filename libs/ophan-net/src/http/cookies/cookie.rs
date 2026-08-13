@@ -13,7 +13,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use http::{header, HeaderValue};
+use http::{HeaderValue, header};
 use httpdate::HttpDate;
 use itoa;
 
@@ -167,7 +167,7 @@ impl<'c> StrRef<'c> {
         match self {
             StrRef::Indexed(start, end) => {
                 &raw.expect("indexed StrRef requires the original string")[*start as usize..*end as usize]
-            }
+            },
             StrRef::Concrete(c) => c.as_ref(),
         }
     }
@@ -182,7 +182,7 @@ impl<'c> StrRef<'c> {
             StrRef::Indexed(s, e) => {
                 let slice = &raw.expect("indexed StrRef requires the original string")[s as usize..e as usize];
                 StrRef::Concrete(Cow::Owned(slice.to_owned()))
-            }
+            },
             StrRef::Concrete(c) => StrRef::Concrete(Cow::Owned(c.into_owned())),
         }
     }
@@ -262,9 +262,7 @@ impl<'c> Cookie<'c> {
         N: Into<Cow<'c, str>>,
         V: Into<Cow<'c, str>>,
     {
-        CookieBuilder {
-            cookie: Self::new(name, value),
-        }
+        CookieBuilder { cookie: Self::new(name, value) }
     }
 
     /// Converts `self` into an owned cookie (`'static`) with as few
