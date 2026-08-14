@@ -8,7 +8,7 @@ use std::{error::Error, fmt, io, path::PathBuf};
 pub enum ConfigError {
     /// Holds Pest's native error directly.
     Parse {
-        pest_err: PestError<super::parser::Rule>,
+        pest_err: Box<PestError<super::parser::Rule>>,
         file_path: Option<PathBuf>,
     },
     Validation {
@@ -54,10 +54,9 @@ impl fmt::Display for ConfigError {
             Self::Parse { pest_err, file_path } => {
                 let mut err = pest_err.clone();
                 if let Some(path) = file_path {
-                    err = err.with_path(path.to_string_lossy().as_ref());
+                    *err = err.with_path(path.to_string_lossy().as_ref());
                 }
 
-                // Pest formats its own snippet, code frame, lines, and columns
                 write!(f, "{err}")
             },
             Self::Validation { code, message, file_path } => {
@@ -77,7 +76,7 @@ impl Error for ConfigError {}
 // Auto-convert any Pest parsing error into ConfigError
 impl From<PestError<super::parser::Rule>> for ConfigError {
     fn from(pest_err: PestError<super::parser::Rule>) -> Self {
-        Self::Parse { pest_err, file_path: None }
+        Self::Parse { pest_err: Box::new(pest_err), file_path: None }
     }
 }
 
@@ -103,14 +102,12 @@ pub trait PairErrExt<'a, R: pest::RuleType> {
     fn error(&self, msg: impl Into<String>) -> ConfigError;
 }
 
-// Implementación para Pair (extrae el span automáticamente)
 impl<'a, R: pest::RuleType> PairErrExt<'a, R> for Pair<'a, R> {
     fn error(&self, msg: impl Into<String>) -> ConfigError {
         PestError::new_from_span(ErrorVariant::CustomError { message: msg.into() }, self.as_span()).into()
     }
 }
 
-// Implementación para Span
 impl<'a> PairErrExt<'a, super::parser::Rule> for Span<'a> {
     fn error(&self, msg: impl Into<String>) -> ConfigError {
         PestError::new_from_span(ErrorVariant::CustomError { message: msg.into() }, *self).into()

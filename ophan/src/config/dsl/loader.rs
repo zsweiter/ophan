@@ -4,12 +4,12 @@ use std::{fs, io};
 use ahash::AHashMap;
 use flatkit::str::ImmerStr;
 
-use crate::config::dsl::compile::compile;
 use crate::config::domain::OphanConfig;
+use crate::config::dsl::compile::compile;
 
+use super::blocks::RawConfig;
 use super::errors::ConfigError;
 use super::parser::{parse_raw_gateway, parse_raw_master};
-use super::blocks::RawConfig;
 use super::{ConfigFileTracker, get_config_path, read_config_file};
 
 pub fn load_config() -> Result<OphanConfig, ConfigError> {
@@ -110,7 +110,7 @@ where
     let mut out = Vec::new();
 
     for entry in fs::read_dir(dir).map_err(|e| ConfigError::from(e).with_file(dir))? {
-        let entry = entry.map_err(|e| ConfigError::from(e))?;
+        let entry = entry.map_err(ConfigError::from)?;
         let path = entry.path();
 
         if !path.is_file() {

@@ -10,10 +10,10 @@ boolean = @{ "true" | "false" }
 identifier = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 
 // Duration: 10s, 250ms, 1h, 5m
-duration = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h") }
+duration = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h" | "d") }
 
 // Size: 4mb, 100mb, 512kb, 2gb
-size = @{ ASCII_DIGIT+ ~ ("b" | "kb" | "mb" | "gb") }
+size = @{ ASCII_DIGIT+ ~ ("b" | "kb" | "mb" | "gb" | "tb") }
 
 // Rate: 10/s, 500/m, 10000/h
 rate = @{ ASCII_DIGIT+ ~ "/" ~ ("s" | "m" | "h" | "d") }
@@ -23,6 +23,9 @@ value = { size | duration | rate | boolean | number | octal | array | inline_obj
 array = { "[" ~ (value ~ ("," ~ value)* ~ ","?)? ~ "]" }
 inline_object = { "{" ~ (inline_kv ~ ("," ~ inline_kv)* ~ ","?)? ~ "}" | "{" ~ "}" }
 inline_kv = { (identifier | string) ~ "=" ~ value }
+
+// Environment variable reference
+env = { "env" ~ "(" ~ string ~ ")" }
 
 // Key-value assignment
 key_value = { identifier ~ "=" ~ value }

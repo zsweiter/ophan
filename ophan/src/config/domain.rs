@@ -553,11 +553,13 @@ pub struct RouteRewrites {
     pub trailing_slash: Option<TrailingSlashAction>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RouteTimeouts {
     pub connect: Option<Duration>,
     pub read: Option<Duration>,
     pub send: Option<Duration>,
+    pub idle: Option<Duration>,
+    pub total_connect: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]

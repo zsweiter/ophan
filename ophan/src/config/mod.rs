@@ -1,5 +1,5 @@
-mod dsl;
 mod domain;
+mod dsl;
 
-pub use dsl::*;
 pub use domain::*;
+pub use dsl::*;

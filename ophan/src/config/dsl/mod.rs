@@ -63,7 +63,7 @@ fn read_config_file(path: &PathBuf) -> Result<String, ConfigError> {
         return Err(ConfigError::Io {
             source: io::Error::from(io::ErrorKind::FileTooLarge),
             path: Some(path.into()),
-            message: Some(message)
+            message: Some(message),
         });
     }
 

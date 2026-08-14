@@ -224,12 +224,12 @@ fn parse_raw_listener_timeouts(pair: pest::iterators::Pair<Rule>) -> RawListener
             Rule::listener_timeout_idle => {
                 let val = entry.into_inner().next().unwrap();
                 let s = extract_value(val);
-                idle = parse_duration_millis(s).ok().map(|ms| Duration::from_millis(ms));
+                idle = parse_duration_millis(s).ok().map(Duration::from_millis);
             },
             Rule::listener_timeout_keepalive => {
                 let val = entry.into_inner().next().unwrap();
                 let s = extract_value(val);
-                keepalive = parse_duration_millis(s).ok().map(|ms| Duration::from_millis(ms));
+                keepalive = parse_duration_millis(s).ok().map(Duration::from_millis);
             },
             _ => {},
         }
@@ -578,7 +578,7 @@ fn parse_raw_backend(pair: pest::iterators::Pair<Rule>) -> Result<RawBackend, Co
             let name_pair = inner.into_inner().next().ok_or_else(|| ConfigError::parse("backend: upstream requires a name"))?;
             Ok(RawBackend::Upstream(extract_str(name_pair)))
         },
-        _ => return Err(inner.error(format!("unexpected backend type '{}'", inner.as_str()))),
+        _ => Err(inner.error(format!("unexpected backend type '{}'", inner.as_str()))),
     }
 }
 
@@ -1225,7 +1225,7 @@ fn parse_raw_auth_mode(pair: pest::iterators::Pair<Rule>) -> RawAuthMode {
             },
             Rule::auth_mode_ttl => {
                 let val = extract_str(entry.into_inner().next().unwrap());
-                ttl = parse_duration_millis(val).ok().map(|ms| Duration::from_millis(ms));
+                ttl = parse_duration_millis(val).ok().map(Duration::from_millis);
             },
             Rule::auth_mode_algorithms => {
                 let val = entry.into_inner().next().unwrap();

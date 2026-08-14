@@ -1,6 +1,22 @@
-use std::time::Duration;
+use std::{borrow::Cow, time::Duration};
 
 use flatkit::sizes::ByteSize;
+
+#[derive(Debug, Clone)]
+pub struct EnvVar<'a>(pub Cow<'a, str>);
+
+impl<'a> EnvVar<'a> {
+    #[inline]
+    pub fn get_value(&self) -> Option<String> {
+        std::env::var(&self.0.as_ref()).ok()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum RawSecretKey<'a> {
+    Env(EnvVar<'a>),
+    Base64(&'a str),
+}
 
 #[derive(Debug, Clone)]
 pub struct RawConfig<'a> {
@@ -328,7 +344,7 @@ pub enum RawAuthMode<'a> {
         ttl: Option<Duration>,
     },
     Static {
-        key: &'a str,
+        secret_key: RawSecretKey<'a>,
         alg: &'a str,
     },
 }

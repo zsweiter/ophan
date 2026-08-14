@@ -8,8 +8,9 @@ use ahash::AHashMap;
 use ahash::HashMapExt;
 use ahash::HashSetExt;
 use ahash::{HashMap, HashSet};
-use flatkit::matchers::GlobSet;
-use flatkit::net::IpNetwork;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use flatkit::matchers::PathMatcherSet;
+use flatkit::net::IpNet;
 use flatkit::str::ImmerStr;
 use http::HeaderName;
 use http::HeaderValue;
@@ -300,10 +301,7 @@ fn compile_listener(raw: &RawListener, errors: &mut Vec<CompileError>) -> Option
             } else {
                 TlsVersion::try_from(ssl.versions.as_slice())
                     .map_err(|e| {
-                        errors.push(CompileError::new(format!(
-                            "listener '{}': ssl version '{}' ",
-                            name, e
-                        )));
+                        errors.push(CompileError::new(format!("listener '{}': ssl version '{}' ", name, e)));
                     })
                     .ok()?
             };
@@ -496,10 +494,12 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
     }
 
     let rewrite = route.rewrite.as_ref().map(compile_rewrite);
-    let timeouts = route
-        .timeouts
-        .as_ref()
-        .map(|rt| RouteTimeouts { connect: rt.connect, read: rt.read, send: rt.send });
+    let timeouts = route.timeouts.as_ref().map(|rt| RouteTimeouts {
+        connect: rt.connect,
+        read: rt.read,
+        send: rt.send,
+        ..Default::default()
+    });
     let streaming = route.streaming.as_ref().map(|rs| RouteStreaming {
         buffering: rs.buffering.unwrap_or(true),
         chunked: rs.chunked.unwrap_or(true),
@@ -554,7 +554,7 @@ fn compile_route_backend(route: &RawPathRoute, scope: &GatewayScope, errors: &mu
                 f
             };
 
-            let blacklist = GlobSet::try_from(sb.exclude_paths.to_owned()).ok();
+            let blacklist = PathMatcherSet::try_from(sb.exclude_paths.to_owned()).ok();
             let static_config = ophan_static::ServeConfig {
                 root: PathBuf::from(root),
                 skip_patterns: blacklist,
@@ -574,7 +574,7 @@ fn compile_rewrite(raw: &RawUriRewrite) -> RouteRewrites {
         replaces: raw.replaces.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
         strip_prefix: raw.strip_prefix.map(|p| p.to_owned()),
         strip_suffix: raw.strip_suffix.map(|p| p.to_owned()),
-        trailing_slash: raw.trailing_slash.map(|a| a.parse().ok()).flatten(),
+        trailing_slash: raw.trailing_slash.and_then(|a| a.parse().ok()),
     }
 }
 
@@ -725,25 +725,51 @@ fn resolve_limiter(action: &RawRouteAction<RawLimiterConfig>, scope: &GatewaySco
 
 fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let issuer = raw.issuer.ok_or_else(|| "auth: issuer is required".to_string())?;
-    let validator = JwtValidatorConfig::new(issuer);
+    let audience = raw.audience.ok_or_else(|| "auth: audience is required".to_string())?;
+
+    let mut validator = JwtValidatorConfig::new(issuer);
+    validator.audience = vec![ImmerStr::from(audience)].into_boxed_slice();
 
     let dpop_policy = raw.dpop_proof.and_then(|dpop| dpop.parse().ok()).unwrap_or_default();
 
     let (auth_mode, token_ttl) = match raw.mode.as_ref() {
         Some(RawAuthMode::Jwks { uri, algorithms, ttl }) => {
-            let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(*a).ok()).collect::<Vec<_>>();
-            let uri_str = uri.as_deref().unwrap_or("");
-            (AuthMode::new_jwks(uri_str.to_string(), algs.into_boxed_slice()), *ttl)
+            let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(a).ok()).collect::<Vec<_>>();
+            let uri = uri.as_deref().map(str::to_owned).unwrap_or_else(|| format!("{}/.well-known/jwks.json", issuer));
+
+            (AuthMode::new_jwks(uri, algs.into_boxed_slice()), *ttl)
         },
         Some(RawAuthMode::Oidc { discovery_url, ttl }) => {
-            let url = discovery_url.as_deref().unwrap_or(issuer);
-            (AuthMode::new_oidc(url.to_owned()), *ttl)
+            let url = discovery_url
+                .as_deref()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}/.well-known/openid-configuration", issuer));
+
+            (AuthMode::new_oidc(url), *ttl)
         },
-        Some(RawAuthMode::Static { key, alg }) => (
-            AuthMode::new_static(key.as_bytes(), HmacAlg::from_str(alg).unwrap_or_default()),
-            None,
-        ),
-        None => (AuthMode::new_oidc(issuer.to_owned()), None),
+        Some(RawAuthMode::Static { secret_key, alg }) => {
+            let key_bytes = match secret_key {
+                RawSecretKey::Env(env) => {
+                    let value = env.get_value().ok_or_else(|| format!("environment variable '{}' is not set", env.0))?;
+
+                    URL_SAFE_NO_PAD
+                        .decode(value)
+                        .map_err(|e| format!("invalid base64 in environment variable '{}': {e}", env.0))?
+                },
+
+                RawSecretKey::Base64(value) => {
+                    URL_SAFE_NO_PAD.decode(value).map_err(|e| format!("invalid base64 secret key: {e}"))?
+                },
+            };
+
+            let alg = HmacAlg::from_str(alg).map_err(|_| format!("unsupported HMAC algorithm: {alg}"))?;
+
+            (AuthMode::new_static(&key_bytes, alg), None)
+        },
+        None => {
+            let discovery_url = format!("{}/.well-known/openid-configuration", issuer);
+            (AuthMode::new_oidc(discovery_url), None)
+        },
     };
 
     let mut inner_config = InnerAuthConfig::new(validator, auth_mode);
@@ -770,7 +796,7 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let skip_patterns = if raw.exclude_paths.is_empty() {
         None
     } else {
-        Some(GlobSet::try_from(raw.exclude_paths.to_owned()).map_err(|e| e.to_string())?)
+        Some(PathMatcherSet::try_from(raw.exclude_paths.to_owned()).map_err(|e| e.to_string())?)
     };
 
     let sources = raw.sources.as_ref().map(|s| s.iter().map(compile_token_source).collect()).unwrap_or_default();
@@ -808,7 +834,7 @@ fn build_waf_from_raw(raw: &RawWafConfig) -> Result<WafConfig, String> {
         cfg.anomaly_threshold = threshold;
     }
     if !raw.exclude_paths.is_empty() {
-        cfg.excludes = Some(GlobSet::try_from(raw.exclude_paths.to_owned()).map_err(|a| a.to_string())?);
+        cfg.excludes = Some(PathMatcherSet::try_from(raw.exclude_paths.to_owned()).map_err(|a| a.to_string())?);
     }
 
     cfg.rules = compile_waf_rules(&raw.rules);
@@ -882,7 +908,7 @@ fn build_limiter_from_raw(raw: &RawLimiterConfig) -> Result<LimiterConfig, Strin
         cfg.identifier = LimiterIdentifier::from_str(id).map_err(|a| a.to_string())?;
     }
     if !raw.exclude_paths.is_empty() {
-        cfg.skip_patterns = Some(GlobSet::try_from(raw.exclude_paths.clone()).map_err(|a| a.to_string())?);
+        cfg.skip_patterns = Some(PathMatcherSet::try_from(raw.exclude_paths.clone()).map_err(|a| a.to_string())?);
     }
 
     Ok(cfg)
@@ -902,7 +928,7 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
     if let Some(ref mode) = overrides.mode {
         cfg.client.auth_mode = match mode {
             RawAuthMode::Jwks { uri, algorithms, .. } => {
-                let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(*a).ok()).collect::<Vec<_>>();
+                let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(a).ok()).collect::<Vec<_>>();
                 let uri_str = uri.as_deref().unwrap_or("");
                 AuthMode::new_jwks(uri_str.to_string(), algs.into_boxed_slice())
             },
@@ -910,7 +936,21 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
                 let url = discovery_url.as_deref().unwrap_or("");
                 AuthMode::new_oidc(url.to_owned())
             },
-            RawAuthMode::Static { key, alg } => AuthMode::new_static(key.as_bytes(), HmacAlg::from_str(alg).unwrap_or_default()),
+            RawAuthMode::Static { secret_key, alg } => {
+                let key_bytes = match secret_key {
+                    RawSecretKey::Env(env) => {
+                        let value = env.get_value().unwrap();
+
+                        URL_SAFE_NO_PAD.decode(value).unwrap()
+                    },
+
+                    RawSecretKey::Base64(value) => URL_SAFE_NO_PAD.decode(value).unwrap(),
+                };
+
+                let alg = HmacAlg::from_str(alg).unwrap_or_default();
+
+                AuthMode::new_static(&key_bytes, alg)
+            },
         };
     }
     if let Some(ref sources) = overrides.sources {
@@ -924,7 +964,7 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
         }
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.skip_patterns = GlobSet::try_from(overrides.exclude_paths.to_owned()).ok();
+        cfg.skip_patterns = PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).ok();
     }
 }
 
@@ -948,7 +988,7 @@ fn compile_token_source(raw: &RawTokenSource) -> TokenSource {
 fn compile_inject_target(raw: &RawInjectTarget) -> crate::middlewares::auth::TokenDestination {
     match raw {
         RawInjectTarget::Header { name } => crate::middlewares::auth::TokenDestination::Header {
-            name: HeaderName::from_bytes(name.as_bytes()).unwrap_or_else(|_| header::AUTHORIZATION),
+            name: HeaderName::from_bytes(name.as_bytes()).unwrap_or(header::AUTHORIZATION),
         },
         RawInjectTarget::Cookie(cookie) => crate::middlewares::auth::TokenDestination::Cookie {
             name: cookie.name.to_string(),
@@ -1003,7 +1043,7 @@ fn merge_waf_override(cfg: &mut WafConfig, overrides: &RawWafConfig) {
         cfg.anomaly_threshold = v;
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.excludes = GlobSet::try_from(overrides.exclude_paths.to_owned()).ok();
+        cfg.excludes = PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).ok();
     }
     if !overrides.rules.is_empty() {
         cfg.rules = compile_waf_rules(&overrides.rules);
@@ -1063,7 +1103,7 @@ fn merge_limiter_override(cfg: &mut LimiterConfig, overrides: &RawLimiterConfig)
         };
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.skip_patterns = Some(GlobSet::try_from(overrides.exclude_paths.to_owned()).unwrap());
+        cfg.skip_patterns = Some(PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).unwrap());
     }
 }
 
@@ -1084,9 +1124,9 @@ fn compile_net_policy(raw: &RawNetworkPolicy) -> Result<NetPolicy, String> {
         all_ranges.extend(proxy_ips.iter().copied());
     }
 
-    let allowed_ip_ranges: Vec<IpNetwork> = all_ranges
+    let allowed_ip_ranges: Vec<IpNet> = all_ranges
         .into_iter()
-        .map(|ip| ip.parse::<IpNetwork>().map_err(|e| e.to_string()))
+        .map(|ip| ip.parse::<IpNet>().map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()?;
 
     let policy = raw.proxy_allowed_ips.as_ref().map(|_| PolicyMode::Degrade).unwrap_or(PolicyMode::Deny);
