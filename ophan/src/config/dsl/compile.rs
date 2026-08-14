@@ -19,8 +19,11 @@ use ophan_auth::crypto::{Algorithm, HmacAlg};
 use ophan_auth::{AuthConfig as InnerAuthConfig, AuthMode, JwtValidatorConfig};
 use ophan_net::http::HttpMethodSet;
 use ophan_net::tls::TlsVersion;
-use ophan_sec::config::{WafAction, WafCondition, WafConfig, WafMode, WafPhase, WafRule};
-use ophan_sec::{NetPolicy, PolicyMode, WafPhasesTable};
+use ophan_sec::l7::CompiledWafRules;
+use ophan_sec::l7::WafConfig;
+use ophan_sec::l7::WafMode;
+// use ophan_sec::config::{WafAction, WafCondition, WafConfig, WafMode, WafPhase, WafRule};
+use ophan_sec::{NetPolicy, PolicyMode};
 use ophan_static::FsFlags;
 
 use crate::balancer::BalanceStrategy;
@@ -816,16 +819,12 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
 fn build_waf_from_raw(raw: &RawWafConfig) -> Result<WafConfig, String> {
     let mut cfg = WafConfig::default();
     if let Some(mode) = raw.mode {
-        cfg.mode = match mode {
-            "detection_only" => WafMode::DetectionOnly,
-            "block" | "blocking" => WafMode::Blocking,
-            _ => {
-                return Err(format!(
-                    "invalid waf mode '{}', expected one of: detection_only, block, blocking",
-                    mode
-                ));
-            },
-        };
+        cfg.mode = WafMode::from_str(mode).map_err(|_| {
+            format!(
+                "invalid waf mode '{}', expected one of: detection_only, block, blocking",
+                mode
+            )
+        })?
     }
     if let Some(size) = raw.max_body_size {
         cfg.max_body_size = size;
@@ -834,11 +833,11 @@ fn build_waf_from_raw(raw: &RawWafConfig) -> Result<WafConfig, String> {
         cfg.anomaly_threshold = threshold;
     }
     if !raw.exclude_paths.is_empty() {
-        cfg.excludes = Some(PathMatcherSet::try_from(raw.exclude_paths.to_owned()).map_err(|a| a.to_string())?);
+        cfg.skip_patterns = Some(PathMatcherSet::try_from(raw.exclude_paths.as_slice()).map_err(|a| a.to_string())?);
     }
 
-    cfg.rules = compile_waf_rules(&raw.rules);
-    cfg.table = Arc::new(WafPhasesTable::compile(&cfg.rules));
+    cfg.compiled = compile_waf_rules(&raw.rules);
+    // cfg.compiled = Arc::new(WafPhasesTable::compile(&cfg.rules));
     Ok(cfg)
 }
 
@@ -997,31 +996,33 @@ fn compile_inject_target(raw: &RawInjectTarget) -> crate::middlewares::auth::Tok
     }
 }
 
-fn compile_waf_rules(raw: &[RawWafRule]) -> Vec<WafRule> {
-    raw.iter()
-        .map(|r| WafRule {
-            id: r.name.to_string(),
-            phase: match r.phase {
-                "request_headers" => WafPhase::RequestHeaders,
-                "request_body" => WafPhase::RequestBody,
-                "response_headers" => WafPhase::ResponseHeaders,
-                "response_body" => WafPhase::ResponseBody,
-                _ => WafPhase::RequestBody,
-            },
-            condition: if r.when.is_empty() {
-                WafCondition::BodyContains(vec![])
-            } else {
-                WafCondition::BodyContains(vec![r.when.to_string()])
-            },
-            action: match r.action {
-                "log" => WafAction::Log,
-                "block" => WafAction::Block,
-                "allow" => WafAction::Allow,
-                _ => WafAction::Block,
-            },
-            score: r.score.unwrap_or(0),
-        })
-        .collect()
+fn compile_waf_rules(_raw: &[RawWafRule]) -> Arc<CompiledWafRules> {
+    // raw.iter()
+    //     .map(|r| WafRule {
+    //         id: r.name.to_string(),
+    //         phase: match r.phase {
+    //             "request_headers" => WafPhase::RequestHeaders,
+    //             "request_body" => WafPhase::RequestBody,
+    //             "response_headers" => WafPhase::ResponseHeaders,
+    //             "response_body" => WafPhase::ResponseBody,
+    //             _ => WafPhase::RequestBody,
+    //         },
+    //         condition: if r.when.is_empty() {
+    //             WafCondition::BodyContains(vec![])
+    //         } else {
+    //             WafCondition::BodyContains(vec![r.when.to_string()])
+    //         },
+    //         action: match r.action {
+    //             "log" => WafAction::Log,
+    //             "block" => WafAction::Block,
+    //             "allow" => WafAction::Allow,
+    //             _ => WafAction::Block,
+    //         },
+    //         score: r.score.unwrap_or(0),
+    //     })
+    //     .collect()
+
+    Arc::new(CompiledWafRules::default())
 }
 
 // ============================================================================
@@ -1043,10 +1044,10 @@ fn merge_waf_override(cfg: &mut WafConfig, overrides: &RawWafConfig) {
         cfg.anomaly_threshold = v;
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.excludes = PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).ok();
+        cfg.skip_patterns = PathMatcherSet::try_from(overrides.exclude_paths.as_slice()).ok();
     }
     if !overrides.rules.is_empty() {
-        cfg.rules = compile_waf_rules(&overrides.rules);
+        cfg.compiled = compile_waf_rules(&overrides.rules);
     }
 }
 

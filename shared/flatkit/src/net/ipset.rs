@@ -35,9 +35,9 @@ fn merge_u128(sorted: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
 }
 
 /// A memory-optimized, **read-only** set of IPv4 and IPv6 CIDR ranges or address blocks.
-/// 
-/// This structure is strictly immutable after initialization and designed exclusively for 
-/// lookup, containment checks, and high-performance filtering. Mutation operations (such as 
+///
+/// This structure is strictly immutable after initialization and designed exclusively for
+/// lookup, containment checks, and high-performance filtering. Mutation operations (such as
 /// inserting or removing addresses) are not supported.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IpSet {
@@ -385,7 +385,9 @@ mod edge_cases {
         builder.insert("::/0").unwrap();
         let set = builder.build();
         assert!(set.contains(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
-        assert!(set.contains(IpAddr::V6(Ipv6Addr::new(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF))));
+        assert!(set.contains(IpAddr::V6(Ipv6Addr::new(
+            0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF
+        ))));
     }
 
     #[test]

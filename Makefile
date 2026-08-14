@@ -205,7 +205,7 @@ install:
 	sudo cp -r .config/* /etc/$(APP_NAME)/
 
 	# 4. Systemd service (replace @SBINDIR@, @CONFIGDIR@)
-	sed "s|@SBINDIR@|/usr/local/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)|g" \
+	sed "s|@SBINDIR@|/usr/local/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)/master.conf|g" \
 		$(STUB_DIR)/systemd.service > /tmp/$(APP_NAME).service
 	sudo install -Dm644 /tmp/$(APP_NAME).service /etc/systemd/system/$(APP_NAME).service
 
@@ -231,3 +231,5 @@ git-tag:
 	git push origin v$(VERSION)
 
 release: clean all package-all git-tag
+
+# cargo clippy -p <crate-name> --no-deps -- -W clippy::all -W clippy::pedantic -W clippy::nursery -W clippy::cargo

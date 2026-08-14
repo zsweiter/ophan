@@ -8,7 +8,7 @@ pub struct EnvVar<'a>(pub Cow<'a, str>);
 impl<'a> EnvVar<'a> {
     #[inline]
     pub fn get_value(&self) -> Option<String> {
-        std::env::var(&self.0.as_ref()).ok()
+        std::env::var(self.0.as_ref()).ok()
     }
 }
 

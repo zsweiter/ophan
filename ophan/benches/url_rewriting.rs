@@ -4,22 +4,18 @@ use ophan::middlewares::rewrites;
 fn create_dataset() -> Vec<(String, String)> {
     let mut rules = Vec::new();
 
-    // 1. Reglas Exactas (500 reglas)
     for i in 0..500 {
         rules.push((format!("/static/page_{i}.html"), format!("/public/p_{i}.html")));
     }
 
-    // 2. Reglas de Prefijo (200 reglas)
     for i in 0..200 {
         rules.push((format!("/api/v1/service_{i}/*"), format!("/internal/s_{i}/")));
     }
 
-    // 3. Reglas de Sufijo (50 reglas)
     for i in 0..50 {
         rules.push((format!("*.ext_{i}"), format!(".target_{i}")));
     }
 
-    // 4. Reglas Regex (20 reglas)
     for i in 0..20 {
         rules.push((format!(r"^/users/group_{i}/(\d+)$"), format!("/v2/g_{i}/$1")));
     }
@@ -30,7 +26,6 @@ fn create_dataset() -> Vec<(String, String)> {
 fn bench_rewriters(c: &mut Criterion) {
     let rules = create_dataset();
 
-    // Inicialización de los 3 motores
     let ultra = rewrites::RewriteEngine::new(rules.clone(), None, None, rewrites::TrailingSlashAction::Never).unwrap();
 
     let mut group = c.benchmark_group("URL_Rewrite_Engine_Comparison");

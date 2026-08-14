@@ -45,6 +45,10 @@ perf.data
 perf.data.old
 scripts/bench.sh
 scripts/benches.sh
-
+bin/
 
 dist/
+
+# docs files, astro
+node_modules/
+.astro/

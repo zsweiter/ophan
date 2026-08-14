@@ -17,26 +17,11 @@ fn owasp_category_code_is_pinned_for_all_variants() {
     assert_eq!(OwaspCategory::A03Injection.code(), "A03:2021");
     assert_eq!(OwaspCategory::A04InsecureDesign.code(), "A04:2021");
     assert_eq!(OwaspCategory::A05SecurityMisconfiguration.code(), "A05:2021");
-    assert_eq!(
-        OwaspCategory::A06VulnerableAndOutdatedComponents.code(),
-        "A06:2021"
-    );
-    assert_eq!(
-        OwaspCategory::A07IdentificationAndAuthenticationFailures.code(),
-        "A07:2021"
-    );
-    assert_eq!(
-        OwaspCategory::A08SoftwareAndDataIntegrityFailures.code(),
-        "A08:2021"
-    );
-    assert_eq!(
-        OwaspCategory::A09SecurityLoggingAndMonitoringFailures.code(),
-        "A09:2021"
-    );
-    assert_eq!(
-        OwaspCategory::A10ServerSideRequestForgery.code(),
-        "A10:2021"
-    );
+    assert_eq!(OwaspCategory::A06VulnerableAndOutdatedComponents.code(), "A06:2021");
+    assert_eq!(OwaspCategory::A07IdentificationAndAuthenticationFailures.code(), "A07:2021");
+    assert_eq!(OwaspCategory::A08SoftwareAndDataIntegrityFailures.code(), "A08:2021");
+    assert_eq!(OwaspCategory::A09SecurityLoggingAndMonitoringFailures.code(), "A09:2021");
+    assert_eq!(OwaspCategory::A10ServerSideRequestForgery.code(), "A10:2021");
     assert_eq!(OwaspCategory::CustomBotProtection.code(), "C100:BOT");
     assert_eq!(OwaspCategory::CustomIpReputation.code(), "C101:IP_REP");
     assert_eq!(OwaspCategory::CustomProtocolAnomaly.code(), "C102:PROTO");
@@ -84,11 +69,7 @@ fn owasp_category_description_is_nonempty_for_all_variants() {
         OwaspCategory::CustomRateLimiting,
     ];
     for c in all {
-        assert!(
-            !c.description().is_empty(),
-            "{:?} description must be non-empty",
-            c
-        );
+        assert!(!c.description().is_empty(), "{:?} description must be non-empty", c);
     }
 }
 
@@ -102,7 +83,12 @@ fn default_rules_are_nonempty() {
 fn default_rules_have_unique_ids() {
     let rules = default_rules();
     let ids: HashSet<&str> = rules.iter().map(|r| r.id).collect();
-    assert_eq!(ids.len(), rules.len(), "rule ids must be unique, got {:?}", rules.iter().map(|r| r.id).collect::<Vec<_>>());
+    assert_eq!(
+        ids.len(),
+        rules.len(),
+        "rule ids must be unique, got {:?}",
+        rules.iter().map(|r| r.id).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -145,22 +131,10 @@ fn default_rules_phase_matches_docs() {
             | "owasp_ldap_injection"
             | "owasp_xpath_injection"
             | "owasp_sql_token_match" => {
-                assert_eq!(
-                    r.phase,
-                    Phase::InboundBody,
-                    "{} should be InboundBody",
-                    r.id
-                );
+                assert_eq!(r.phase, Phase::InboundBody, "{} should be InboundBody", r.id);
             },
-            "custom_sql_injection_query"
-            | "custom_path_traversal"
-            | "custom_scanner_user_agent" => {
-                assert_eq!(
-                    r.phase,
-                    Phase::InboundHeaders,
-                    "{} should be InboundHeaders",
-                    r.id
-                );
+            "custom_sql_injection_query" | "custom_path_traversal" | "custom_scanner_user_agent" => {
+                assert_eq!(r.phase, Phase::InboundHeaders, "{} should be InboundHeaders", r.id);
             },
             other => panic!("unknown rule id {other} — update phase table"),
         }

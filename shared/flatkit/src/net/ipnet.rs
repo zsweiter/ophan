@@ -587,18 +587,12 @@ mod fail_cases {
 
     #[test]
     fn invalid_ip_is_rejected() {
-        assert!(matches!(
-            "not-an-ip".parse::<Ipv4Net>(),
-            Err(CidrParseError::InvalidIp(_)),
-        ));
+        assert!(matches!("not-an-ip".parse::<Ipv4Net>(), Err(CidrParseError::InvalidIp(_)),));
     }
 
     #[test]
     fn empty_string_is_rejected() {
-        assert!(matches!(
-            "".parse::<Ipv4Net>(),
-            Err(CidrParseError::InvalidIp(_)),
-        ));
+        assert!(matches!("".parse::<Ipv4Net>(), Err(CidrParseError::InvalidIp(_)),));
     }
 
     #[test]
@@ -668,7 +662,10 @@ mod edge_cases {
     fn prefix_zero_covers_everything_v6() {
         let net: IpNet = "::/0".parse().unwrap();
         assert_eq!(net.network(), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
-        assert_eq!(net.broadcast(), IpAddr::V6(Ipv6Addr::new(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF)));
+        assert_eq!(
+            net.broadcast(),
+            IpAddr::V6(Ipv6Addr::new(0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF))
+        );
         assert!(net.contains("::".parse().unwrap()));
         assert!(net.contains("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
     }

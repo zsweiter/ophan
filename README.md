@@ -37,14 +37,14 @@ We're early-stage and every piece of feedback helps shape the roadmap.
 
 Ophan combines reverse proxy, API gateway, load balancer, and static content delivery into a single modular platform.
 
-| Layer | Capabilities |
-|---|---|
-| **Protocols** | HTTP/1.1, HTTP/2, HTTP/3, WebSocket, gRPC |
-| **Security** | TLS termination, mTLS, JWT / OAuth2, API keys, WAF |
-| **Traffic** | Rate limiting, CORS, URL rewriting, load balancing |
-| **Resilience** | Health checks, circuit breaking, hot reload |
-| **Delivery** | Static file serving, CDN integration, edge caching |
-| **Transport** | TCP, Unix Domain Sockets |
+| Layer          | Capabilities                                       |
+| -------------- | -------------------------------------------------- |
+| **Protocols**  | HTTP/1.1, HTTP/2, WebSocket, gRPC                  |
+| **Security**   | TLS termination, mTLS, JWT / OAuth2, WAF           |
+| **Traffic**    | Rate limiting, CORS, URL rewriting, load balancing |
+| **Resilience** | Health checks, circuit breaking, hot reload        |
+| **Delivery**   | Static file serving,                               |
+| **Transport**  | TCP, Unix Domain Sockets                           |
 
 ---
 
@@ -87,20 +87,6 @@ sudo systemctl enable --now ophan
 # Install service (macOS)
 sudo cp ophan-*/stubs/io.ophan.ophan.plist /Library/LaunchDaemons/
 sudo launchctl load /Library/LaunchDaemons/io.ophan.ophan.plist
-```
-
-### Windows — PowerShell
-
-```powershell
-# Quick install
-powershell -c "iwr -Uri https://github.com/zsweiter/ophan/releases/latest/download/install.ps1 -OutFile install.ps1; .\install.ps1"
-
-# Manual
-$VERSION = "v0.1.0"
-$ARCH = "x86_64"
-$Url = "https://github.com/zsweiter/ophan/releases/download/${VERSION}/ophan-${VERSION#v}-windows-${ARCH}.zip"
-Invoke-WebRequest -Uri $Url -OutFile "ophan.zip"
-Expand-Archive "ophan.zip" -DestinationPath "C:\Ophan"
 ```
 
 ### Docker

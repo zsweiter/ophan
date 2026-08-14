@@ -11,7 +11,7 @@ use http::{HeaderName, HeaderValue};
 use ophan_net::http::HttpMethodSet;
 use ophan_net::tls::{ALPN, TlsVersion};
 use ophan_sec::NetPolicy;
-use ophan_sec::config::WafConfig;
+use ophan_sec::l7::WafConfig;
 
 use crate::balancer::BalanceStrategy;
 use crate::config::dsl::ConfigFileTracker;

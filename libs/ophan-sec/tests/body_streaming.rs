@@ -34,10 +34,7 @@ fn literal_match_in_single_chunk() {
     let rules = vec![rule(&["union select", "<script>"], &[], "r1")];
     let mut m = StreamingBodyMatcher::from_rules(&rules, true);
     assert_eq!(m.on_chunk(b"select * from users", false), BodyAction::Continue);
-    assert_eq!(
-        m.on_chunk(b" where 1=1 union select password", true),
-        BodyAction::Block
-    );
+    assert_eq!(m.on_chunk(b" where 1=1 union select password", true), BodyAction::Block);
     assert_eq!(m.last_meta().unwrap().id.as_ref(), "r1");
 }
 
@@ -146,10 +143,7 @@ fn empty_matcher_always_allows() {
 
 #[test]
 fn multi_rule_any_match_blocks() {
-    let rules = vec![
-        rule(&["harmless"], &[], "r1"),
-        rule(&["select", "drop"], &[], "r2"),
-    ];
+    let rules = vec![rule(&["harmless"], &[], "r1"), rule(&["select", "drop"], &[], "r2")];
     let mut m = StreamingBodyMatcher::from_rules(&rules, true);
     assert_eq!(m.on_chunk(b"drop table users", true), BodyAction::Block);
     assert_eq!(m.last_meta().unwrap().id.as_ref(), "r2");

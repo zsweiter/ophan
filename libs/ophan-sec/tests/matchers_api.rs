@@ -22,12 +22,7 @@ fn empty() -> TextMatchers {
 }
 
 fn ac(patterns: &[&str]) -> Arc<AhoCorasick> {
-    Arc::new(
-        AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostFirst)
-            .build(patterns)
-            .expect("AC builds"),
-    )
+    Arc::new(AhoCorasick::builder().match_kind(MatchKind::LeftmostFirst).build(patterns).expect("AC builds"))
 }
 
 // ---------------------------------------------------------------------------

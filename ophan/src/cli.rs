@@ -1,8 +1,11 @@
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy)]
+use crate::sys::Signal;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub enum Command {
-    Version,
+    #[default]
+    None,
     Test,
     Config,
     Doctor,
@@ -10,103 +13,86 @@ pub enum Command {
     Signal(Signal),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum Signal {
-    Stop,
-    Quit,
-    Reload,
-    Reopen,
-}
-
-impl FromStr for Signal {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "stop" => Ok(Signal::Stop),
-            "quit" => Ok(Signal::Quit),
-            "reload" => Ok(Signal::Reload),
-            "reopen" => Ok(Signal::Reopen),
-            _ => Err("Invalid signal string"),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
-pub struct CliArgs {
+pub struct CliApp {
     pub config: Option<String>,
+    pub cmd: Command,
 }
 
-pub fn parse_cli(version: &str) -> (Option<Command>, CliArgs) {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+impl CliApp {
+    pub fn parse() -> Self {
+        let version = env!("CARGO_PKG_VERSION");
 
-    let mut cli = CliArgs::default();
-    let mut cmd: Option<Command> = None;
+        let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let mut i = 0;
+        let mut cli = CliApp::default();
+        let mut i = 0;
 
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                print_help_and_exit(version);
-            },
+        while i < args.len() {
+            match args[i].as_str() {
+                "-h" | "--help" => {
+                    print_help(version);
+                    std::process::exit(0);
+                },
 
-            "-v" | "--version" => cmd = Some(Command::Version),
+                "-v" | "--version" => {
+                    println!(r"Ophan v{version} — A lightweight, high-performance API gateway.");
+                    std::process::exit(0);
+                },
 
-            "-t" | "--test" => cmd = Some(Command::Test),
+                "-t" | "--test" => cli.cmd = Command::Test,
 
-            "--config" | "-c" => {
-                if let Some(v) = args.get(i + 1) {
-                    cli.config = Some(v.clone());
-                    i += 1;
-                } else {
-                    eprintln!("Error: The '{}' flag requires a configuration file path.", args[i]);
-                    std::process::exit(1);
-                }
-
-                if cmd.is_none() {
-                    cmd = Some(Command::Config);
-                }
-            },
-
-            "--doctor" => cmd = Some(Command::Doctor),
-
-            "--upgrade" => cmd = Some(Command::Upgrade),
-
-            "--signal" | "-s" => {
-                if let Some(v) = args.get(i + 1) {
-                    cmd = Some(Command::Signal(Signal::from_str(v).unwrap_or_else(|_| {
-                        eprintln!("Error: Invalid signal. Available options: stop | quit | reload | reopen");
+                "--config" | "-c" => {
+                    if let Some(v) = args.get(i + 1) {
+                        cli.config = Some(v.clone());
+                        i += 1;
+                    } else {
+                        eprintln!("Error: The '{}' flag requires a configuration file path.", args[i]);
                         std::process::exit(1);
-                    })));
+                    }
 
-                    i += 1;
-                } else {
-                    eprintln!("Error: The '{}' flag requires a signal value.", args[i]);
+                    cli.cmd = Command::Config;
+                },
+
+                "--doctor" => cli.cmd = Command::Doctor,
+
+                "--upgrade" => cli.cmd = Command::Upgrade,
+
+                "--signal" | "-s" => {
+                    if let Some(v) = args.get(i + 1) {
+                        cli.cmd = Command::Signal(Signal::from_str(v).unwrap_or_else(|_| {
+                            eprintln!("Error: Invalid signal. Available options: stop | quit | reload | reopen");
+                            std::process::exit(1);
+                        }));
+
+                        i += 1;
+                    } else {
+                        eprintln!("Error: The '{}' flag requires a signal value.", args[i]);
+                        std::process::exit(1);
+                    }
+                },
+
+                command => {
+                    eprintln!("Error: Unknown command or argument '{command}'");
                     std::process::exit(1);
-                }
-            },
+                },
+            }
 
-            command => {
-                eprintln!("Error: Unknown command or argument '{command}'");
-                print_help_and_exit(version);
-            },
+            i += 1;
         }
 
-        i += 1;
-    }
+        if let Command::Test | Command::Config = cli.cmd
+            && cli.config.is_none()
+        {
+            eprintln!("Error: The selected command requires a configuration file path via -c or --config.");
+            std::process::exit(1);
+        }
 
-    if let Some(Command::Test | Command::Config) = cmd
-        && cli.config.is_none()
-    {
-        eprintln!("Error: The selected command requires a configuration file path via -c or --config.");
-        std::process::exit(1);
+        cli
     }
-
-    (cmd, cli)
 }
 
-fn print_help_and_exit(version: &str) -> ! {
+fn print_help(version: &str) {
     println!(
         r#"Ophan v{version} — A lightweight, high-performance API gateway.
 
@@ -143,6 +129,4 @@ EXAMPLES:
 "#,
         version = version
     );
-
-    std::process::exit(0);
 }

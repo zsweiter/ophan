@@ -80,12 +80,7 @@ impl RuleMeta {
     /// score, suited for trace-only rules. Production rules normally
     /// override `action` and `score`.
     pub fn new(id: impl Into<Box<str>>, category: OwaspCategory) -> Self {
-        Self {
-            id: id.into(),
-            score: 0,
-            action: RuleAction::Log,
-            category,
-        }
+        Self { id: id.into(), score: 0, action: RuleAction::Log, category }
     }
 }
 
@@ -193,12 +188,7 @@ pub enum Phase {
 
 impl Phase {
     /// All phases in lifecycle order (request → response).
-    pub const ALL: [Phase; 4] = [
-        Phase::InboundHeaders,
-        Phase::InboundBody,
-        Phase::OutboundHeaders,
-        Phase::OutboundBody,
-    ];
+    pub const ALL: [Phase; 4] = [Phase::InboundHeaders, Phase::InboundBody, Phase::OutboundHeaders, Phase::OutboundBody];
 }
 
 // =============================================================================

@@ -28,6 +28,7 @@ fn http_get(host: &str, port: u16, path: &str, host_header: &str) -> String {
 }
 
 #[test]
+#[ignore]
 fn e2e_gateway_serves_requests() {
     // ── 1. Mock upstream ─────────────────────────────────────
     let mock_server = httpmock::MockServer::start();

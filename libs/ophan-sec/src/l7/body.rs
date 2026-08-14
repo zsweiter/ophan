@@ -41,9 +41,9 @@ use std::sync::Arc;
 
 use aho_corasick::AhoCorasick;
 use http::HeaderValue;
-use regex_automata::hybrid::dfa::{Cache as DfaCache, DFA};
-use regex_automata::hybrid::LazyStateID;
 use regex_automata::Input;
+use regex_automata::hybrid::LazyStateID;
+use regex_automata::hybrid::dfa::{Cache as DfaCache, DFA};
 
 use crate::l7::expr::RuleMeta;
 use crate::l7::rules::CompiledBodyRule;
@@ -325,11 +325,7 @@ impl StreamingBodyMatcher {
 
         // --- 1. Aho-Corasick over overlap ++ chunk ---
         if let Some(ac) = &self.ac {
-            let mut reader = ChunkReader {
-                overlap: &self.overlap,
-                chunk,
-                pos: 0,
-            };
+            let mut reader = ChunkReader { overlap: &self.overlap, chunk, pos: 0 };
             let mut hit = None;
             for m in ac.stream_find_iter(&mut reader) {
                 if let Ok(m) = m {

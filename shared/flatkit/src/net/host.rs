@@ -282,58 +282,37 @@ mod fail_cases {
 
     #[test]
     fn empty_input_is_rejected() {
-        assert_eq!(
-            HostAddr::try_from(Bytes::from_static(b"")),
-            Err(HostAddrError::EmptyInput),
-        );
+        assert_eq!(HostAddr::try_from(Bytes::from_static(b"")), Err(HostAddrError::EmptyInput),);
     }
 
     #[test]
     fn whitespace_only_is_rejected() {
-        assert_eq!(
-            HostAddr::try_from(Bytes::from_static(b"   ")),
-            Err(HostAddrError::EmptyInput),
-        );
+        assert_eq!(HostAddr::try_from(Bytes::from_static(b"   ")), Err(HostAddrError::EmptyInput),);
     }
 
     #[test]
     fn invalid_port_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("example.com:abc"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("example.com:abc"), Err(HostAddrError::InvalidPort),);
     }
 
     #[test]
     fn port_out_of_range_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("example.com:70000"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("example.com:70000"), Err(HostAddrError::InvalidPort),);
     }
 
     #[test]
     fn negative_port_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("example.com:-1"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("example.com:-1"), Err(HostAddrError::InvalidPort),);
     }
 
     #[test]
     fn trailing_colon_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("example.com:"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("example.com:"), Err(HostAddrError::InvalidPort),);
     }
 
     #[test]
     fn scheme_without_host_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("https://"),
-            Err(HostAddrError::EmptyInput),
-        );
+        assert_eq!(HostAddr::from_str("https://"), Err(HostAddrError::EmptyInput),);
     }
 
     #[test]
@@ -347,18 +326,12 @@ mod fail_cases {
     #[test]
     fn host_over_256_chars_is_rejected() {
         let long = format!("{}.example.com", "a".repeat(260));
-        assert_eq!(
-            HostAddr::from_str(&long),
-            Err(HostAddrError::HostTooLong),
-        );
+        assert_eq!(HostAddr::from_str(&long), Err(HostAddrError::HostTooLong),);
     }
 
     #[test]
     fn non_numeric_port_fragment_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("exa:mple.com"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("exa:mple.com"), Err(HostAddrError::InvalidPort),);
     }
 
     #[test]
@@ -370,10 +343,7 @@ mod fail_cases {
 
     #[test]
     fn uppercase_scheme_colons_are_parsed_as_port() {
-        assert_eq!(
-            HostAddr::from_str("HTTP://example.com"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("HTTP://example.com"), Err(HostAddrError::InvalidPort),);
     }
 }
 
@@ -423,9 +393,6 @@ mod edge_cases {
 
     #[test]
     fn non_numeric_port_fragment_is_rejected() {
-        assert_eq!(
-            HostAddr::from_str("exa:mple.com"),
-            Err(HostAddrError::InvalidPort),
-        );
+        assert_eq!(HostAddr::from_str("exa:mple.com"), Err(HostAddrError::InvalidPort),);
     }
 }

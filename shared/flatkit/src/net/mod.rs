@@ -151,10 +151,7 @@ mod happy_cases {
 
     #[test]
     fn network_v6_blocks() {
-        assert_eq!(
-            MaxCidrBlock::LocalhostV6.network().ip(),
-            IpAddr::V6(Ipv6Addr::LOCALHOST),
-        );
+        assert_eq!(MaxCidrBlock::LocalhostV6.network().ip(), IpAddr::V6(Ipv6Addr::LOCALHOST),);
         assert_eq!(MaxCidrBlock::LocalhostV6.network().prefix(), 128);
 
         assert_eq!(
@@ -259,8 +256,12 @@ mod edge_cases {
 
     #[test]
     fn hash_ip_v6_with_high_variation_segments() {
-        let a = hash_ip(IpAddr::V6(Ipv6Addr::new(0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x1111, 0x2222)));
-        let b = hash_ip(IpAddr::V6(Ipv6Addr::new(0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x1111, 0x2223)));
+        let a = hash_ip(IpAddr::V6(Ipv6Addr::new(
+            0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x1111, 0x2222,
+        )));
+        let b = hash_ip(IpAddr::V6(Ipv6Addr::new(
+            0xAAAA, 0xBBBB, 0xCCCC, 0xDDDD, 0xEEEE, 0xFFFF, 0x1111, 0x2223,
+        )));
         assert_ne!(a, b);
     }
 
@@ -275,7 +276,9 @@ mod edge_cases {
     fn unique_local_v6_is_broad_block() {
         let net = MaxCidrBlock::UniqueLocalV6.network();
         assert!(net.contains(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0))));
-        assert!(net.contains(IpAddr::V6(Ipv6Addr::new(0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff))));
+        assert!(net.contains(IpAddr::V6(Ipv6Addr::new(
+            0xfdff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+        ))));
     }
 
     #[test]
