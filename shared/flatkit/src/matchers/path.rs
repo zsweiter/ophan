@@ -315,16 +315,16 @@ impl PathMatcherSet {
         let all_literal = patterns.iter().all(|p| p.tokens.len() == 1 && matches!(p.tokens[0], Tok::Literal(_)));
 
         if all_literal {
-            if patterns.len() == 1 {
-                if let Tok::Literal(lit) = &patterns[0].tokens[0] {
-                    return Self {
-                        nodes: Vec::new(),
-                        root: (0, 0),
-                        arena: Vec::new(),
-                        group_spans: Vec::new(),
-                        fast: Some(FastPath::SingleLiteral(lit.clone())),
-                    };
-                }
+            if patterns.len() == 1
+                && let Tok::Literal(lit) = &patterns[0].tokens[0]
+            {
+                return Self {
+                    nodes: Vec::new(),
+                    root: (0, 0),
+                    arena: Vec::new(),
+                    group_spans: Vec::new(),
+                    fast: Some(FastPath::SingleLiteral(lit.clone())),
+                };
             }
 
             let mut set = AHashSet::with_capacity(patterns.len());

@@ -9,7 +9,7 @@ members = [
     "libs/ophan-router",
     "shared/flatkit",
     "shared/cache",
-    # "libs/ophan-bpf",
+    "libs/ophan-bpf",
 ]
 default-members = ["ophan"]
 

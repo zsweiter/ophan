@@ -290,19 +290,15 @@ impl CompiledRule {
     #[inline]
     fn matches_response(&self, status_code: http::StatusCode, headers: &http::HeaderMap) -> bool {
         // --- 1. StatusCode (bitset; O(1)) ---
-        if let Some(status_set) = &self.response_status {
-            if status_set.contains(status_code) {
-                return true;
-            }
+        if self.response_status.as_ref().is_some_and(|set| set.contains(status_code)) {
+            return true;
         }
 
         // --- 2. Header[name] matchers ---
         if let Some(header_rules) = &self.response_headers {
             for (name, matchers) in header_rules {
-                if let Some(val) = headers.get(name) {
-                    if matchers.is_match(val.as_bytes()) {
-                        return true;
-                    }
+                if headers.get(name).is_some_and(|h| matchers.is_match(h.as_bytes())) {
+                    return true;
                 }
             }
         }

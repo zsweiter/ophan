@@ -534,7 +534,7 @@ impl OphanGateway {
                 WafEngineMiddleware::new(),
                 CorsMiddleware::new(),
             ),
-            static_service: StaticService::new(),
+            static_service: StaticService::new(2048, Duration::from_secs(15)),
         }
     }
 }

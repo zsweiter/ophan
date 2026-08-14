@@ -137,6 +137,6 @@ impl AuthService {
         // provider.
         let claims = auth::validator::insecure_decode(&response.access_token)?;
 
-        Ok(Refreshed { claims, response: response })
+        Ok(Refreshed { claims, response })
     }
 }

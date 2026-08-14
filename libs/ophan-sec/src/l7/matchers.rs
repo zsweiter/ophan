@@ -87,10 +87,8 @@ impl TextMatchers {
             }
         }
 
-        if let Some(ac) = &self.exact_patterns {
-            if ac.is_match(input) {
-                return true;
-            }
+        if self.exact_patterns.as_ref().is_some_and(|re| re.is_match(input)) {
+            return true;
         }
 
         for prefix in &self.prefix_patterns {
@@ -105,16 +103,12 @@ impl TextMatchers {
             }
         }
 
-        if let Some(re) = &self.regex_patterns {
-            if re.is_match(input) {
-                return true;
-            }
+        if self.regex_patterns.as_ref().is_some_and(|re| re.is_match(input)) {
+            return true;
         }
 
-        if let Some(globs) = &self.glob_patterns {
-            if globs.is_match(input) {
-                return true;
-            }
+        if self.glob_patterns.as_ref().is_some_and(|gb| gb.is_match(input)) {
+            return true;
         }
 
         false

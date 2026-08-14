@@ -230,21 +230,21 @@ mod lb_tests {
     #[test]
     fn test_balance_strategy_round_robin() {
         for s in &["round_robin", "round-robin"] {
-            assert_eq!(BalanceStrategy::from_str(*s).unwrap(), BalanceStrategy::RoundRobin);
+            assert_eq!(BalanceStrategy::from_str(s).unwrap(), BalanceStrategy::RoundRobin);
         }
     }
 
     #[test]
     fn test_balance_strategy_least_connections() {
         for s in &["least_connections", "least-connections"] {
-            assert_eq!(BalanceStrategy::from_str(*s).unwrap(), BalanceStrategy::LeastConnections);
+            assert_eq!(BalanceStrategy::from_str(s).unwrap(), BalanceStrategy::LeastConnections);
         }
     }
 
     #[test]
     fn test_balance_strategy_ip_hash() {
         for s in &["ip_hash", "ip-hash"] {
-            assert_eq!(BalanceStrategy::from_str(*s).unwrap(), BalanceStrategy::IpHash);
+            assert_eq!(BalanceStrategy::from_str(s).unwrap(), BalanceStrategy::IpHash);
         }
     }
 

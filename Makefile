@@ -80,7 +80,7 @@ check:
 	$(CARGO) check --all-targets
 
 test:
-	$(CARGO) test --all --all-targets
+	$(CARGO) test --all --all-targets --exclude ophan-bpf
 
 fix:
 	$(CARGO) fmt --all

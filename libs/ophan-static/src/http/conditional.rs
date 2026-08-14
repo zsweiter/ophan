@@ -138,7 +138,7 @@ mod tests {
         let inner = &etag_str[1..etag_str.len() - 1];
         let parts: Vec<&str> = inner.split('-').collect();
         assert_eq!(parts.len(), 3, "etag should have 3 parts: size-mtime-inode");
-        
+
         let _ = fs::remove_dir_all(dir_name(&path));
     }
 

@@ -144,12 +144,12 @@ impl RequestBuilder {
 
     /// Append query parameters to the URL.
     pub fn query(mut self, params: &[(&str, &str)]) -> Self {
-        self.request = self.request.and_then(|mut req| {
+        self.request = self.request.map(|mut req| {
             for (k, v) in params {
                 req.url.query_pairs_mut().append_pair(k, v);
             }
 
-            Ok(req)
+            req
         });
         self
     }

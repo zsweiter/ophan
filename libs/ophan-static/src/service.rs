@@ -27,9 +27,9 @@ pub struct StaticService {
 }
 
 impl StaticService {
-    pub fn new() -> Self {
+    pub fn new(cache_size: usize, cache_ttl: Duration) -> Self {
         Self {
-            filesystem: Filesystem::new(2048, Duration::from_secs(15)),
+            filesystem: Filesystem::new(cache_size, cache_ttl),
             default_indexes: vec!["index.html".into(), "index.htm".into()].into_boxed_slice(),
         }
     }

@@ -92,7 +92,7 @@ impl RuleMeta {
 /// concrete [`crate::l7::WafResult`] honoring the configured [`WafMode`].
 ///
 /// [`WafMode`]: crate::l7::WafMode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RuleAction {
     /// Allow the request through, regardless of further matches in the same
     /// phase. Useful for explicit allowlist overrides (e.g. an IP allow rule
@@ -100,6 +100,7 @@ pub enum RuleAction {
     Allow,
     /// Record the match in `WafResult::Log` and continue evaluating. Score
     /// is still accumulated for the anomaly threshold.
+    #[default]
     Log,
     /// Reject the request (`WafResult::Block`). Carries the HTTP status the
     /// proxy should write to the downstream client.
@@ -108,12 +109,6 @@ pub enum RuleAction {
     /// Reserved for bot-level rules; the proxy middleware decides how to
     /// render it.
     Challenge,
-}
-
-impl Default for RuleAction {
-    fn default() -> Self {
-        Self::Log
-    }
 }
 
 // =============================================================================

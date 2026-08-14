@@ -157,10 +157,10 @@ impl OAuthClient {
 
     /// Resolves a signing key directly from a JWKS URI.
     async fn resolve_jwks(&self, jwks_uri: &str, kid: &str) -> Result<Arc<DecodingKey>> {
-        if let Some(cached) = self.registry.get_value(jwks_uri) {
-            if let Some(key) = cached.keys.get(kid) {
-                return Ok(Arc::clone(key));
-            }
+        if let Some(cached) = self.registry.get_value(jwks_uri)
+            && let Some(key) = cached.keys.get(kid)
+        {
+            return Ok(Arc::clone(key));
         }
 
         let (keys, ttl) = self.fetch_and_parse_jwks(jwks_uri).await?;

@@ -5,6 +5,7 @@ use std::{cmp::Ordering, net::IpAddr, str::FromStr};
 fn merge_u32(sorted: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::with_capacity(sorted.len());
     for (start, end) in sorted {
+        #[allow(clippy::collapsible_if)]
         if let Some(last) = out.last_mut() {
             if start <= last.1 || (last.1 != u32::MAX && start == last.1 + 1) {
                 if end > last.1 {
@@ -21,6 +22,7 @@ fn merge_u32(sorted: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
 fn merge_u128(sorted: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
     let mut out: Vec<(u128, u128)> = Vec::with_capacity(sorted.len());
     for (start, end) in sorted {
+        #[allow(clippy::collapsible_if)]
         if let Some(last) = out.last_mut() {
             if start <= last.1 || (last.1 != u128::MAX && start == last.1 + 1) {
                 if end > last.1 {

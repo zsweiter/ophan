@@ -115,11 +115,12 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
         K: Borrow<Q>,
         Q: Hash + ?Sized,
     {
-        if let Some(t) = ttl {
-            if t.is_zero() {
-                return;
-            }
+        if let Some(t) = ttl
+            && t.is_zero()
+        {
+            return;
         }
+
         self.inner.put(key, value, ttl);
     }
 

@@ -87,7 +87,7 @@ pub fn is_rewindable(content_type: &HeaderValue) -> bool {
 
     let mime = mime.trim_ascii_end();
 
-    default_rewindable_mimes().iter().any(|&allowed| mime == allowed)
+    default_rewindable_mimes().contains(&mime)
 }
 
 /// Bytes-based variant of [`is_rewindable`] — used when the caller has the
@@ -101,7 +101,7 @@ pub fn is_rewindable_bytes(content_type: &[u8]) -> bool {
 
     let mime = mime.trim_ascii_end();
 
-    default_rewindable_mimes().iter().any(|&allowed| mime == allowed)
+    default_rewindable_mimes().contains(&mime)
 }
 
 // =============================================================================
@@ -213,9 +213,10 @@ impl std::fmt::Debug for StreamingBodyMatcher {
 }
 
 /// Internal phase state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum BodyPhaseState {
     /// No chunk delivered yet.
+    #[default]
     Empty,
     /// Streaming in progress.
     Scanning,
@@ -223,12 +224,6 @@ enum BodyPhaseState {
     Matched,
     /// `end_body` delivered, nothing matched; terminal.
     Clean,
-}
-
-impl Default for BodyPhaseState {
-    fn default() -> Self {
-        Self::Empty
-    }
 }
 
 impl StreamingBodyMatcher {
@@ -293,7 +288,7 @@ impl StreamingBodyMatcher {
             dfa_state: None,
             regex_active,
             rewindable,
-            phase_state: BodyPhaseState::Empty,
+            phase_state: BodyPhaseState::default(),
             last_meta: None,
         }
     }
@@ -327,12 +322,11 @@ impl StreamingBodyMatcher {
         if let Some(ac) = &self.ac {
             let mut reader = ChunkReader { overlap: &self.overlap, chunk, pos: 0 };
             let mut hit = None;
-            for m in ac.stream_find_iter(&mut reader) {
-                if let Ok(m) = m {
-                    hit = Some(m.pattern().as_usize());
-                    break;
-                }
+            for m in ac.stream_find_iter(&mut reader).flatten() {
+                hit = Some(m.pattern().as_usize());
+                break;
             }
+
             if let Some(pidx) = hit {
                 if let Some(meta) = self.ac_meta.get(pidx).and_then(|m| m.as_ref()) {
                     self.last_meta = Some(meta.clone());

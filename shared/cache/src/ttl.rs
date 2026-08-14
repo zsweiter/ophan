@@ -134,12 +134,14 @@ where
 
     #[inline]
     fn ensure_capacity(&self) {
-        if let Some(limit) = self.max_capacity {
-            if self.len_count.load(Ordering::Relaxed) >= limit {
-                let amount = usize::max(limit / 10, 16);
+        let Some(limit) = self.max_capacity else {
+            return;
+        };
 
-                self.evict_smart_conditional(amount);
-            }
+        if self.len_count.load(Ordering::Relaxed) >= limit {
+            let amount = usize::max(limit / 10, 16);
+
+            self.evict_smart_conditional(amount);
         }
     }
 
@@ -173,10 +175,10 @@ where
             .map(|(key, _)| key.clone())
             .collect();
 
-        if keys_to_remove.is_empty() {
-            if let Some((closest_key, _)) = sample.into_iter().min_by_key(|(_, expires_at)| *expires_at) {
-                keys_to_remove.push(closest_key);
-            }
+        if keys_to_remove.is_empty()
+            && let Some((closest_key, _)) = sample.into_iter().min_by_key(|(_, expires_at)| *expires_at)
+        {
+            keys_to_remove.push(closest_key);
         }
 
         let mut removed_count = 0;

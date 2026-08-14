@@ -101,6 +101,8 @@ impl NetPolicy {
         // Legacy De-facto Standard "X-Forwarded-For"
         if self.real_ip_header == header::X_FORWARDED_FOR {
             if let Some(first_ip_str) = header_value.split(',').next() {
+                // When the proxy chain is trusted, the leftmost address
+                // represents the original client.
                 if let Ok(ip) = first_ip_str.trim().parse::<IpAddr>() {
                     return Some(ip);
                 }
@@ -167,10 +169,10 @@ fn parse_rfc7239_forwarded(value: &str) -> Option<IpAddr> {
             let mut cleaned = val.strip_prefix('"').unwrap_or(val).strip_suffix('"').unwrap_or(val);
 
             // If it contains a port or is bracketed IPv6, isolate the pure IP address segment
-            if cleaned.starts_with('[') {
-                if let Some(end_bracket) = cleaned.find(']') {
-                    cleaned = &cleaned[1..end_bracket];
-                }
+            if cleaned.starts_with('[')
+                && let Some(end_bracket) = cleaned.find(']')
+            {
+                cleaned = &cleaned[1..end_bracket];
             } else if let Some(colon_idx) = cleaned.find(':') {
                 // For IPv4 (e.g. 1.1.1.1:80), verify it's a port delimiter and not an IPv6 address
                 if cleaned.match_indices(':').count() == 1 {

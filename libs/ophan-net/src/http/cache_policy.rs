@@ -47,10 +47,10 @@ impl CachePolicy {
                         if let Ok(secs) = sec_str.parse::<u64>() {
                             policy.s_maxage = Some(Duration::from_secs(secs));
                         }
-                    } else if let Some(sec_str) = directive.strip_prefix("max-age=") {
-                        if let Ok(secs) = sec_str.parse::<u64>() {
-                            policy.max_age = Some(Duration::from_secs(secs));
-                        }
+                    } else if let Some(sec_str) = directive.strip_prefix("max-age=")
+                        && let Ok(secs) = sec_str.parse::<u64>()
+                    {
+                        policy.max_age = Some(Duration::from_secs(secs));
                     }
                 },
             }

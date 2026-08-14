@@ -4,6 +4,7 @@ use crate::http::header;
 
 #[inline(always)]
 pub fn client_host(req: &Parts, from_proxy: bool) -> Option<&str> {
+    #[allow(clippy::collapsible_if)]
     if from_proxy {
         if let Some(forwarded) = req.headers.get(&header::X_FORWARDED_HOST).and_then(|h| h.to_str().ok()) {
             return forwarded.split(',').next().map(|s| s.trim());
@@ -24,6 +25,7 @@ pub fn client_host(req: &Parts, from_proxy: bool) -> Option<&str> {
 }
 
 pub fn is_request_https(session: &pingora::proxy::Session, from_proxy: bool) -> bool {
+    #[allow(clippy::collapsible_if)]
     if from_proxy {
         if let Some(proto) = session.req_header().headers.get(&header::X_FORWARDED_PROTO) {
             if let Ok(proto_str) = proto.to_str() {

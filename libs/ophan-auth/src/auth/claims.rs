@@ -1,7 +1,10 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::write::EncoderWriter;
+use serde::{Deserialize, Deserializer, Serialize, de::Error};
 use serde_json::{Map, Value};
+use std::io::Write;
 
-use crate::{auth::CnfClaim, serialization::b64_encode};
+use crate::auth::CnfClaim;
 
 fn deserialize_audience<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
@@ -46,54 +49,80 @@ pub struct Claims {
 }
 
 impl Claims {
-    pub fn encode(&self) -> Result<String, serde_json::Error> {
-        let mut data = self.extra_data.clone();
-
-        data.insert("user_id".to_string(), Value::String(self.sub.clone()));
-        if let Some(scope) = self.scope.as_ref() {
-            data.insert("scope".to_string(), Value::String(scope.clone()));
+    /// Encodes the claims directly into unpadded URL-Safe Base64 bytes.
+    ///
+    /// # Errors
+    /// Returns an error if JSON serialization or Base64 encoding fails.
+    pub fn encode_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        #[derive(Serialize)]
+        struct ClaimsRefEncoder<'a> {
+            user_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            scope: Option<&'a str>,
+            #[serde(flatten)]
+            extra: &'a Map<String, Value>,
         }
 
-        Ok(b64_encode(serde_json::to_vec(&data)?))
+        let encoder = ClaimsRefEncoder {
+            user_id: &self.sub,
+            scope: self.scope.as_deref(),
+            extra: &self.extra_data,
+        };
+
+        let mut b64_output_buf = Vec::with_capacity(256);
+        {
+            let mut base64_writer = EncoderWriter::new(&mut b64_output_buf, &URL_SAFE_NO_PAD);
+
+            // Serialize JSON directly into the Base64 stream.
+            serde_json::to_writer(&mut base64_writer, &encoder)?;
+
+            base64_writer.flush().map_err(serde_json::Error::custom)?;
+        }
+
+        Ok(b64_output_buf)
     }
 
-    pub fn get_by_dot<'a>(&'a self, path: &str) -> Option<&'a str> {
+    /// Evaluates dot-notation paths (e.g., `"user.role"` or `"items.0.id"`)
+    /// to extract nested claim values without full JSON tree traversal.
+    ///
+    /// # Arguments
+    /// * `path` - A dot-separated string representing the target property path.
+    ///
+    /// # Returns
+    /// An `Option<&str>` referencing the internal string value if found and valid.
+    #[inline]
+    pub fn get_by_dot(&self, path: &str) -> Option<&str> {
         match path {
-            "sub" => Some(&self.sub),
-            "iss" => self.iss.as_deref(),
-            "scope" => self.scope.as_deref(),
-            _ => {
-                let mut parts = path.split('.');
-                let first_key = parts.next()?;
-
-                if parts.clone().next().is_none() {
-                    if let Some(val) = self.extra_data.get(first_key) {
-                        return val.as_str();
-                    }
-                }
-
-                let mut current = self.extra_data.get(first_key)?;
-
-                for key in parts {
-                    if key.is_empty() {
-                        return None;
-                    }
-
-                    match current {
-                        Value::Object(map) => {
-                            current = map.get(key)?;
-                        },
-                        Value::Array(arr) => {
-                            let idx = key.parse::<usize>().ok()?;
-                            current = arr.get(idx)?;
-                        },
-                        _ => return None,
-                    }
-                }
-
-                current.as_str()
-            },
+            "sub" => return Some(&self.sub),
+            "iss" => return self.iss.as_deref(),
+            "scope" => return self.scope.as_deref(),
+            _ => {},
         }
+
+        let mut parts = path.split('.');
+        let first_key = parts.next()?;
+
+        let mut current = self.extra_data.get(first_key)?;
+
+        // Traverses nested JSON Objects and Arrays sequentially
+        for key in parts {
+            if key.is_empty() {
+                return None;
+            }
+
+            match current {
+                Value::Object(map) => {
+                    current = map.get(key)?;
+                },
+                Value::Array(arr) => {
+                    let idx = key.parse::<usize>().ok()?;
+                    current = arr.get(idx)?;
+                },
+                _ => return None,
+            }
+        }
+
+        current.as_str()
     }
 }
 
@@ -169,7 +198,7 @@ mod tests {
         let mut claims = make_claims();
         claims.extra_data.insert("custom".into(), Value::String("val".into()));
 
-        let encoded = claims.encode().unwrap();
+        let encoded = claims.encode_bytes().unwrap();
         assert!(!encoded.is_empty());
     }
 
@@ -237,7 +266,7 @@ mod tests {
     #[test]
     fn test_claims_encode_produces_valid_base64url() {
         let claims = make_claims();
-        let encoded = claims.encode().unwrap();
+        let encoded = claims.encode_bytes().unwrap();
 
         use base64::Engine;
         let decoded_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&encoded).unwrap();

@@ -59,18 +59,18 @@ pub fn format_size(bytes: u64) -> FormattedSize {
     let mut pos = buf.len();
 
     let (integral, fractional, unit) = if bytes < 1024 {
-        (bytes, 0, " B")
+        (bytes as u128, 0, " B")
     } else if bytes < (1 << 20) {
-        let val_x10 = (bytes * 10) >> 10;
+        let val_x10 = (bytes as u128 * 10) >> 10;
         (val_x10 / 10, val_x10 % 10, " KB")
     } else if bytes < (1 << 30) {
-        let val_x10 = (bytes * 10) >> 20;
+        let val_x10 = (bytes as u128 * 10) >> 20;
         (val_x10 / 10, val_x10 % 10, " MB")
     } else if bytes < (1 << 40) {
-        let val_x10 = (bytes * 10) >> 30;
+        let val_x10 = (bytes as u128 * 10) >> 30;
         (val_x10 / 10, val_x10 % 10, " GB")
     } else {
-        let val_x10 = ((bytes as u128) * 10 >> 40) as u64;
+        let val_x10 = (bytes as u128 * 10) >> 40;
         (val_x10 / 10, val_x10 % 10, " TB")
     };
 

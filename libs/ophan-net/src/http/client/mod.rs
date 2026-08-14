@@ -125,9 +125,9 @@ impl Client {
             v1::http_req_header_to_wire(&parts).map_err(|a| Error::new(error::ErrorKind::Encode(a.to_string())))?;
 
         let send_fut = async {
-            stream.write(&header_bytes).await?;
+            stream.write_all(&header_bytes).await?;
             if let Some(body_bytes) = body {
-                stream.write(&body_bytes).await?;
+                stream.write_all(&body_bytes).await?;
             }
 
             stream.flush().await?;

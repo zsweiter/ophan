@@ -36,7 +36,7 @@ impl LoadBalancer {
 
     #[inline(always)]
     fn get_by_id(&self, id: usize) -> &Arc<Upstream> {
-        &self.upstream_by_idx.get(id).unwrap()
+        self.upstream_by_idx.get(id).unwrap()
     }
 
     #[inline(always)]

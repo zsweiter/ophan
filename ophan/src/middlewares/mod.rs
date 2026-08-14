@@ -138,7 +138,14 @@ impl Pipeline {
         upstream_request.remove_header("x-user-claims");
 
         if let Some(claims) = ctx.auth.as_ref().map(|a| &a.claims) {
-            upstream_request.insert_header("x-user-claims", claims.encode().unwrap())?;
+            let encoded_claims = claims
+                .encode_bytes()
+                .map_err(|e| pingora::Error::because(pingora::ErrorType::InternalError, "failed to encode user claims", e))?;
+
+            let header_value = HeaderValue::from_maybe_shared(encoded_claims)
+                .map_err(|e| pingora::Error::because(pingora::ErrorType::InternalError, "failed to create claims header", e))?;
+
+            upstream_request.insert_header("x-user-claims", header_value)?;
         }
 
         Ok(())

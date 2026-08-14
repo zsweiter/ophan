@@ -40,8 +40,8 @@ pub enum Status {
 #[derive(Debug)]
 enum Backend {
     #[cfg(all(target_os = "linux", feature = "xdp"))]
-    Xdp(xdp::XdpBackend),
-    Software(software::SoftwareBackend),
+    Xdp(Box<xdp::XdpBackend>),
+    Software(Box<software::SoftwareBackend>),
 }
 
 /// High-level ingress filter that can run on top of a software backend
@@ -85,10 +85,8 @@ impl IngressFilter {
                     return PacketAction::DROP;
                 }
 
-                if let Some(p) = port {
-                    if !b.matches_port(p) {
-                        return PacketAction::DROP;
-                    }
+                if port.is_some_and(|p| b.matches_port(p)) {
+                    return PacketAction::DROP;
                 }
 
                 if b.is_allowed(ip, port) {
@@ -321,13 +319,16 @@ impl IngressFilterBuilder {
         allowed_on: Vec<(IpNet, u16)>,
         blocked_on: Vec<(IpNet, u16)>,
     ) -> Result<IngressFilter, String> {
-        use aya::programs::XdpFlags;
+        use aya::programs::XdpMode;
 
         match xdp::XdpBackend::from_config("xdp_ingress", &ports, &allowed, &blocked, &allowed_on, &blocked_on) {
-            Ok(mut xdp) => match xdp.attach(iface, XdpFlags::default()) {
+            Ok(mut xdp) => match xdp.attach(iface, XdpMode::default()) {
                 Ok(()) => {
                     eprintln!("[ophan-waf] XDP attached to interface {}", iface);
-                    Ok(IngressFilter { backend: Backend::Xdp(xdp), iface: Some(iface.to_string()) })
+                    Ok(IngressFilter {
+                        backend: Backend::Xdp(Box::new(xdp)),
+                        iface: Some(iface.to_string()),
+                    })
                 },
                 Err(e) => {
                     eprintln!(
@@ -356,7 +357,7 @@ impl IngressFilterBuilder {
         eprintln!("[ophan-waf] Using software ingress filter");
 
         IngressFilter {
-            backend: Backend::Software(backend),
+            backend: Backend::Software(Box::new(backend)),
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             iface: None,
         }

@@ -1,13 +1,12 @@
 use aya::{
     Ebpf, Pod,
     maps::{HashMap, LpmTrie, MapData, lpm_trie::Key},
-    programs::{Xdp, XdpFlags, xdp::XdpLinkId},
+    programs::{Xdp, XdpMode, xdp::XdpLinkId},
 };
-use flatkit::net::IpNetwork;
+use flatkit::net::{IpNet, Ipv4Net, Ipv6Net};
 use std::net::IpAddr;
 
 use super::backend::IngressBackend;
-use super::maps::{CidrMap, PortMap};
 
 /// Compiled XDP binary embedded at build time.
 const XDP_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ophan-bpf.o"));
@@ -83,9 +82,9 @@ pub struct XdpBackend {
     ebpf: Ebpf,
     program_name: String,
 
-    listener_policies: PortMap<HashMap<MapData, u16, ListenerPolicy>>,
-    port_rules_v4: CidrMap<LpmTrie<MapData, PortRuleKeyV4, u8>>,
-    port_rules_v6: CidrMap<LpmTrie<MapData, PortRuleKeyV6, u8>>,
+    listener_policies: HashMap<MapData, u16, ListenerPolicy>,
+    port_rules_v4: LpmTrie<MapData, PortRuleKeyV4, u8>,
+    port_rules_v6: LpmTrie<MapData, PortRuleKeyV6, u8>,
 
     link: Option<XdpLinkId>,
 }
@@ -101,10 +100,10 @@ impl XdpBackend {
     pub fn from_config(
         program_name: &str,
         ports: &[u16],
-        allowed: &[IpNetwork],
-        blocked: &[IpNetwork],
-        allowed_on: &[(IpNetwork, u16)],
-        blocked_on: &[(IpNetwork, u16)],
+        allowed: &[IpNet],
+        blocked: &[IpNet],
+        allowed_on: &[(IpNet, u16)],
+        blocked_on: &[(IpNet, u16)],
     ) -> Result<Self, String> {
         let mut ebpf = Ebpf::load(XDP_BYTES).map_err(|e| format!("Failed to load eBPF bytecode: {e}"))?;
 
@@ -127,9 +126,9 @@ impl XdpBackend {
         let mut backend = Self {
             ebpf,
             program_name: program_name.to_string(),
-            listener_policies: PortMap(listener_policies),
-            port_rules_v4: CidrMap(port_rules_v4),
-            port_rules_v6: CidrMap(port_rules_v6),
+            listener_policies,
+            port_rules_v4,
+            port_rules_v6,
             link: None,
         };
 
@@ -154,7 +153,7 @@ impl XdpBackend {
     }
 
     /// Attaches the XDP program to the given interface.
-    pub fn attach(&mut self, iface: &str, flags: XdpFlags) -> Result<(), String> {
+    pub fn attach(&mut self, iface: &str, flags: XdpMode) -> Result<(), String> {
         if self.link.is_some() {
             return Ok(());
         }
@@ -192,7 +191,7 @@ impl XdpBackend {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    fn insert_port_rule_v4(&mut self, network: flatkit::net::Ipv4Network, port: u16, action: u8) -> Result<(), String> {
+    fn insert_port_rule_v4(&mut self, network: Ipv4Net, port: u16, action: u8) -> Result<(), String> {
         let prefix = 16 + network.prefix();
         if prefix > 16 + V4_FULL_PREFIX_LEN {
             return Err(format!("invalid IPv4 prefix length for per-port rule: {prefix}"));
@@ -200,22 +199,20 @@ impl XdpBackend {
         let rule_key = PortRuleKeyV4 { port, client_ip: u32::from(network.ip()) };
         let key = Key::new(prefix as u32, rule_key);
         self.port_rules_v4
-            .0
             .insert(&key, action, 0)
             .map_err(|e| format!("insert per-port IPv4 rule (port {port}, {network}): {e}"))
     }
 
-    fn remove_port_rule_v4(&mut self, network: flatkit::net::Ipv4Network, port: u16) -> Result<(), String> {
+    fn remove_port_rule_v4(&mut self, network: Ipv4Net, port: u16) -> Result<(), String> {
         let prefix = 16 + network.prefix();
         let rule_key = PortRuleKeyV4 { port, client_ip: u32::from(network.ip()) };
         let key = Key::new(prefix as u32, rule_key);
         self.port_rules_v4
-            .0
             .remove(&key)
             .map_err(|e| format!("remove per-port IPv4 rule (port {port}, {network}): {e}"))
     }
 
-    fn insert_port_rule_v6(&mut self, network: flatkit::net::Ipv6Network, port: u16, action: u8) -> Result<(), String> {
+    fn insert_port_rule_v6(&mut self, network: Ipv6Net, port: u16, action: u8) -> Result<(), String> {
         let prefix = 16 + network.prefix();
         if prefix > 16 + V6_FULL_PREFIX_LEN {
             return Err(format!("invalid IPv6 prefix length for per-port rule: {prefix}"));
@@ -223,17 +220,15 @@ impl XdpBackend {
         let rule_key = PortRuleKeyV6 { port, client_ip: network.ip().octets() };
         let key = Key::new(prefix as u32, rule_key);
         self.port_rules_v6
-            .0
             .insert(&key, action, 0)
             .map_err(|e| format!("insert per-port IPv6 rule (port {port}, {network}): {e}"))
     }
 
-    fn remove_port_rule_v6(&mut self, network: flatkit::net::Ipv6Network, port: u16) -> Result<(), String> {
+    fn remove_port_rule_v6(&mut self, network: Ipv6Net, port: u16) -> Result<(), String> {
         let prefix = 16 + network.prefix();
         let rule_key = PortRuleKeyV6 { port, client_ip: network.ip().octets() };
         let key = Key::new(prefix as u32, rule_key);
         self.port_rules_v6
-            .0
             .remove(&key)
             .map_err(|e| format!("remove per-port IPv6 rule (port {port}, {network}): {e}"))
     }
@@ -248,25 +243,25 @@ impl IngressBackend for XdpBackend {
     // The current eBPF maps only support per-port ACLs. Port-less global
     // allow/deny rules are accepted for API compatibility but are no-ops.
 
-    fn allow(&mut self, network: impl Into<IpNetwork>) -> Result<(), Self::Error> {
+    fn allow(&mut self, network: impl Into<IpNet>) -> Result<(), Self::Error> {
         let network = network.into();
         eprintln!("[ophan-waf] Warning: global allow ({network}) is not supported by the XDP backend; ignored");
         Ok(())
     }
 
-    fn remove_allow(&mut self, network: impl Into<IpNetwork>) -> Result<(), Self::Error> {
+    fn remove_allow(&mut self, network: impl Into<IpNet>) -> Result<(), Self::Error> {
         let network = network.into();
         eprintln!("[ophan-waf] Warning: global remove_allow ({network}) is not supported by the XDP backend; ignored");
         Ok(())
     }
 
-    fn deny(&mut self, network: impl Into<IpNetwork>) -> Result<(), Self::Error> {
+    fn deny(&mut self, network: impl Into<IpNet>) -> Result<(), Self::Error> {
         let network = network.into();
         eprintln!("[ophan-waf] Warning: global deny ({network}) is not supported by the XDP backend; ignored");
         Ok(())
     }
 
-    fn remove_deny(&mut self, network: impl Into<IpNetwork>) -> Result<(), Self::Error> {
+    fn remove_deny(&mut self, network: impl Into<IpNet>) -> Result<(), Self::Error> {
         let network = network.into();
         eprintln!("[ophan-waf] Warning: global remove_deny ({network}) is not supported by the XDP backend; ignored");
         Ok(())
@@ -276,31 +271,31 @@ impl IngressBackend for XdpBackend {
     // Port-specific rules
     // ------------------------------------------------------------------
 
-    fn allow_on(&mut self, network: impl Into<IpNetwork>, port: u16) -> Result<(), Self::Error> {
+    fn allow_on(&mut self, network: impl Into<IpNet>, port: u16) -> Result<(), Self::Error> {
         match network.into() {
-            IpNetwork::V4(v4) => self.insert_port_rule_v4(v4, port, RULE_ACTION_PASS),
-            IpNetwork::V6(v6) => self.insert_port_rule_v6(v6, port, RULE_ACTION_PASS),
+            IpNet::V4(v4) => self.insert_port_rule_v4(v4, port, RULE_ACTION_PASS),
+            IpNet::V6(v6) => self.insert_port_rule_v6(v6, port, RULE_ACTION_PASS),
         }
     }
 
-    fn remove_allow_on(&mut self, network: impl Into<IpNetwork>, port: u16) -> Result<(), Self::Error> {
+    fn remove_allow_on(&mut self, network: impl Into<IpNet>, port: u16) -> Result<(), Self::Error> {
         match network.into() {
-            IpNetwork::V4(v4) => self.remove_port_rule_v4(v4, port),
-            IpNetwork::V6(v6) => self.remove_port_rule_v6(v6, port),
+            IpNet::V4(v4) => self.remove_port_rule_v4(v4, port),
+            IpNet::V6(v6) => self.remove_port_rule_v6(v6, port),
         }
     }
 
-    fn deny_on(&mut self, network: impl Into<IpNetwork>, port: u16) -> Result<(), Self::Error> {
+    fn deny_on(&mut self, network: impl Into<IpNet>, port: u16) -> Result<(), Self::Error> {
         match network.into() {
-            IpNetwork::V4(v4) => self.insert_port_rule_v4(v4, port, RULE_ACTION_DROP),
-            IpNetwork::V6(v6) => self.insert_port_rule_v6(v6, port, RULE_ACTION_DROP),
+            IpNet::V4(v4) => self.insert_port_rule_v4(v4, port, RULE_ACTION_DROP),
+            IpNet::V6(v6) => self.insert_port_rule_v6(v6, port, RULE_ACTION_DROP),
         }
     }
 
-    fn remove_deny_on(&mut self, network: impl Into<IpNetwork>, port: u16) -> Result<(), Self::Error> {
+    fn remove_deny_on(&mut self, network: impl Into<IpNet>, port: u16) -> Result<(), Self::Error> {
         match network.into() {
-            IpNetwork::V4(v4) => self.remove_port_rule_v4(v4, port),
-            IpNetwork::V6(v6) => self.remove_port_rule_v6(v6, port),
+            IpNet::V4(v4) => self.remove_port_rule_v4(v4, port),
+            IpNet::V6(v6) => self.remove_port_rule_v6(v6, port),
         }
     }
 
@@ -311,14 +306,12 @@ impl IngressBackend for XdpBackend {
     fn allow_port(&mut self, port: u16) -> Result<(), Self::Error> {
         let policy = ListenerPolicy { default_action: DEFAULT_POLICY_ALLOW };
         self.listener_policies
-            .0
             .insert(port, policy, 0)
             .map_err(|e| format!("insert listener policy for port {port}: {e}"))
     }
 
     fn remove_port(&mut self, port: u16) -> Result<(), Self::Error> {
         self.listener_policies
-            .0
             .remove(&port)
             .map_err(|e| format!("remove listener policy for port {port}: {e}"))
     }

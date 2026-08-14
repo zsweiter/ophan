@@ -181,6 +181,7 @@ impl IngressBackend for SoftwareBackend {
         }
 
         if let Some(p) = port {
+            // When port is provided, search ipset by concrete port, allow
             if self.port_blocked.get(&p).is_some_and(|set| set.contains(client_ip)) {
                 return true;
             }
@@ -196,8 +197,8 @@ impl IngressBackend for SoftwareBackend {
             return true;
         }
 
-        // Port-specific allow
         if let Some(p) = port {
+            // When port is provided, search ipset by concrete port, deny
             if self.port_allowed.get(&p).is_some_and(|set| set.contains(client_ip)) {
                 return true;
             }
