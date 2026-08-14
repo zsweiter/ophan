@@ -113,22 +113,23 @@ fn push_hex(mut value: u64, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
     use super::*;
-    use std::fs;
     use std::time::{Duration, SystemTime};
 
-    fn temp_file(name: &str, content: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("ophan_conditional_test");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join(name);
-        fs::write(&path, content).unwrap();
-        path
+    fn temp_file(content: &[u8]) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content).unwrap();
+        file.flush().unwrap();
+        file
     }
 
     #[test]
     fn create_etag_format() {
-        let path = temp_file("etag_test.txt", b"hello world");
-        let meta = fs::metadata(&path).unwrap();
+        let path = temp_file(b"hello world");
+        let meta = path.as_file().metadata().unwrap();
         let etag = create_etag(&meta);
 
         let etag_str = etag.to_str().unwrap();
@@ -138,33 +139,29 @@ mod tests {
         let inner = &etag_str[1..etag_str.len() - 1];
         let parts: Vec<&str> = inner.split('-').collect();
         assert_eq!(parts.len(), 3, "etag should have 3 parts: size-mtime-inode");
-
-        let _ = fs::remove_dir_all(dir_name(&path));
     }
 
     #[test]
     fn create_etag_consistent_for_same_file() {
-        let path = temp_file("etag_consistent.txt", b"test data");
-        let meta = fs::metadata(&path).unwrap();
+        let path = temp_file(b"test data");
+        let meta = path.as_file().metadata().unwrap();
 
         let etag1 = create_etag(&meta);
         let etag2 = create_etag(&meta);
 
         assert_eq!(etag1, etag2);
-        let _ = fs::remove_dir_all(dir_name(&path));
     }
 
     #[test]
     fn last_modified_header_returns_value() {
-        let path = temp_file("lm_test.txt", b"data");
-        let meta = fs::metadata(&path).unwrap();
+        let path = temp_file(b"data");
+        let meta = path.as_file().metadata().unwrap();
 
         let lm = last_modified_header(&meta);
         assert!(lm.is_some());
 
         let lm_str = lm.unwrap().to_str().unwrap().to_string();
         assert!(!lm_str.is_empty());
-        let _ = fs::remove_dir_all(dir_name(&path));
     }
 
     #[test]
@@ -230,9 +227,5 @@ mod tests {
         let headers = http::HeaderMap::new();
 
         assert!(!is_not_modified(&headers, &etag, None));
-    }
-
-    fn dir_name(path: &std::path::Path) -> std::path::PathBuf {
-        path.parent().unwrap().to_path_buf()
     }
 }

@@ -153,7 +153,9 @@ pub fn html_escape(s: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tempfile::tempdir;
+
+use super::*;
 
     #[test]
     fn html_escape_noop() {
@@ -182,36 +184,33 @@ mod tests {
 
     #[tokio::test]
     async fn directory_listing_builds_for_root() {
-        let dir = std::env::temp_dir().join("ophan_static_test_root_listing");
-        let _ = fs::remove_dir_all(&dir).await;
-        fs::create_dir_all(&dir).await.unwrap();
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
+
         fs::write(dir.join("hello.txt"), b"hi").await.unwrap();
         fs::create_dir(dir.join("subdir")).await.unwrap();
 
-        let conf = ServeConfig::new(&dir);
-        let html = DirectoryListing::build("/", &dir, &conf).await.unwrap();
+        let conf = ServeConfig::new(dir);
+        let html = DirectoryListing::build("/", dir, &conf).await.unwrap();
 
         assert!(html.contains("hello.txt"));
         assert!(html.contains("subdir"));
         assert!(!html.contains("Parent Directory"));
-
-        let _ = fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
     async fn directory_listing_builds_for_subdir() {
-        let dir = std::env::temp_dir().join("ophan_static_test_root_listing_sub");
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
         let sub = dir.join("inner");
-        let _ = fs::remove_dir_all(&dir).await;
+
         fs::create_dir_all(&sub).await.unwrap();
         fs::write(sub.join("file.txt"), b"data").await.unwrap();
 
-        let conf = ServeConfig::new(&dir);
+        let conf = ServeConfig::new(dir);
         let html = DirectoryListing::build("/inner/", &sub, &conf).await.unwrap();
 
         assert!(html.contains("file.txt"));
         assert!(html.contains("Parent Directory"));
-
-        let _ = fs::remove_dir_all(&dir).await;
     }
 }

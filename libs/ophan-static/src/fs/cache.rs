@@ -158,20 +158,19 @@ impl Filesystem {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::{TempDir, tempdir};
+
     use super::*;
     use std::fs;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ophan_cache_test_{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    fn temp_dir() -> TempDir {
+        tempdir().unwrap()
     }
 
     #[tokio::test]
     async fn fetch_or_load_file() {
-        let dir = temp_dir("file");
-        let file_path = dir.join("test.txt");
+        let dir = temp_dir();
+        let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"hello").unwrap();
 
         let fs = Filesystem::new(100, Duration::from_secs(60));
@@ -179,25 +178,23 @@ mod tests {
 
         assert!(result.is_file());
         assert!(!result.is_symlink());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn fetch_or_load_directory() {
-        let dir = temp_dir("dir");
-        fs::create_dir(dir.join("subdir")).unwrap();
+        let dir = temp_dir();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
 
         let fs = Filesystem::new(100, Duration::from_secs(60));
         let result = fs.fetch_or_load(&dir, None).await.unwrap();
 
         assert!(result.is_directory());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn cache_returns_same_object() {
-        let dir = temp_dir("cache");
-        let file_path = dir.join("cached.txt");
+        let dir = temp_dir();
+        let file_path = dir.path().join("cached.txt");
         fs::write(&file_path, b"data").unwrap();
 
         let fs = Filesystem::new(100, Duration::from_secs(60));
@@ -208,13 +205,12 @@ mod tests {
             Arc::as_ptr(&r1.into_file().unwrap()),
             Arc::as_ptr(&r2.into_file().unwrap())
         ));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn invalidate_removes_from_cache() {
-        let dir = temp_dir("invalidate");
-        let file_path = dir.join("inv.txt");
+        let dir = temp_dir();
+        let file_path = dir.path().join("inv.txt");
         fs::write(&file_path, b"data").unwrap();
 
         let fs = Filesystem::new(100, Duration::from_secs(60));
@@ -225,7 +221,6 @@ mod tests {
         fs.invalidate(&file_path);
 
         assert!(!fs.contains(&file_path));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -236,9 +231,9 @@ mod tests {
 
     #[tokio::test]
     async fn symlink_detected() {
-        let dir = temp_dir("symlink");
-        let target = dir.join("target.txt");
-        let link = dir.join("link.txt");
+        let dir = temp_dir();
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
         fs::write(&target, b"data").unwrap();
 
         #[cfg(unix)]
@@ -248,13 +243,12 @@ mod tests {
         let result = fs.fetch_or_load(&link, None).await.unwrap();
 
         assert!(result.is_symlink());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cache_object_into_file() {
-        let dir = temp_dir("into_file");
-        let file_path = dir.join("test.txt");
+        let dir = temp_dir();
+        let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"data").unwrap();
         let meta = fs::metadata(&file_path).unwrap();
 
@@ -267,24 +261,22 @@ mod tests {
         )));
 
         assert!(obj.into_file().is_some());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cache_object_into_directory() {
-        let dir = temp_dir("into_dir");
+        let dir = temp_dir();
         let meta = fs::metadata(&dir).unwrap();
 
-        let obj = CacheObject::Directory(Arc::new(DirObject::new(dir.clone(), meta, false)));
+        let obj = CacheObject::Directory(Arc::new(DirObject::new(dir.path().to_path_buf(), meta, false)));
 
         assert!(obj.into_directory().is_some());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cache_object_wrong_type_returns_none() {
-        let dir = temp_dir("wrong_type");
-        let file_path = dir.join("test.txt");
+        let dir = temp_dir();
+        let file_path = dir.path().join("test.txt");
         fs::write(&file_path, b"data").unwrap();
         let meta = fs::metadata(&file_path).unwrap();
 
@@ -297,6 +289,5 @@ mod tests {
         )));
 
         assert!(obj.into_directory().is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -77,6 +77,8 @@ httpmock = "0.8.3"
 criterion = { version = "0.5", features = ["html_reports"] }
 rayon = "1.12.0"
 
+tempfile = "3"
+
 [profile.dev]
 debug = 1
 opt-level = 0

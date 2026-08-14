@@ -103,84 +103,75 @@ impl Default for FsFlags {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::{TempDir, tempdir};
+
     use super::*;
     use std::fs;
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::path::PathBuf;
 
-    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    fn temp_symlink(name: &str) -> (TempDir, PathBuf) {
+        let dir = tempdir().unwrap();
 
-    fn temp_symlink(name: &str) -> std::path::PathBuf {
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("ophan_security_test_{id}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
-        let target = dir.join("target.txt");
+        let target = dir.path().join("target.txt");
         fs::write(&target, b"data").unwrap();
 
-        let link = dir.join(name);
+        let link = dir.path().join(name);
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        link
+        (dir, link)
     }
 
     #[test]
     fn blocked_symlink_without_flag() {
-        let link = temp_symlink("link1.txt");
+        let (_dir, link) = temp_symlink("link1.txt");
         let meta = fs::symlink_metadata(&link).unwrap();
         let flags = FsFlags::empty();
         assert!(flags.is_blocked(meta.file_type(), "link1.txt"));
-        let _ = fs::remove_dir_all(link.parent().unwrap());
     }
 
     #[test]
     fn allowed_symlink_with_flag() {
-        let link = temp_symlink("link2.txt");
+        let (_dir, link) = temp_symlink("link2.txt");
         let meta = fs::symlink_metadata(&link).unwrap();
         let flags = FsFlags::FOLLOW_SYMLINKS;
         assert!(!flags.is_blocked(meta.file_type(), "link2.txt"));
-        let _ = fs::remove_dir_all(link.parent().unwrap());
     }
 
     #[test]
     fn blocked_dotfile_without_flag() {
-        let dir = std::env::temp_dir().join("ophan_security_test_dot");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(".hidden"), b"data").unwrap();
+        let dir = tempdir().unwrap();
+        let hidden_path = dir.path().join(".hidden");
+        fs::write(&hidden_path, b"data").unwrap();
 
-        let meta = fs::metadata(dir.join(".hidden")).unwrap();
+        let meta = fs::metadata(&hidden_path).unwrap();
         let flags = FsFlags::empty();
         assert!(flags.is_blocked(meta.file_type(), ".hidden"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn allowed_dotfile_with_flag() {
-        let dir = std::env::temp_dir().join("ophan_security_test_dot_allow");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(".hidden"), b"data").unwrap();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join(".hidden");
 
-        let meta = fs::metadata(dir.join(".hidden")).unwrap();
+        fs::write(&file_path, b"data").unwrap();
+
+        let meta = fs::metadata(&file_path).unwrap();
         let flags = FsFlags::DOTFILES;
         assert!(!flags.is_blocked(meta.file_type(), ".hidden"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn normal_file_not_blocked() {
-        let dir = std::env::temp_dir().join("ophan_security_test_normal");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("ok.txt"), b"data").unwrap();
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("ok.txt");
 
-        let meta = fs::metadata(dir.join("ok.txt")).unwrap();
+        fs::write(&file_path, b"data").unwrap();
+
+        let meta = fs::metadata(&file_path).unwrap();
         let flags = FsFlags::empty();
         assert!(!flags.is_blocked(meta.file_type(), "ok.txt"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
