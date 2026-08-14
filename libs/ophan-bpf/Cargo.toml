@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/alex/ophan"
 
 [features]
-default = ["xdp"]
+default = []
 xdp = []
 blackbox = []
 

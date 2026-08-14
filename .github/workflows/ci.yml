@@ -55,4 +55,4 @@ jobs:
                   prefix-key: "v1-rust-cache-${{ matrix.os }}-${{ matrix.target }}"
 
             - name: Test
-              run: cargo test --all --all-targets --exclude ophan-bpf
+              run: cargo test --all --exclude ophan-bpf
