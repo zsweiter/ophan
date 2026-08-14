@@ -1,0 +1,25 @@
+[package]
+name = "ophan-sec"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+xdp = []
+
+[build-dependencies]
+
+[dependencies]
+flatkit = { workspace = true }
+ophan-net = { path = "../ophan-net" }
+
+regex = { workspace = true }
+regex-automata = "0.4"
+aho-corasick = { workspace = true }
+http = { workspace = true }
+ahash = { workspace = true }
+fastbloom-rs = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.14"
+aya-log = "0.2"
