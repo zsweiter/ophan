@@ -22,9 +22,13 @@ jobs:
             - uses: Swatinem/rust-cache@v2
 
             - name: Format check
+              env:
+                  ENABLE_XDP: "0"
               run: cargo fmt --all -- --check
 
             - name: Clippy
+              env:
+                  ENABLE_XDP: "0"
               run: cargo clippy --all-targets -- -D warnings
 
     test:
@@ -55,4 +59,6 @@ jobs:
                   prefix-key: "v1-rust-cache-${{ matrix.os }}-${{ matrix.target }}"
 
             - name: Test
+              env:
+                  ENABLE_XDP: "0"
               run: cargo test --all --exclude ophan-bpf

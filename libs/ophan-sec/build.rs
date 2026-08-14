@@ -1,15 +1,18 @@
 use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if env::var("CARGO_FEATURE_XDP").is_err() {
-        return Ok(());
+   let build_xdp = env::var("ENABLE_XDP").unwrap_or_default();
+    
+    if build_xdp != "1" && build_xdp != "true" {
+        println!("cargo:rerun-if-env-changed=ENABLE_XDP");
+        return Ok(())
     }
 
     #[cfg(feature = "xdp")]
     {
         use std::path::PathBuf;
         use std::process::Command;
-        
+
         let out_dir = PathBuf::from(env::var("OUT_DIR")?);
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
         let ophan_bpf_dir = manifest_dir.join("..").join("ophan-bpf");
