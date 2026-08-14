@@ -155,7 +155,7 @@ pub fn html_escape(s: &str) -> Cow<'_, str> {
 mod tests {
     use tempfile::tempdir;
 
-use super::*;
+    use super::*;
 
     #[test]
     fn html_escape_noop() {
