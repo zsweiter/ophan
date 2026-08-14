@@ -23,12 +23,12 @@ jobs:
 
             - name: Format check
               env:
-                  ENABLE_XDP: "0"
+                  ENABLE_XDP: false
               run: cargo fmt --all -- --check
 
             - name: Clippy
               env:
-                  ENABLE_XDP: "0"
+                  ENABLE_XDP: false
               run: cargo clippy --all-targets -- -D warnings
 
     test:
@@ -60,5 +60,5 @@ jobs:
 
             - name: Test
               env:
-                  ENABLE_XDP: "0"
+                  ENABLE_XDP: false
               run: cargo test --all --exclude ophan-bpf
