@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>org.ophan.gateway</string>
+    <string>io.ophan.gateway</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/ophan</string>
-        <string>--config</string>
-        <string>/etc/ophan/config.toml</string>
+        <string>@SBINDIR@/ophan</string>
+        <string>-c</string>
+        <string>@CONFIGDIR@/master.conf</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

@@ -9,10 +9,10 @@ ConditionFileIsExecutable=@SBINDIR@/ophan
 Type=simple
 EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
-Environment="CONFIG_PATH=@CONFIGDIR@"
-ExecStart=@SBINDIR@/ophan -c @CONFIGDIR@
-ExecReload=@SBINDIR@/ophan
-ExecReload=/bin/kill -USR2 $MAINPID
+Environment="CONFIG_PATH=@CONFIGDIR@/master.conf"
+ExecStart=@SBINDIR@/ophan -c @CONFIGDIR@/master.conf
+ExecReload=@SBINDIR@/ophan -s reload
+ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
 Restart=always
 SuccessExitStatus=143

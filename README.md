@@ -23,6 +23,14 @@
 
 ---
 
+## 📚 Documentation
+
+The full documentation site is hosted on GitHub Pages:
+
+<https://zsweiter.github.io/ophan/>
+
+---
+
 ## 📬 Feedback
 
 Found a bug? Have a suggestion? Reach out:
@@ -54,10 +62,10 @@ Ophan combines reverse proxy, API gateway, load balancer, and static content del
 
 ```bash
 # Latest release
-curl -sSL https://github.com/zsweiter/ophan/releases/latest/download/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | bash
 
 # Specific version
-curl -sSL https://github.com/zsweiter/ophan/releases/latest/download/install.sh | bash -s -- --version v0.1.0
+curl -sSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | bash -s -- --version v0.1.0
 ```
 
 ### Linux / macOS — Manual
@@ -79,20 +87,30 @@ sudo mv ophan-*/ophan /usr/local/bin/
 sudo mkdir -p /etc/ophan
 sudo cp -r ophan-*/config/* /etc/ophan/
 
+# Install web assets (served by the gateway on /)
+sudo mkdir -p /var/www/html
+sudo cp ophan-*/config/public/index.html ophan-*/config/public/favicon.svg /var/www/html/
+
 # Install service (Linux)
-sudo cp ophan-*/stubs/ophan.service /etc/systemd/system/
+# The stub contains @SBINDIR@/@CONFIGDIR@ placeholders — substitute them first
+sudo sed -e 's|@SBINDIR@|/usr/local/bin|g' -e 's|@CONFIGDIR@|/etc/ophan|g' \
+    ophan-*/stubs/systemd.service | \
+    sudo tee /etc/systemd/system/ophan.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now ophan
 
 # Install service (macOS)
-sudo cp ophan-*/stubs/io.ophan.ophan.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/io.ophan.ophan.plist
+sudo sed -e 's|@SBINDIR@|/usr/local/bin|g' -e 's|@CONFIGDIR@|/etc/ophan|g' \
+    ophan-*/stubs/io.ophan.ophan.plist | \
+    sudo tee /Library/LaunchDaemons/io.ophan.ophan.plist > /dev/null
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.ophan.ophan.plist
 ```
 
 ### Docker
 
 ```bash
-docker run -p 8080:8080 -v /path/to/config:/etc/ophan ghcr.io/zsweiter/ophan:latest
+# Maps host port 8080 to the gateway's HTTP listener (port 80)
+docker run -p 8080:80 -v /path/to/config:/etc/ophan ghcr.io/zsweiter/ophan:latest
 ```
 
 ### Verify checksums
@@ -103,8 +121,43 @@ Every release includes SHA256 checksums:
 # After downloading a package
 sha256sum -c ophan-*.tar.gz.sha256
 
-# Or from the release page
-curl -sSL https://github.com/zsweiter/ophan/releases/download/v0.1.0/checksums.txt
+# Or download the matching checksum for the exact package, e.g.
+curl -sSL https://github.com/zsweiter/ophan/releases/download/v0.1.0/ophan-v0.1.0-linux-x86_64.tar.gz.sha256
+```
+
+---
+
+## 🗑️ Uninstall
+
+### Linux (systemd)
+
+```bash
+sudo systemctl stop ophan
+sudo systemctl disable ophan
+sudo rm -f /etc/systemd/system/ophan.service
+sudo rm -f /usr/local/bin/ophan
+sudo rm -rf /etc/ophan
+sudo rm -rf /var/log/ophan
+sudo rm -f /run/ophan.pid
+# Remove the web assets only if no other site is using /var/www/html
+sudo rm -f /var/www/html/index.html /var/www/html/favicon.svg
+sudo systemctl daemon-reload
+```
+
+### macOS (LaunchDaemon)
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/io.ophan.ophan.plist
+sudo rm -f /Library/LaunchDaemons/io.ophan.ophan.plist
+sudo rm -f /usr/local/bin/ophan
+sudo rm -rf /etc/ophan /var/log/ophan /var/run/ophan.pid
+```
+
+### Windows
+
+```powershell
+# Remove the service (the stub script supports install | uninstall | status)
+.\stubs\windows-service.ps1 -Action uninstall
 ```
 
 ---

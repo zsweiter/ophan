@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
 # Ophan API Gateway — Docker Image
 # Build:   docker build -t ophan:latest .
-# Run:     docker run -p 8080:8080 -v /path/to/config:/etc/ophan ophan:latest
+# Run:     docker run -p 8080:80 -v /path/to/config:/etc/ophan ophan:latest
 # ═══════════════════════════════════════════════════════════════
 
 # ── Stage 1: Build ────────────────────────────────────────────

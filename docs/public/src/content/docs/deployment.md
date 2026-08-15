@@ -8,7 +8,8 @@ order: 701
 ## Docker
 
 ```bash
-docker run -p 8080:8080 \
+# Maps host port 8080 to the gateway's HTTP listener (port 80)
+docker run -p 8080:80 \
   -v /path/to/config:/etc/ophan \
   ghcr.io/zsweiter/ophan:latest
 ```
@@ -16,7 +17,10 @@ docker run -p 8080:8080 \
 ## Linux Service (systemd)
 
 ```bash
-sudo cp ophan-*/stubs/ophan.service /etc/systemd/system/
+# The stub contains @SBINDIR@/@CONFIGDIR@ placeholders — substitute them first
+sudo sed -e 's|@SBINDIR@|/usr/local/bin|g' -e 's|@CONFIGDIR@|/etc/ophan|g' \
+    ophan-*/stubs/systemd.service | \
+    sudo tee /etc/systemd/system/ophan.service > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable --now ophan
 ```
@@ -24,20 +28,22 @@ sudo systemctl enable --now ophan
 ## macOS Service (LaunchDaemon)
 
 ```bash
-sudo cp ophan-*/stubs/io.ophan.ophan.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/io.ophan.ophan.plist
+sudo sed -e 's|@SBINDIR@|/usr/local/bin|g' -e 's|@CONFIGDIR@|/etc/ophan|g' \
+    ophan-*/stubs/io.ophan.ophan.plist | \
+    sudo tee /Library/LaunchDaemons/io.ophan.ophan.plist > /dev/null
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.ophan.ophan.plist
 ```
 
 ## Configuration Layout
 
 ```
 /etc/ophan/
-├── ophan.conf          # Main configuration
+├── master.conf            # Main configuration
 ├── certs/
 │   ├── cert.pem
 │   └── key.pem
 └── gateways/
-    └── *.conf          # Included configurations
+    └── *.conf             # Included configurations
 ```
 
 The main `master` block supports `includes` for splitting configuration into multiple files:
@@ -66,7 +72,7 @@ kill -HUP $(cat /run/ophan.pid)
 
 ```
 /var/log/ophan/        # Error logs
-/var/www/public/       # Static file root
+/var/www/html/         # Static file root (index.html + favicon.svg)
 /run/ophan.pid         # PID file
 ```
 
