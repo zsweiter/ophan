@@ -7,7 +7,8 @@ import theme from "./shiki.theme.json" with { type: "json" };
 
 export default defineConfig({
     site: "https://zsweiter.github.io",
-    base: "/ophan",
+    base: "/ophan/",
+    trailingSlash: "always",
     integrations: [mdx()],
     vite: {
         plugins: [tailwindcss()],

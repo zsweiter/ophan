@@ -1,5 +1,6 @@
 ---
 import Logo from "./Logo.astro";
+import Link from "./Link.astro";
 
 const navLinks = [
     { href: "/", label: "Overview" },
@@ -18,27 +19,27 @@ const navLinks = [
         class="flex items-center justify-between px-4 py-3 rounded-2xl transition-all duration-300 w-full max-w-7xl"
         id="nav-container"
     >
-        <a href="/" class="flex items-center gap-3 pl-2 group cursor-pointer">
+        <Link href="/" class="flex items-center gap-3 pl-2 group cursor-pointer">
             <Logo />
-        </a>
+        </Link>
 
         <div
             class="hidden md:flex items-center gap-8 text-sm font-medium text-neutral-400"
         >
             {
                 navLinks.map((link) => (
-                    <a
+                    <Link
                         href={link.href}
                         class="hover:text-white transition-colors duration-200"
                     >
                         {link.label}
-                    </a>
+                    </Link>
                 ))
             }
         </div>
 
         <div class="flex items-center gap-4">
-            <a
+            <Link
                 href="https://github.com/zsweiter/ophan"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -60,7 +61,7 @@ const navLinks = [
                     ></path>
                 </svg>
                 Star on GitHub
-            </a>
+            </Link>
 
             <button
                 class="md:hidden text-neutral-300 p-2"
@@ -111,23 +112,23 @@ const navLinks = [
     <div class="flex flex-col gap-8 text-2xl font-medium text-neutral-300">
         {
             navLinks.map((link) => (
-                <a
+                <Link
                     href={link.href}
                     class="hover:text-white transition-colors"
                     onclick="closeMobileMenu()"
                 >
                     {link.label}
-                </a>
+                </Link>
             ))
         }
-        <a
+        <Link
             href="https://github.com/zsweiter/ophan"
             target="_blank"
             rel="noopener noreferrer"
             class="text-vayload-accent-light hover:text-vayload-accent transition-colors"
         >
             Star on GitHub
-        </a>
+        </Link>
     </div>
 </div>
 

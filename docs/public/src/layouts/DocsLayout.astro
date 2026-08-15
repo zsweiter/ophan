@@ -7,6 +7,7 @@ import "@/assets/styles/docs.css";
 import { ClientRouter } from "astro:transitions";
 import Header from "../components/Header.astro";
 import Footer from "../components/Footer.astro";
+import Link from "../components/Link.astro";
 import type { MarkdownHeading } from "astro";
 
 interface Props {
@@ -122,7 +123,7 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
                                 <ul class="space-y-1">
                                     {section.items.map((item) => (
                                         <li>
-                                            <a
+                                            <Link
                                                 href={item.href}
                                                 class:list={[
                                                     "block px-3 py-2 rounded-lg text-sm transition-all",
@@ -136,7 +137,7 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
                                                 ]}
                                             >
                                                 {item.label}
-                                            </a>
+                                            </Link>
                                         </li>
                                     ))}
                                 </ul>
@@ -153,8 +154,8 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
                         development. Some documented features are still being implemented
                         and may not work as described, but most are already available.
                         Try them and send feedback to
-                        <a href="mailto:zsweiter@gmail.com"
-                            >zsweiter@gmail.com</a
+                        <Link href="mailto:zsweiter@gmail.com"
+                            >zsweiter@gmail.com</Link
                         >.
                     </div>
                     <slot />
@@ -177,7 +178,7 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
                                         (h) => h.depth === 2 || h.depth === 3,
                                     )
                                     .map((heading) => (
-                                        <a
+                                        <Link
                                             href={`#${heading.slug}`}
                                             class:list={[
                                                 "block py-1 hover:text-vayload-accent transition-colors",
@@ -186,7 +187,7 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
                                             ]}
                                         >
                                             {heading.text}
-                                        </a>
+                                        </Link>
                                     ))}
                             </nav>
                         </>
