@@ -101,6 +101,7 @@ const currentPath = Astro.url.pathname.replace(/\/+$/, "") || "/";
 
         <title>{title} | Ophan Docs</title>
         <meta name="description" content={description} />
+        <base href={import.meta.env.BASE_URL} />
 
         <ClientRouter />
     </head>
