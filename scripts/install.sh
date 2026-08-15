@@ -181,11 +181,11 @@ header
 step "Checking privileges"
 
 if [[ "$EUID" -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-        info "Root privileges required"
-        info "Re-running installer with sudo"
-        exec sudo "$0" "$@"
-    fi
+    # if command -v sudo >/dev/null 2>&1; then
+    #     info "Root privileges required"
+    #     info "Re-running installer with sudo"
+    #     exec sudo "$0" "$@"
+    # fi
 
     fail "This installer requires root privileges. Run it with sudo."
 fi

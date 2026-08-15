@@ -62,10 +62,12 @@ Ophan combines reverse proxy, API gateway, load balancer, and static content del
 
 ```bash
 # Latest release
-curl -fsSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | sudo bash
+```
 
+```bash
 # Specific version
-curl -sSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | bash -s -- --version v0.1.0
+curl -sSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
 ### Linux / macOS — Manual

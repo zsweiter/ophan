@@ -26,7 +26,7 @@ Ophan is built as a workspace of focused libraries:
 | `ophan-net`    | Networking, connections, HTTP protocol handling |
 | `ophan-bpf`    | Kernel-level L4 filtering via eBPF/XDP          |
 | `ophan-sec`    | WAF engine, anomaly scoring, reputation         |
-| `ophan-auth`   | Token validation (JWT, OAuth2, HMAC)            |
+| `ophan-auth`   | Token validation (JWT, OAuth2, HMAC, OIDC)      |
 | `ophan-static` | Static file serving from the filesystem         |
 
 Each library is independently testable; the gateway binary assembles them behind a single configuration.
