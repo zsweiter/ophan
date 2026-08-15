@@ -6,7 +6,8 @@ import remarkGfm from "remark-gfm";
 import theme from "./shiki.theme.json" with { type: "json" };
 
 export default defineConfig({
-    site: "https://zsweiter.github.io/ophan",
+    site: "https://zsweiter.github.io",
+    base: "/ophan",
     integrations: [mdx()],
     vite: {
         plugins: [tailwindcss()],
