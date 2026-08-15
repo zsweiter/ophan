@@ -33,6 +33,7 @@ export default defineConfig({
             // @ts-ignore
             theme: theme,
         },
+        // @ts-ignore
         remarkPlugins: [remarkGfm],
     },
 });

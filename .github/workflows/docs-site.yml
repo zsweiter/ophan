@@ -75,7 +75,6 @@ jobs:
               with:
                   version: 11
                   runtime: node@24
-                  cache: true
 
             - name: Setup Pages
               id: pages
