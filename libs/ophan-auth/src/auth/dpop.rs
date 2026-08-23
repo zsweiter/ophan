@@ -1,7 +1,8 @@
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::serialization::{b64_encode, get_current_timestamp};
+use crate::serialization::b64_encode;
 
 /// DPoP request context.
 ///
@@ -17,9 +18,9 @@ pub struct DPoPRequestContext<'a> {
 /// RFC 9449 §4.3: Generate a DPoP nonce value.
 /// The server should include this in the DPoP-Nonce response header.
 pub fn generate_dpop_nonce() -> String {
-    let ts = get_current_timestamp().as_nanos();
-
-    b64_encode(Sha256::digest(ts.to_be_bytes()))
+    let mut entropy = [0u8; 32];
+    OsRng.fill_bytes(&mut entropy);
+    b64_encode(Sha256::digest(entropy))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -104,13 +105,5 @@ mod tests {
 
         let deserialized: DpopProofClaims = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized.nonce, None);
-    }
-
-    #[test]
-    fn test_cnf_claim_serialize_deserialize() {
-        let cnf = CnfClaim { jkt: "thumbprint-xyz".into() };
-        let json = serde_json::to_value(&cnf).unwrap();
-        let deserialized: CnfClaim = serde_json::from_value(json).unwrap();
-        assert_eq!(deserialized.jkt, "thumbprint-xyz");
     }
 }

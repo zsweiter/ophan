@@ -611,7 +611,9 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "dashmap",
+ "futures",
  "pingora-memory-cache",
+ "tokio",
 ]
 
 [[package]]

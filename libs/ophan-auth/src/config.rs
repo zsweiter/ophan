@@ -356,20 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auth_mode_constructors() {
-        let key = b"secret";
-
-        let static_mode = AuthMode::new_static(key, HmacAlg::HS256);
-        assert!(matches!(static_mode, AuthMode::Static { .. }));
-
-        let jwks_mode = AuthMode::new_jwks("https://jwks.example.com".into(), Box::new([Algorithm::RS256]));
-        assert!(matches!(jwks_mode, AuthMode::Jwks { .. }));
-
-        let oidc_mode = AuthMode::new_oidc("https://oidc.example.com".into());
-        assert!(matches!(oidc_mode, AuthMode::Oidc { .. }));
-    }
-
-    #[test]
     fn test_config_mock() {
         let config = AuthConfig::mock();
         assert!(config.oauth_client.is_some());

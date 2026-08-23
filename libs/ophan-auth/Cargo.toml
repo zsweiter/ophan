@@ -19,6 +19,7 @@ bytes = { workspace = true }
 flatkit = { workspace = true }
 sha2 = { workspace = true }
 ahash = { workspace = true }
+rand = "0.8"
 
 [dev-dependencies]
 httpmock = { workspace = true }
@@ -28,8 +29,3 @@ tokio = { workspace = true }
 pest = { workspace = true }
 pest_derive = { workspace = true }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-rand = "0.8"
-
-[[bench]]
-name = "vm"
-harness = false

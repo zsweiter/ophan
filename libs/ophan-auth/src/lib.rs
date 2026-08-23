@@ -41,6 +41,11 @@ impl AuthService {
         dpop: DPoPRequestContext<'_>,
     ) -> Result<Claims> {
         match config.dpop_policy {
+            DpopPolicy::Auto => {
+                if raw_token.ttype == TokenType::DPoP && dpop.dpop_proof.is_none() {
+                    return Err(Error::Dpop(DpopError::ProofRequired));
+                }
+            },
             DpopPolicy::Required => {
                 if raw_token.ttype != TokenType::DPoP {
                     return Err(Error::Dpop(DpopError::Required));
@@ -53,11 +58,6 @@ impl AuthService {
             DpopPolicy::Disabled => {
                 if raw_token.ttype == TokenType::DPoP {
                     return Err(Error::Dpop(DpopError::Disabled));
-                }
-            },
-            DpopPolicy::Auto => {
-                if raw_token.ttype == TokenType::DPoP && dpop.dpop_proof.is_none() {
-                    return Err(Error::Dpop(DpopError::ProofRequired));
                 }
             },
         }
