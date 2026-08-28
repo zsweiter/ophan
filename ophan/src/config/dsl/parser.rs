@@ -22,8 +22,17 @@ pub fn parse_raw_master<'a>(input: &'a str) -> Result<RawMaster<'a>, ConfigError
     let name = extract_str(inner.next().unwrap());
     let mut user = "www-data";
     let mut workers = RawWorkers::Count(1);
+
+    #[cfg(unix)]
     let mut pid = "/run/ophan.pid";
+    #[cfg(not(unix))]
+    let mut pid = "C:\\ophan-gateway\\ophan.pid";
+
+    #[cfg(unix)]
     let mut error_log = "/var/log/ophan/error.log";
+    #[cfg(not(unix))]
+    let mut error_log = "C:\\ophan-gateway\\logs\\error.log";
+
     let mut includes = Vec::new();
 
     for entry in inner {

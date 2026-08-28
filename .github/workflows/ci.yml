@@ -39,16 +39,22 @@ jobs:
                 include:
                     - os: ubuntu-latest
                       target: x86_64-unknown-linux-gnu
+
+                    - os: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-gnu
+
                     - os: macos-latest
                       target: x86_64-apple-darwin
+
                     - os: macos-latest
                       target: aarch64-apple-darwin
+
         runs-on: ${{ matrix.os }}
 
         steps:
             - uses: actions/checkout@v5
 
-            - name: Install rust
+            - name: Install Rust
               uses: actions-rust-lang/setup-rust-toolchain@v1
               with:
                   target: ${{ matrix.target }}
@@ -61,4 +67,4 @@ jobs:
             - name: Test
               env:
                   ENABLE_XDP: false
-              run: cargo test --all --exclude ophan-bpf
+              run: cargo test --all --exclude ophan-bpf --target ${{ matrix.target }}

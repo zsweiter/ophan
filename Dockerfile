@@ -1,50 +1,71 @@
 # ═══════════════════════════════════════════════════════════════
-# Ophan API Gateway — Docker Image
-# Build:   docker build -t ophan:latest .
-# Run:     docker run -p 8080:80 -v /path/to/config:/etc/ophan ophan:latest
+# Ophan API Gateway — Docker Image (Multi-Architecture)
+# Build:   docker buildx build --platform linux/amd64,linux/arm64 -t ophan:latest --push .
+# Run:     docker run -d -p 80:80 -p 443:443 -v /path/to/config:/etc/ophan ophan:latest
 # ═══════════════════════════════════════════════════════════════
 
-# ── Stage 1: Build ────────────────────────────────────────────
-FROM rust:1.81-alpine3.21 AS build
-
-ARG VERSION=dev
-
-RUN apk add --no-cache musl-dev upx
-
+FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-1.94 AS chef
 WORKDIR /src
 
-# Cache dependencies
-COPY Cargo.toml Cargo.lock ./
-COPY libs/ophan-net/Cargo.toml libs/ophan-net/
-COPY libs/ophan-auth/Cargo.toml libs/ophan-auth/
-COPY libs/ophan-waf/Cargo.toml libs/ophan-waf/
-COPY libs/ophan-static/Cargo.toml libs/ophan-static/
-COPY libs/ophan-router/Cargo.toml libs/ophan-router/
-COPY ophan/Cargo.toml ophan/
-
-RUN mkdir libs/ophan-net/src libs/ophan-auth/src libs/ophan-waf/src \
-         libs/ophan-static/src libs/ophan-router/src ophan/src \
-    && echo "fn main() {}" > ophan/src/main.rs \
-    && for lib in libs/*/src; do echo "" > "$$lib/lib.rs"; done \
-    && cargo build --release --target x86_64-unknown-linux-musl 2>/dev/null || true
-
-# Full source build
+FROM chef AS planner
 COPY . .
-RUN cargo build --release --target x86_64-unknown-linux-musl \
-    && upx --best target/x86_64-unknown-linux-musl/release/ophan
+RUN cargo chef prepare --recipe-path recipe.json
 
-# ── Stage 2: Runtime ──────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM chef AS builder
+COPY --from=planner /src/recipe.json recipe.json
+
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    musl-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "${TARGETARCH}" in \
+        amd64) \
+            rustup target add x86_64-unknown-linux-musl; \
+            echo "x86_64-unknown-linux-musl" > /.target ;; \
+        arm64) \
+            rustup target add aarch64-unknown-linux-musl; \
+            echo "aarch64-unknown-linux-musl" > /.target ;; \
+        *) echo "Unsupported target: ${TARGETARCH}"; exit 1 ;; \
+    esac
+
+ENV CXX_x86_64_unknown_linux_musl=g++
+ENV CXX_aarch64_unknown_linux_musl=g++
+
+RUN TARGET=$(cat /.target) && cargo chef cook --release --target "$TARGET" --recipe-path recipe.json
+
+COPY . .
+RUN TARGET=$(cat /.target) \
+    && cargo build --release --target "$TARGET" --bin ophan \
+    && cp "target/$TARGET/release/ophan" /ophan
+
 FROM alpine:3.21
+
+RUN apk add --no-cache libcap
 
 RUN addgroup -S ophan && adduser -S -G ophan ophan
 
-COPY --from=build /src/target/x86_64-unknown-linux-musl/release/ophan /usr/local/bin/ophan
-COPY config/ /etc/ophan/
+RUN mkdir -p /etc/ophan /var/www/ /var/log/ophan /var/run/ophan
 
-RUN mkdir -p /var/log/ophan /var/run/ophan \
-    && chown -R ophan:ophan /var/log/ophan /var/run/ophan /etc/ophan
+COPY --from=builder /ophan /usr/local/bin/ophan
+
+COPY defaults/config/ /etc/ophan/
+COPY defaults/www/ /var/www/
+
+RUN chown -R ophan:ophan /etc/ophan /var/www/ophan /var/log/ophan /var/run/ophan \
+    && setcap 'cap_net_bind_service=+ep' /usr/local/bin/ophan \
+    && apk del libcap # Clean up to keep the image lightweight
 
 USER ophan
-EXPOSE 8080
+
+EXPOSE 80
+EXPOSE 443
+
+ENV OPHAN_CONFIG_DIR=/etc/ophan
+ENV OPHAN_WWW_DIR=/var/www
+ENV OPHAN_PID_FILE=/var/run/ophan/ophan.pid
 
 ENTRYPOINT ["/usr/local/bin/ophan"]

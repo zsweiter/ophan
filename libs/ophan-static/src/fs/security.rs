@@ -123,6 +123,7 @@ mod tests {
         (dir, link)
     }
 
+    #[cfg(unix)]
     #[test]
     fn blocked_symlink_without_flag() {
         let (_dir, link) = temp_symlink("link1.txt");
@@ -131,6 +132,7 @@ mod tests {
         assert!(flags.is_blocked(meta.file_type(), "link1.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn allowed_symlink_with_flag() {
         let (_dir, link) = temp_symlink("link2.txt");

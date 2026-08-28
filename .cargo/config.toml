@@ -16,9 +16,9 @@ rustflags = ["-C", "target-feature=+crt-static", "-C", "strip=symbols"]
 linker = "aarch64-linux-musl-gcc"
 rustflags = [
     "-C",
-    "target-feature=-crt-static",
+    "target-feature=+crt-static",
     "-C",
-    "link-arg=-lgcc",
+    "strip=symbols",
 ]
 
 [target.armv7-unknown-linux-gnueabihf]

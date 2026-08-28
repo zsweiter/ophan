@@ -13,37 +13,32 @@ fn main() -> ExitCode {
 fn main_entry() -> Result<(), ExitCode> {
     let app = CliApp::parse();
 
+    if let Err(e) = app.validate() {
+        eprintln!("Error: {e}");
+        return Err(ExitCode::Usage);
+    }
+
     match app.cmd {
-        Command::None => ophan::bootstrap(),
+        None => ophan::bootstrap(app.pid_file.clone()),
 
-        Command::Config | Command::Test => {
+        Some(Command::Test) => {
             let path = app.config.unwrap_or_default();
-            if path.is_empty() {
-                eprintln!("Error: --config or -c is required for this command");
-                tracing::error!("Error: --config or -c is required for this command");
-                return Err(ExitCode::Usage);
-            }
-
             let _ = config::set_config_path(&path);
 
-            if Command::Test == app.cmd {
-                match config::load_config() {
-                    Ok(_) => {
-                        println!("✔ Configuration is valid");
-                        Ok(())
-                    },
-                    Err(e) => {
-                        eprintln!("{e}");
-                        Err(ExitCode::Config)
-                    },
-                }
-            } else {
-                ophan::bootstrap()
+            match config::load_config() {
+                Ok(_) => {
+                    println!("✔ Configuration is valid");
+                    Ok(())
+                },
+                Err(e) => {
+                    eprintln!("{e}");
+                    Err(ExitCode::Config)
+                },
             }
         },
 
         #[cfg(unix)]
-        Command::Signal(signal) => {
+        Some(Command::Signal(signal)) => {
             use nix::sys::signal::kill;
             use nix::unistd::Pid;
 
@@ -51,7 +46,7 @@ fn main_entry() -> Result<(), ExitCode> {
             use ophan::sys::pid::read_pid;
 
             let config_path = app.config.as_ref().map(std::path::PathBuf::from);
-            let (pid, _) = read_pid(config_path.as_ref())?;
+            let (pid, _) = read_pid(app.pid_file.as_deref(), config_path.as_ref())?;
 
             let os_signal: OsSignal = signal.into();
             if let Err(e) = kill(Pid::from_raw(pid), os_signal) {
@@ -64,13 +59,13 @@ fn main_entry() -> Result<(), ExitCode> {
         },
 
         #[cfg(unix)]
-        Command::Upgrade => {
+        Some(Command::Upgrade) => {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
             use ophan::sys::pid::read_pid;
 
             let config_path = app.config.as_ref().map(std::path::PathBuf::from);
-            let (pid, _) = read_pid(config_path.as_ref())?;
+            let (pid, _) = read_pid(app.pid_file.as_deref(), config_path.as_ref())?;
 
             if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGQUIT) {
                 eprintln!("Error: failed to send upgrade signal to PID {pid}: {e}");
@@ -82,7 +77,7 @@ fn main_entry() -> Result<(), ExitCode> {
         },
 
         #[cfg(unix)]
-        Command::Doctor => {
+        Some(Command::Doctor) => {
             use nix::sys::signal::kill;
             use nix::unistd::Pid;
             use ophan::config::get_config_path;
@@ -94,7 +89,7 @@ fn main_entry() -> Result<(), ExitCode> {
                 let _ = config::set_config_path(path);
             }
 
-            let (pid, pid_path) = read_pid(Some(get_config_path()))?;
+            let (pid, pid_path) = read_pid(app.pid_file.as_deref(), Some(get_config_path()))?;
 
             match kill(Pid::from_raw(pid), None) {
                 Ok(_) => println!("PID file:      ✔ {} running (PID {})", pid_path.display(), pid),
@@ -120,6 +115,12 @@ fn main_entry() -> Result<(), ExitCode> {
             }
 
             if all_ok { Ok(()) } else { Err(ExitCode::Config) }
+        },
+
+        #[cfg(target_os = "linux")]
+        Some(Command::SystemdSetup) => {
+            eprintln!("Error: 'systemd-setup' is not implemented yet");
+            Err(ExitCode::Unavailable)
         },
     }
 }

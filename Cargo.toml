@@ -9,13 +9,15 @@ members = [
     "libs/ophan-router",
     "shared/flatkit",
     "shared/cache",
-    "libs/ophan-bpf",
+    "libs/ophan-bpf", 
+    "shared/cli",
 ]
 default-members = ["ophan"]
 
 [workspace.dependencies]
 flatkit = { path = "./shared/flatkit" }
 cache = { path = "./shared/cache" }
+cli = { path = "./shared/cli" }
 
 ophan-net = { path = "./libs/ophan-net" }
 ophan-auth = { path = "./libs/ophan-auth" }
