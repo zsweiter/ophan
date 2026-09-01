@@ -70,11 +70,11 @@ impl CacheControl {
                     policy.flags |= FLAG_STALE_WHILE_REVALIDATE;
                     policy.stale_while_revalidate = Some(seconds);
                 }
-            } else if eq_ignore_ascii_case(name, b"stale-if-error") {
-                if let Some(seconds) = parse_delta_seconds(value) {
-                    policy.flags |= FLAG_STALE_IF_ERROR;
-                    policy.stale_if_error = Some(seconds);
-                }
+            } else if eq_ignore_ascii_case(name, b"stale-if-error")
+                && let Some(seconds) = parse_delta_seconds(value)
+            {
+                policy.flags |= FLAG_STALE_IF_ERROR;
+                policy.stale_if_error = Some(seconds);
             }
         }
 

@@ -1,6 +1,8 @@
+#![allow(clippy::collapsible_if)]
+
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, LitStr, Type};
+use syn::{Data, DeriveInput, Fields, LitStr, Type, parse_macro_input};
 
 #[proc_macro_derive(Parser, attributes(arg))]
 pub fn derive_parser(input: TokenStream) -> TokenStream {
@@ -48,8 +50,7 @@ pub fn derive_parser(input: TokenStream) -> TokenStream {
         }
 
         if is_subcommand {
-            let sub_ty = option_inner(field_type)
-                .expect("#[arg(subcommand)] field must be of type Option<Subcommand>");
+            let sub_ty = option_inner(field_type).expect("#[arg(subcommand)] field must be of type Option<Subcommand>");
             subcommand_type = Some(sub_ty);
             struct_fields.push(quote! { #field_name: sub_cmd });
         } else {
