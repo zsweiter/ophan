@@ -29,10 +29,10 @@ pub fn get_config_path() -> &'static PathBuf {
             return PathBuf::from(cfg);
         }
 
-        if cfg!(debug_assertions) {
-            PathBuf::from(".config/master.conf")
-        } else if cfg!(target_os = "windows") {
+        if cfg!(target_os = "windows") {
             PathBuf::from("C:\\ophan-gateway\\conf\\master.conf")
+        } else if cfg!(debug_assertions) {
+            PathBuf::from(".config/master.conf")
         } else if cfg!(target_os = "macos") {
             let homebrew = PathBuf::from("/opt/homebrew/etc/ophan/master.conf");
             if homebrew.exists() {

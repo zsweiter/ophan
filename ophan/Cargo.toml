@@ -1,6 +1,6 @@
 [package]
 name = "ophan"
-version = "0.1.24"
+version = "0.1.25"
 edition = "2024"
 
 [dependencies]
@@ -11,6 +11,7 @@ ophan-static = { workspace = true }
 ophan-router = { workspace = true }
 
 flatkit = { workspace = true }
+cli = { workspace = true }
 
 pingora = { workspace = true, features = ["proxy", "s2n", "connection_filter"] }
 futures = { workspace = true }

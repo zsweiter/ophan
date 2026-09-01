@@ -70,7 +70,7 @@ impl JwtValidator {
     }
 }
 
-pub fn insecure_decode<T: DeserializeOwned>(token: &str) -> Result<T, JwtError> {
+pub(crate) fn insecure_decode<T: DeserializeOwned>(token: &str) -> Result<T, JwtError> {
     let data = dangerous::insecure_decode::<T>(token)?;
 
     Ok(data.claims)

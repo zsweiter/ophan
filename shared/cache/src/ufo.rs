@@ -1,6 +1,26 @@
+use futures::future::{FutureExt, Shared};
 use pingora_memory_cache::CacheStatus as PingoraCacheStatus;
 use pingora_memory_cache::MemoryCache as PingoraMemoryCache;
-use std::{borrow::Borrow, hash::Hash, time::Duration};
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, hash_map::DefaultHasher},
+    future::Future,
+    hash::{Hash, Hasher},
+    pin::Pin,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::Mutex as AsyncMutex;
+
+/// Number of shards used by default for the single-flight in-flight table.
+const DEFAULT_SHARDS: usize = 16;
+
+/// Type-erased error used by [`MemoryCache::get_or_fetch`] so the in-flight
+/// table doesn't need a per-call error generic.
+pub type BoxError = Arc<dyn std::error::Error + Send + Sync>;
+
+type BoxedFuture<T> = Pin<Box<dyn Future<Output = Result<T, BoxError>> + Send>>;
+type InFlightFetch<T> = Shared<BoxedFuture<T>>;
 
 #[derive(Debug, PartialEq, Eq)]
 /// [CacheStatus] indicates the response type for a query.
@@ -62,12 +82,31 @@ impl From<PingoraCacheStatus> for CacheStatus {
 /// A high performant in-memory cache with S3-FIFO + TinyLFU
 pub struct MemoryCache<K: Hash, T: Clone> {
     inner: PingoraMemoryCache<K, T>,
+    /// Sharded table of in-flight fetches, used by [`MemoryCache::get_or_fetch`]
+    /// to implement single-flight request coalescing. Each shard has its own
+    /// lock so concurrent misses on different keys don't contend on a single
+    /// global mutex.
+    inflight: Vec<AsyncMutex<HashMap<K, InFlightFetch<T>>>>,
 }
 
 impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
-    /// Create a new [MemoryCache] with the given size.
+    /// Create a new [MemoryCache] with the given size, using the default
+    /// number of shards for single-flight coalescing.
     pub fn new(size: usize) -> Self {
-        MemoryCache { inner: PingoraMemoryCache::new(size) }
+        Self::new_with_shards(size, DEFAULT_SHARDS)
+    }
+
+    /// Create a new [MemoryCache] with the given size and an explicit number
+    /// of shards for the single-flight in-flight table. Use more shards if
+    /// you expect many keys to miss concurrently and want to minimize lock
+    /// contention between unrelated keys; a single shard degrades to one
+    /// global lock.
+    pub fn new_with_shards(size: usize, shards: usize) -> Self {
+        let shards = shards.max(1);
+        MemoryCache {
+            inner: PingoraMemoryCache::new(size),
+            inflight: (0..shards).map(|_| AsyncMutex::new(HashMap::new())).collect(),
+        }
     }
 
     /// Fetch the key and return its value in addition to a [CacheStatus].
@@ -168,11 +207,86 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
         }
         (resp, missed)
     }
+
+    /// Pick which shard of the in-flight table a key belongs to.
+    fn shard_for<Q>(&self, key: &Q) -> usize
+    where
+        Q: Hash + ?Sized,
+    {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % self.inflight.len()
+    }
+
+    /// Fetch `key` from the cache, or -- on a miss -- run `fetch` to compute
+    /// it, store the result with `ttl`, and return it.
+    ///
+    /// This implements **single-flight** request coalescing: if several
+    /// callers concurrently request the same missing key, only the first one
+    /// (the "leader") actually runs `fetch`. Every other caller (a
+    /// "follower") awaits that same in-flight future instead of running its
+    /// own `fetch`, so a cache miss never causes duplicate work against your
+    /// origin/database for the same key.
+    ///
+    /// The in-flight table is **sharded** (see [`Self::new_with_shards`]):
+    /// each key only ever touches the lock of its own shard, so misses on
+    /// unrelated keys never block each other. Only callers racing on the
+    /// *same* key (thus the same shard) briefly contend, and only for the
+    /// time it takes to check/insert/remove one map entry -- not for the
+    /// duration of the fetch itself.
+    ///
+    /// Errors from `fetch` are type-erased into [`BoxError`] so the in-flight
+    /// table doesn't need a per-call error type parameter; a failed fetch is
+    /// never written to the cache, and the key is freed up so a later call
+    /// can retry it.
+    pub async fn get_or_fetch<F, Fut, E>(&self, key: K, ttl: Option<Duration>, fetch: F) -> Result<T, BoxError>
+    where
+        K: Eq + Clone,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        // Fast path: already cached, no locking needed at all.
+        if let Some(value) = self.get_value(&key) {
+            return Ok(value);
+        }
+
+        let shard_idx = self.shard_for(&key);
+
+        // Either join an existing in-flight fetch, or become the leader that
+        // registers a new one. The shard lock is only held for this quick
+        // check-and-insert, not while the fetch itself runs.
+        let (shared, is_leader) = {
+            let mut shard = self.inflight[shard_idx].lock().await;
+            if let Some(existing) = shard.get(&key) {
+                (existing.clone(), false)
+            } else {
+                let boxed: BoxedFuture<T> = Box::pin(async move { fetch().await.map_err(|e| Arc::new(e) as BoxError) });
+                let shared = boxed.shared();
+                shard.insert(key.clone(), shared.clone());
+                (shared, true)
+            }
+        };
+
+        let result = shared.await;
+
+        if is_leader {
+            // Free the slot so future misses on this key can retry, and
+            // populate the cache on success.
+            self.inflight[shard_idx].lock().await.remove(&key);
+            if let Ok(ref value) = result {
+                self.put(&key, value.clone(), ttl);
+            }
+        }
+
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cache_status_as_str() {
@@ -281,5 +395,66 @@ mod tests {
         let (val, status) = c.get_stale(&"k");
         assert_eq!(val, Some("v"));
         assert!(matches!(status, CacheStatus::Stale(_)));
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_dedupes_concurrent_calls() {
+        let cache = Arc::new(MemoryCache::<&str, i32>::new(100));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            handles.push(tokio::spawn(async move {
+                cache
+                    .get_or_fetch("k", Some(Duration::from_secs(60)), move || {
+                        let calls = calls.clone();
+                        async move {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Ok::<i32, std::io::Error>(42)
+                        }
+                    })
+                    .await
+            }));
+        }
+
+        for h in handles {
+            assert_eq!(h.await.unwrap().unwrap(), 42);
+        }
+
+        // Only the leader should have actually run the fetch.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_skips_fetch_on_hit() {
+        let cache: MemoryCache<&str, i32> = MemoryCache::new(100);
+        cache.put(&"k", 7, Some(Duration::from_secs(60)));
+
+        let result = cache
+            .get_or_fetch("k", Some(Duration::from_secs(60)), || async {
+                panic!("fetch should not run on a cache hit");
+                #[allow(unreachable_code)]
+                Ok::<i32, std::io::Error>(0)
+            })
+            .await;
+
+        assert_eq!(result.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_propagates_error_and_does_not_cache() {
+        let cache: MemoryCache<&str, i32> = MemoryCache::new(100);
+
+        let result = cache
+            .get_or_fetch("k", Some(Duration::from_secs(60)), || async {
+                Err::<i32, _>(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(cache.get_value(&"k"), None);
     }
 }

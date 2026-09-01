@@ -2,7 +2,7 @@
 # Ophan API Gateway — Release Pipeline
 #
 # Triggered by: git tag v[0-9]+.[0-9]+.[0-9]+*
-# Builds for:   Linux (x86_64), macOS (x86_64, aarch64), Windows (x86_64)
+# Builds for:   Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
 # Outputs:      .tar.gz / .zip + .sha256 checksums
 # ═══════════════════════════════════════════════════════════════
 
@@ -29,6 +29,12 @@ jobs:
                       target: x86_64-unknown-linux-gnu
                       pkg_os: linux
                       pkg_arch: x86_64
+                      ext: tar.gz
+
+                    - os: ubuntu-24.04-arm
+                      target: aarch64-unknown-linux-gnu
+                      pkg_os: linux
+                      pkg_arch: aarch64
                       ext: tar.gz
 
                     # - os: ubuntu-latest
@@ -76,7 +82,7 @@ jobs:
               run: sudo apt-get update && sudo apt-get install -y upx
 
             - name: Compress binary
-              if: matrix.os == 'ubuntu-latest'
+              if: matrix.os == 'ubuntu-latest' && matrix.target != 'aarch64-unknown-linux-gnu'
               run: upx -1 target/${{ matrix.target }}/release/ophan
 
             - name: Package artifacts

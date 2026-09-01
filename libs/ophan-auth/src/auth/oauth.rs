@@ -16,7 +16,7 @@
 use ahash::AHashMap;
 use cache::MemoryCache;
 use jsonwebtoken::{DecodingKey, jwk::JwkSet};
-use ophan_net::http::{CachePolicy, Client};
+use ophan_net::http::{CacheControl, Client};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::{sync::Arc, time::Duration};
@@ -99,7 +99,7 @@ impl OAuthClient {
     /// [`Self::cache_ttl`]).
     async fn fetch_and_parse_jwks(&self, jwks_uri: &str) -> Result<(AHashMap<String, Arc<DecodingKey>>, Duration)> {
         let response = self.http_client.get(jwks_uri).send().await?.error_for_status()?;
-        let ttl = CachePolicy::from_headers(response.headers()).max_age.unwrap_or(self.cache_ttl);
+        let ttl = CacheControl::from(response.headers()).ttl().unwrap_or(self.cache_ttl);
         let jwks: JwkSet = response.json()?;
 
         let mut keys = AHashMap::with_capacity(jwks.keys.len());
@@ -147,7 +147,7 @@ impl OAuthClient {
         }
 
         let oidc_resp = self.http_client.get(discovery_url).send().await?.error_for_status()?;
-        let ttl = CachePolicy::from_headers(oidc_resp.headers()).max_age.unwrap_or(self.cache_ttl);
+        let ttl = CacheControl::from(oidc_resp.headers()).ttl().unwrap_or(self.cache_ttl);
         let oidc_config: OidcConfiguration = oidc_resp.json()?;
 
         let (keys, _jwks_ttl) = self.fetch_and_parse_jwks(&oidc_config.jwks_uri).await?;

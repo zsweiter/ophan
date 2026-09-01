@@ -35,6 +35,14 @@ else
 	ARCH := x86_64
 endif
 
+ifeq ($(ARCH),aarch64)
+	LINUX_TARGET := aarch64-unknown-linux-gnu
+	DOCKER_PLATFORM := linux/arm64
+else
+	LINUX_TARGET := x86_64-unknown-linux-gnu
+	DOCKER_PLATFORM := linux/amd64
+endif
+
 # Format: ophan-{VERSION}-{OS}-{ARCH}.{tar.gz|zip}
 PACKAGE_FILE := $(PACKAGE_NAME)-$(OS)-$(ARCH)
 PACKAGE_TAR := $(PACKAGE_FILE).tar.gz
@@ -46,7 +54,7 @@ PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 	fmt lint check test fix \
 	ci \
 	package \
-	package-linux package-macos package-windows package-all \
+	package-linux package-macos package-all \
 	package-docker \
 	checksum \
 	install uninstall \
@@ -104,14 +112,13 @@ endif
 
 # ── Linux package ─────────────────────────────────────────────
 package-linux: OS := linux
-package-linux: ARCH := x86_64
-package-linux: PACKAGE_FILE := $(PACKAGE_NAME)-linux-x86_64
+package-linux: PACKAGE_FILE := $(PACKAGE_NAME)-linux-$(ARCH)
 package-linux: PACKAGE_TAR := $(PACKAGE_FILE).tar.gz
 package-linux: PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 package-linux:
-	$(CARGO) build --release
-	upx --best target/release/$(APP_NAME) 2>/dev/null || true
-	$(MAKE) _package-common
+	$(CARGO) build --release --target $(LINUX_TARGET)
+	upx --best target/$(LINUX_TARGET)/release/$(APP_NAME) 2>/dev/null || true
+	$(MAKE) _package-common TARGET=target/$(LINUX_TARGET)/release/$(APP_NAME)
 	cp $(STUB_DIR)/systemd.service $(PACKAGE_DIR)/stubs/ophan.service
 	cd $(DIST_DIR) && tar -czf $(PACKAGE_TAR) $(PACKAGE_FILE)
 	@echo "✅ Created: $(DIST_DIR)/$(PACKAGE_TAR)"
@@ -130,28 +137,13 @@ package-macos:
 	cd $(DIST_DIR) && tar -czf $(PACKAGE_TAR) $(PACKAGE_FILE)
 	@echo "✅ Created: $(DIST_DIR)/$(PACKAGE_TAR)"
 
-# ── Windows package (cross-compile) ──────────────────────────
-package-windows: OS := windows
-package-windows: ARCH := x86_64
-package-windows: PACKAGE_FILE := $(PACKAGE_NAME)-windows-x86_64
-package-windows: PACKAGE_ZIP := $(PACKAGE_FILE).zip
-package-windows: PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
-package-windows:
-	$(CARGO) build --release --target x86_64-pc-windows-msvc
-	-upx --best target/x86_64-pc-windows-msvc/release/$(APP_NAME).exe 2>/dev/null
-	$(MAKE) _package-common TARGET=target/x86_64-pc-windows-msvc/release/$(APP_NAME).exe
-	cp $(STUB_DIR)/windows-service.ps1 $(PACKAGE_DIR)/stubs/
-	cp $(SCRIPT_DIR)/install.ps1 $(PACKAGE_DIR)/
-	cd $(DIST_DIR) && zip -r $(PACKAGE_ZIP) $(PACKAGE_FILE)
-	@echo "✅ Created: $(DIST_DIR)/$(PACKAGE_ZIP)"
-
 # ── All platforms (for CI release) ───────────────────────────
-package-all: package-linux package-macos package-windows checksum
+package-all: package-linux package-macos checksum
 
 # ── Docker ────────────────────────────────────────────────────
 package-docker:
 	@echo "=== Building Docker image ==="
-	docker build \
+	docker buildx build --load --platform $(DOCKER_PLATFORM) \
 		--build-arg VERSION=$(VERSION) \
 		-t $(APP_NAME):$(VERSION) \
 		-t $(APP_NAME):latest \

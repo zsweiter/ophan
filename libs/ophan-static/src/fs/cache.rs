@@ -229,6 +229,7 @@ mod tests {
         assert!(!fs.contains("/tmp/nonexistent_file_12345.txt"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn symlink_detected() {
         let dir = temp_dir();

@@ -18,16 +18,15 @@ use tracing_log::LogTracer;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use std::fs::OpenOptions;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::{GatewayConfig, ListenerAddress, OphanConfig, load_config};
+use crate::config::{GatewayConfig, ListenerAddress, OphanConfig, get_config_path, load_config};
 use crate::gateway::OphanGateway;
 use crate::state::{AppContext, AppState, ConnectionFilters};
 use crate::sys::error::ExitCode;
-use crate::sys::pid::PidGuard;
+use crate::sys::pid::{PidGuard, effective_pid_path};
 
-pub fn bootstrap() -> Result<(), ExitCode> {
+pub fn bootstrap(pid_file: Option<String>) -> Result<(), ExitCode> {
     LogTracer::init().map_err(|e| {
         eprintln!("failed to initialize log tracer: {e}");
         ExitCode::Software
@@ -66,13 +65,13 @@ pub fn bootstrap() -> Result<(), ExitCode> {
         return Err(ExitCode::Software);
     }
 
-    server_run(config).map_err(|e| {
+    server_run(config, pid_file).map_err(|e| {
         eprintln!("Error: {e:#}");
         ExitCode::Config
     })
 }
 
-fn server_run(config: OphanConfig) -> Result<(), String> {
+fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), String> {
     let mut server = Server::new_with_opt_and_conf(
         None,
         ServerConf {
@@ -88,7 +87,7 @@ fn server_run(config: OphanConfig) -> Result<(), String> {
         },
     );
 
-    let _pig_guard = PidGuard::create(PathBuf::from(&config.master.pid))?;
+    let _pig_guard = PidGuard::create(effective_pid_path(pid_file.as_deref(), Some(get_config_path())))?;
 
     server.bootstrap();
 
@@ -116,7 +115,7 @@ fn server_run(config: OphanConfig) -> Result<(), String> {
 
     server.run(RunArgs {
         #[cfg(unix)] // Shutdown signal only available on unix systems
-        shutdown_signal: Box::new(sys::unix_signal::UnixShutdownSignalWatch { state: app_state }),
+        shutdown_signal: Box::new(sys::ShutdownWatch { state: app_state.clone() }),
     });
 
     Ok(())

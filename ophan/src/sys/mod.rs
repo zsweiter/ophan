@@ -1,11 +1,17 @@
+pub mod error;
+pub mod pid;
+
 #[cfg(unix)]
 pub mod unix_signal;
 
 #[cfg(windows)]
-pub mod win_singal;
+pub mod win_signal;
 
-pub mod error;
-pub mod pid;
+#[cfg(unix)]
+pub type ShutdownWatch = unix_signal::UnixShutdownSignalWatch;
+
+#[cfg(windows)]
+pub type ShutdownWatch = win_signal::WindowsShutdownSignalWatch;
 
 #[cfg(unix)]
 pub type OsSignal = nix::sys::signal::Signal;

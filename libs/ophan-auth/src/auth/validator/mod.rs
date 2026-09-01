@@ -2,4 +2,5 @@ mod dpop;
 mod jwt;
 
 pub use dpop::DpopValidator;
-pub use jwt::{JwtConfig, JwtValidator, insecure_decode};
+pub(crate) use jwt::insecure_decode;
+pub use jwt::{JwtConfig, JwtValidator};

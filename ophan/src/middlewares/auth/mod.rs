@@ -16,7 +16,7 @@ use ophan_net::{
 };
 
 use crate::{
-    gateway::{GatewayError, OphanCtx},
+    gateway::{ErrorKind, GatewayError, OphanCtx},
     middlewares::FilterAction,
 };
 
@@ -132,8 +132,6 @@ impl AuthMiddleware {
             Err(err) => {
                 ctx.policies.auth = None;
 
-                tracing::warn!(error = ?err, "authentication rejected");
-
                 FilterAction::Reject(err.kind.into())
             },
         }
@@ -143,14 +141,15 @@ impl AuthMiddleware {
         let Some(ref refreshed) = auth.refresh else {
             return;
         };
+        let token_ttl = config.token_ttl.or(Some(refreshed.expires_in));
 
         for target in config.inject_access_token_into.iter() {
-            inject_token(res, target, &refreshed.access_token, Some(refreshed.expires_in));
+            inject_token(res, target, &refreshed.access_token, token_ttl);
         }
 
         if let Some(refresh_token) = refreshed.refresh_token.as_deref() {
             for target in config.inject_refresh_token_into.iter() {
-                inject_token(res, target, refresh_token, Some(refreshed.expires_in));
+                inject_token(res, target, refresh_token, token_ttl);
             }
         }
     }
@@ -193,8 +192,13 @@ impl AuthMiddleware {
         dpop_proof: Option<&str>,
     ) -> Result<Authentication, GatewayError> {
         let refreshed = self.auth_service.refresh_session(config, refresh_token, dpop_proof).await;
-        // !TODO describe errors and log
-        let refreshed = refreshed.map_err(|_| GatewayError::from(StatusCode::UNAUTHORIZED))?;
+        let refreshed = refreshed.map_err(|err| match err {
+            ophan_auth::Error::Transport(_) | ophan_auth::Error::ProviderStatus(_) => GatewayError::from(StatusCode::BAD_GATEWAY),
+            ophan_auth::Error::Serialization(_) => {
+                GatewayError::explain(ErrorKind::BadGateway, "invalid response from identity provider")
+            },
+            _ => GatewayError::from(StatusCode::UNAUTHORIZED),
+        })?;
 
         Ok(Authentication {
             claims: refreshed.claims,
@@ -243,6 +247,13 @@ impl AuthMiddleware {
                         (Some(v), Some("Bearer ")) => (v.strip_prefix("Bearer "), ophan_auth::TokenType::Bearer),
                         (Some(v), Some("DPoP ")) => (v.strip_prefix("DPoP "), ophan_auth::TokenType::DPoP),
                         (Some(v), Some(p)) => (v.strip_prefix(p), ophan_auth::TokenType::Bearer),
+                        (Some(v), None) if name.eq_ignore_ascii_case("Authorization") => {
+                            if let Some(stripped) = v.strip_prefix("DPoP ") {
+                                (Some(stripped), ophan_auth::TokenType::DPoP)
+                            } else {
+                                (Some(v.strip_prefix("Bearer ").unwrap_or(v)), ophan_auth::TokenType::Bearer)
+                            }
+                        },
                         (Some(v), None) => (Some(v), ophan_auth::TokenType::Bearer),
                         (None, _) => (None, ophan_auth::TokenType::Bearer),
                     }
@@ -252,7 +263,7 @@ impl AuthMiddleware {
                     let tok = uri.query().and_then(|query| {
                         query.split('&').find_map(|pair| {
                             let (k, v) = pair.split_once('=')?;
-                            (k == name).then(|| strip_prefix(v, prefix.as_ref())).flatten()
+                            (k == name).then(|| strip_prefix(v, prefix.as_deref())).flatten()
                         })
                     });
                     (tok, ophan_auth::TokenType::Bearer)
@@ -262,7 +273,7 @@ impl AuthMiddleware {
                     let tok = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()).and_then(|cookies| {
                         cookies.split(';').find_map(|cookie| {
                             let (k, v) = cookie.trim().split_once('=')?;
-                            (k == name).then(|| strip_prefix(v, prefix.as_ref())).flatten()
+                            (k == name).then(|| strip_prefix(v, prefix.as_deref())).flatten()
                         })
                     });
                     (tok, ophan_auth::TokenType::Bearer)
@@ -287,7 +298,7 @@ pub struct RequestTokens<'a> {
 }
 
 #[inline]
-fn strip_prefix<'a>(value: &'a str, prefix: Option<&String>) -> Option<&'a str> {
+fn strip_prefix<'a>(value: &'a str, prefix: Option<&str>) -> Option<&'a str> {
     match prefix {
         Some(prefix) => value.strip_prefix(prefix),
         None => Some(value),
@@ -298,11 +309,11 @@ fn strip_prefix<'a>(value: &'a str, prefix: Option<&String>) -> Option<&'a str> 
 /// and explanation message. Used to deduplicate error handling in authenticate_request.
 #[inline]
 fn auth_error_to_gateway(err: ophan_auth::Error) -> GatewayError {
-    let explanation = err.log_and_explain();
+    let explanation: &'static str = err.log_and_explain();
     GatewayError::explain(StatusCode::from_u16(err.status_code()).unwrap().into(), explanation)
 }
 
-fn inject_token(res: &mut ResponseParts, target: &TokenDestination, token: &str, _expires_in: Option<Duration>) {
+fn inject_token(res: &mut ResponseParts, target: &TokenDestination, token: &str, expires_in: Option<Duration>) {
     match target {
         TokenDestination::Header { name } => {
             if let Ok(value) = HeaderValue::from_str(token) {
@@ -317,7 +328,98 @@ fn inject_token(res: &mut ResponseParts, target: &TokenDestination, token: &str,
             cookie.set_http_only(true);
             cookie.set_same_site(cookies::SameSite::Strict);
 
-            let _ = res.append_header(header::SET_COOKIE, cookie);
+            if let Some(ttl) = expires_in {
+                cookie.set_max_age(ttl);
+            }
+
+            if let Ok(value) = cookie.to_header_value() {
+                let _ = res.append_header(header::SET_COOKIE, value);
+            }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+
+    fn uri(value: &str) -> Uri {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn extracts_bearer_and_dpop_schemes_without_confusion() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer bearer-token"));
+        let request_uri = uri("/");
+        let (token, kind) = AuthMiddleware::match_source_with_type(&headers, &request_uri, &[TokenSource::bearer()]);
+        assert_eq!(token, Some("bearer-token"));
+        assert_eq!(kind, ophan_auth::TokenType::Bearer);
+
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("DPoP dpop-token"));
+        let (token, kind) = AuthMiddleware::match_source_with_type(
+            &headers,
+            &request_uri,
+            &[TokenSource::Header { name: "Authorization".into(), prefix: None }],
+        );
+        assert_eq!(token, Some("dpop-token"));
+        assert_eq!(kind, ophan_auth::TokenType::DPoP);
+    }
+
+    #[test]
+    fn configured_bearer_source_rejects_dpop_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("DPoP dpop-token"));
+        let request_uri = uri("/");
+        let (token, _) = AuthMiddleware::match_source_with_type(&headers, &request_uri, &[TokenSource::bearer()]);
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn extracts_cookie_and_query_tokens() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("other=x; session=abc"));
+        let cookie_uri = uri("/resource?unused=x");
+        let cookie = AuthMiddleware::match_source_with_type(
+            &headers,
+            &cookie_uri,
+            &[TokenSource::Cookie { name: "session".into(), prefix: None }],
+        );
+        assert_eq!(cookie.0, Some("abc"));
+
+        let empty_headers = HeaderMap::new();
+        let query_uri = uri("/resource?unused=x&token=xyz");
+        let query = AuthMiddleware::match_source_with_type(
+            &empty_headers,
+            &query_uri,
+            &[TokenSource::QueryParam { name: "token".into(), prefix: None }],
+        );
+        assert_eq!(query.0, Some("xyz"));
+    }
+
+    #[test]
+    fn cookie_injection_sets_security_attributes_and_ttl() {
+        let mut response = ResponseParts::build(StatusCode::OK, None).unwrap();
+        inject_token(
+            &mut response,
+            &TokenDestination::Cookie { name: "access".into(), path: "/".into() },
+            "token",
+            Some(Duration::from_secs(900)),
+        );
+
+        let cookie = response.headers.get(header::SET_COOKIE).unwrap().to_str().unwrap();
+        assert!(cookie.contains("access=token"));
+        assert!(cookie.contains("Max-Age=900"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Strict"));
+    }
+
+    #[test]
+    fn custom_prefix_is_stripped() {
+        assert_eq!(strip_prefix("Token abc", Some("Token ")), Some("abc"));
+        assert_eq!(strip_prefix("Bearer abc", Some("Token ")), None);
+        assert_eq!(strip_prefix("abc", None), Some("abc"));
     }
 }

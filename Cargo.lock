@@ -611,7 +611,9 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "dashmap",
+ "futures",
  "pingora-memory-cache",
+ "tokio",
 ]
 
 [[package]]
@@ -780,6 +782,15 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "cmake"
@@ -2655,13 +2666,14 @@ dependencies = [
 
 [[package]]
 name = "ophan"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "ahash",
  "arc-swap",
  "async-trait",
  "base64 0.23.1",
  "bytes",
+ "cli",
  "criterion",
  "dashmap",
  "flatkit",
