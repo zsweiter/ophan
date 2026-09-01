@@ -38,6 +38,7 @@ tarpaulin-report.html
 archive/
 .config/
 docs/learn/
+scripts/server.py
 
 # dev artifacts
 scripts/copy-certs.sh

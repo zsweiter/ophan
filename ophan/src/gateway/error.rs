@@ -126,7 +126,7 @@ impl From<StatusCode> for GatewayError {
 pub fn build_error_body(error: &GatewayError, accept: Option<&[u8]>, request_id: &str) -> (StatusCode, Bytes, HeaderValue) {
     let status: StatusCode = error.kind.into();
 
-    let error_name = status.canonical_reason().unwrap_or("Unknow error");
+    let error_name = status.canonical_reason().unwrap_or("Unknown error");
     let error_message = error.message();
 
     let wants_json = accept.is_some_and(|accept| memchr::memmem::find(accept, b"application/json").is_some());
@@ -134,89 +134,162 @@ pub fn build_error_body(error: &GatewayError, accept: Option<&[u8]>, request_id:
     let dynamic_metadata_len = 4 + error_message.len() + error_name.len() + request_id.len();
     let (content_type, body) = match wants_json {
         true => {
-            let mut buf = BytesMut::with_capacity(60 + dynamic_metadata_len);
+            let mut buf = BytesMut::with_capacity(60 + dynamic_metadata_len + 16);
 
             write!(
                 buf,
                 r#"{{"status_code":{},"message":"{}","error":"{}","request_id":"{}"}}"#,
                 status.as_u16(),
-                error_message,
-                error_name,
-                request_id
+                json_escape(&error_message),
+                json_escape(error_name),
+                json_escape(request_id)
             )
             .unwrap();
 
             (header::CONTENT_TYPE_JSON.clone(), Bytes::from(buf))
         },
-        // Otherwise send HTML
         false => {
-            let mut buf = BytesMut::with_capacity(1718 + dynamic_metadata_len);
+            let error_name = html_escape(error_name);
+            let error_message = html_escape(&error_message);
+            let request_id = html_escape(request_id);
+
+            let mut buf = BytesMut::with_capacity(2400 + dynamic_metadata_len);
             write!(
-                    buf,
-                    r#"<!DOCTYPE html>
-                    <html lang="en">
-                    <head>
-                        <meta charset="UTF-8">
-                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                        <title>{status_code} {error_name}</title>
-                        <style>
-                            html {{
-                                height: 100%;
-                                width: 100%;
-                                background-image: linear-gradient(324deg, transparent 0%, transparent 45%,rgba(186, 186, 186,0.04) 45%, rgba(186, 186, 186,0.04) 47%,transparent 47%, transparent 100%),linear-gradient(208deg, transparent 0%, transparent 40%,rgba(186, 186, 186,0.04) 40%, rgba(186, 186, 186,0.04) 80%,transparent 80%, transparent 100%),linear-gradient(202deg, transparent 0%, transparent 20%,rgba(186, 186, 186,0.04) 20%, rgba(186, 186, 186,0.04) 40%,transparent 40%, transparent 100%),linear-gradient(338deg, transparent 0%, transparent 10%,rgba(186, 186, 186,0.04) 10%, rgba(186, 186, 186,0.04) 72%,transparent 72%, transparent 100%),linear-gradient(90deg, rgb(0,0,0),rgb(0,0,0));
-                            }}
+                buf,
+                r#"<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>{status_code} {error_name}</title>
+        <style>
+            * {{
+                box-sizing: border-box;
+            }}
 
-                            body {{
-                                font-family: sans-serif;
-                                color: #ebeef1;
-                                display: flex;
-                                align-items: center;
-                                justify-content: center;
-                                height: 100vh;
-                                margin: 0;
-                            }}
+            :root {{
+                color-scheme: light dark;
+                --bg: #f8fafc;
+                --surface: #ffffff;
+                --text: #1e293b;
+                --text-muted: #475569;
+                --border: #e2e8f0;
+                --link: #2563eb;
+                --pattern: rgba(148, 163, 184, 0.08);
+            }}
 
-                            .card {{
-                                background: #1a1b1c;
-                                padding: 32px;
-                                border-radius: 12px;
-                                width: 480px;
-                            }}
+            @media (prefers-color-scheme: dark) {{
+                :root {{
+                    --bg: #1c1e23;
+                    --surface: #111827;
+                    --text: #f8fafc;
+                    --text-muted: #cbd5e1;
+                    --border: #334155;
+                    --link: #60a5fa;
+                    --pattern: rgba(51, 65, 85, 0.18);
+                }}
+            }}
 
-                            h1 {{
-                                margin: 0;
-                                font-size: 32px;
-                            }}
+            html {{
+                height: 100%;
+                width: 100%;
+                background: var(--bg);
+                background-image: linear-gradient(324deg, transparent 0%, transparent 45%, var(--pattern) 45%, var(--pattern) 47%, transparent 47%, transparent 100%), linear-gradient(208deg, transparent 0%, transparent 40%, var(--pattern) 40%, var(--pattern) 80%, transparent 80%, transparent 100%), linear-gradient(202deg, transparent 0%, transparent 20%, var(--pattern) 20%, var(--pattern) 40%, transparent 40%, transparent 100%), linear-gradient(338deg, transparent 0%, transparent 10%, var(--pattern) 10%, var(--pattern) 72%, transparent 72%, transparent 100%);
+            }}
 
-                            p {{
-                                color: #9ea9b9;
-                            }}
+            body {{
+                font-family: Inter, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                color: var(--text);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 100vh;
+                margin: 0;
+                line-height: 1.6;
+            }}
 
-                            code {{
-                                color: #38bdf8;
-                            }}
-                        </style>
-                    </head>
-                    <body>
-                        <div class="card">
-                            <h1>{status_code} {error_name}</h1>
-                            <p>{message}</p>
-                            <p>Request ID: <code>{request_id}</code></p>
-                        </div>
-                    </body>
-                    </html>"#,
-                    status_code = status.as_u16(),
-                    error_name = error_name,
-                    message = error_message,
-                    request_id = request_id
-                )
-                .unwrap();
+            .card {{
+                background: var(--surface);
+                padding: 32px;
+                border-radius: 12px;
+                width: 480px;
+                border: 1px solid var(--border);
+            }}
+
+            h1 {{
+                margin: 0;
+                font-size: 32px;
+                color: var(--text);
+            }}
+
+            p {{
+                color: var(--text-muted);
+                font-size: 1.05rem;
+            }}
+
+            code {{
+                color: var(--link);
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>{status_code} {error_name}</h1>
+            <p>{error_message}</p>
+            <p>Request ID: <code>{request_id}</code></p>
+        </div>
+    </body>
+</html>"#,
+                status_code = status.as_u16(),
+                error_name = error_name,
+                error_message = error_message,
+                request_id = request_id
+            )
+            .unwrap();
 
             (header::CONTENT_TYPE_HTML.clone(), Bytes::from(buf))
         },
     };
 
     (status, body, content_type)
+}
+
+fn html_escape(s: &str) -> Cow<'_, str> {
+    if !s.as_bytes().iter().any(|&b| matches!(b, b'<' | b'>' | b'&' | b'"' | b'\'')) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
+}
+
+fn json_escape(s: &str) -> Cow<'_, str> {
+    if !s.as_bytes().iter().any(|&b| matches!(b, b'"' | b'\\' | b'\n' | b'\r' | b'\t')) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    Cow::Owned(out)
 }
 
 #[allow(dead_code)]

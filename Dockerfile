@@ -55,7 +55,7 @@ COPY --from=builder /ophan /usr/local/bin/ophan
 COPY defaults/config/ /etc/ophan/
 COPY defaults/www/ /var/www/
 
-RUN chown -R ophan:ophan /etc/ophan /var/www/ophan /var/log/ophan /var/run/ophan \
+RUN chown -R ophan:ophan /etc/ophan /var/www /var/log/ophan /var/run/ophan \
     && setcap 'cap_net_bind_service=+ep' /usr/local/bin/ophan \
     && apk del libcap # Clean up to keep the image lightweight
 
