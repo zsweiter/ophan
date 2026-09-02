@@ -258,31 +258,30 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let cfg = bucket_config(100, 60, 0);
+        let cfg = bucket_config(100, 0, 0);
         let tb = Arc::new(TokenBucket::new(&cfg));
-        let mut handles = vec![];
+
+        let mut handles = Vec::with_capacity(10);
 
         for _ in 0..10 {
             let tb = Arc::clone(&tb);
+
             handles.push(thread::spawn(move || {
-                let mut allowed_count = 0;
+                let mut allowed = 0;
+
                 for _ in 0..20 {
                     if tb.check(1000).allowed {
-                        allowed_count += 1;
+                        allowed += 1;
                     }
                 }
-                allowed_count
+
+                allowed
             }));
         }
 
-        let total_allowed: u64 = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        // With SCALE=1000 and capacity=100*1000=100_000 tokens, each consume uses 1000 tokens
-        // So max 100 consumes possible. But with refill during execution, could be slightly more.
-        // The CAS loop ensures no tokens are double-consumed.
-        assert!(
-            total_allowed <= 110,
-            "total_allowed={total_allowed} exceeded reasonable limit"
-        );
+        let total_allowed: u64 = handles.into_iter().map(|handle| handle.join().unwrap()).sum();
+
+        assert_eq!(total_allowed, 100, "exactly the initial bucket capacity must be consumed");
     }
 
     #[test]
