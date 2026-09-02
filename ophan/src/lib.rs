@@ -43,6 +43,15 @@ pub fn bootstrap(pid_file: Option<String>) -> Result<(), ExitCode> {
         .with_thread_names(true)
         .with_target(false);
 
+    if let Some(parent) = std::path::Path::new(&config.master.error_log).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            eprintln!("failed to create error log directory '{}': {e}", parent.display());
+            ExitCode::Config
+        })?;
+    }
+
     let file_layer = OpenOptions::new().create(true).append(true).open(&config.master.error_log).map_err(|e| {
         eprintln!("failed to create error log file: {e}");
         ExitCode::Config
@@ -87,7 +96,14 @@ fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), Strin
         },
     );
 
-    let _pig_guard = PidGuard::create(effective_pid_path(pid_file.as_deref(), Some(get_config_path())))?;
+    let pid_path = effective_pid_path(pid_file.as_deref(), Some(get_config_path()));
+    if let Some(parent) = pid_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create pid directory '{}': {e}", parent.display()))?;
+    }
+
+    let _pig_guard = PidGuard::create(pid_path)?;
 
     server.bootstrap();
 
