@@ -408,16 +408,26 @@ WEBROOT="/var/www/html"
 
 mkdir -p "$WEBROOT"
 
+WEB_SRC=""
+
 if [[ -f "$EXTRACTED/config/public/index.html" ]]; then
+    WEB_SRC="$EXTRACTED/config/public"
+elif [[ -f "$EXTRACTED/www/index.html" ]]; then
+    WEB_SRC="$EXTRACTED/www"
+elif [[ -f "$EXTRACTED/defaults/www/index.html" ]]; then
+    WEB_SRC="$EXTRACTED/defaults/www"
+fi
+
+if [[ -n "$WEB_SRC" && -f "$WEB_SRC/index.html" ]]; then
 
     install \
         -m 644 \
-        "$EXTRACTED/config/public/index.html" \
+        "$WEB_SRC/index.html" \
         "$WEBROOT/index.html"
 
     install \
         -m 644 \
-        "$EXTRACTED/config/public/favicon.svg" \
+        "$WEB_SRC/favicon.svg" \
         "$WEBROOT/favicon.svg"
 
     if id www-data >/dev/null 2>&1; then
