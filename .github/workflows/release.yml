@@ -101,7 +101,8 @@ jobs:
                   fi
 
                   cp "$BIN" "$DIST/"
-                  cp -r config "$DIST/"
+                  cp -r defaults/config "$DIST/config"
+                  cp -r defaults/www "$DIST/www"
 
                   if [ "${{ matrix.pkg_os }}" = "linux" ]; then
                     cp stubs/systemd.service "$DIST/stubs/"
