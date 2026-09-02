@@ -15,6 +15,9 @@ CONFIGDIR="${CONFIGDIR:-/etc/ophan}"
 SERVICE_NAME="ophan"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
+UPGRADE=false
+FORCE=false
+
 TMPDIR=""
 
 # ──────────────────────────────────────────────────────────────
@@ -103,18 +106,23 @@ Usage:
   $0 [options]
 
 Options:
-  --version VERSION   Install a specific version
-  --prefix PATH       Installation prefix
-  --bindir PATH       Binary directory
-  --config PATH       Configuration directory
+  --version VERSION   Install a specific version (default: latest)
+  --prefix PATH       Installation prefix (default: /usr/local)
+  --bindir PATH       Binary directory (default: PREFIX/bin)
+  --config PATH       Configuration directory (default: /etc/ophan)
   --no-service        Do not install systemd service
+  --upgrade           Hot upgrade: replace binary with new version (SIGQUIT)
+  --force             Force overwrite of existing config/binary even if same version
   --help              Show this help
+
+Idempotent: safe to re-run. By default existing configs are preserved (use --force to overwrite).
 
 Examples:
   sudo ./install.sh
   sudo ./install.sh --version 0.1.23
   sudo ./install.sh --prefix /opt/ophan
   sudo ./install.sh --no-service
+  sudo ./install.sh --upgrade --version 0.1.27
 
 EOF
 }
@@ -154,6 +162,16 @@ while [[ $# -gt 0 ]]; do
 
         --no-service)
             INSTALL_SERVICE=false
+            shift
+            ;;
+
+        --upgrade)
+            UPGRADE=true
+            shift
+            ;;
+
+        --force|--reinstall)
+            FORCE=true
             shift
             ;;
 
@@ -268,6 +286,13 @@ VERSION="${VERSION#v}"
 
 ok "Version: v${VERSION}"
 
+if [[ -x "$BINDIR/ophan" && "$FORCE" != true && "$UPGRADE" != true ]]; then
+    INSTALLED_VER="$("$BINDIR/ophan" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+    if [[ "$INSTALLED_VER" == "$VERSION" ]]; then
+        info "Already at v${VERSION} at $BINDIR/ophan (use --force to reinstall or --upgrade for hot upgrade)"
+    fi
+fi
+
 # ──────────────────────────────────────────────────────────────
 # Package
 # ──────────────────────────────────────────────────────────────
@@ -369,6 +394,12 @@ step "Installing Ophan"
 
 mkdir -p "$BINDIR"
 
+if [[ -f "$BINDIR/ophan" ]]; then
+    BACKUP_BIN="${BINDIR}/ophan.bak.$(date +%s)"
+    cp -a "$BINDIR/ophan" "$BACKUP_BIN" 2>/dev/null || true
+    info "Backup of previous binary: $BACKUP_BIN"
+fi
+
 install \
     -m 755 \
     "$EXTRACTED/ophan" \
@@ -386,14 +417,19 @@ step "Installing configuration"
 mkdir -p "$CONFIGDIR"
 
 if [[ -d "$EXTRACTED/config" ]]; then
-    cp -R \
-        "$EXTRACTED/config/." \
-        "$CONFIGDIR/"
+    if [[ -f "$CONFIGDIR/master.conf" && "$FORCE" != true ]]; then
+        warn "Config already exists at $CONFIGDIR — preserving (use --force to overwrite)"
+        info "Skipping config overwrite (idempotent)"
+    else
+        cp -R \
+            "$EXTRACTED/config/." \
+            "$CONFIGDIR/"
 
-    chmod -R u=rwX,go=rX "$CONFIGDIR"
+        chmod -R u=rwX,go=rX "$CONFIGDIR"
 
-    ok "Configuration installed"
-    info "$CONFIGDIR"
+        ok "Configuration installed"
+        info "$CONFIGDIR"
+    fi
 else
     warn "No configuration directory found in package"
 fi
@@ -509,34 +545,97 @@ if [[ "$OS" == "linux" &&
       "$INSTALL_SERVICE" == true &&
       -f "$SERVICE_FILE" ]]; then
 
-    step "Starting service"
+    if [[ "$UPGRADE" == true ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+        step "Hot upgrade (zero-downtime) via Pingora"
 
-    PORT_PROGRAM=""
+        # Validate new binary can parse current config before signalling
+        if [[ -f "$CONFIGDIR/master.conf" ]]; then
+            if ! "$BINDIR/ophan" -t -c "$CONFIGDIR/master.conf" >/dev/null 2>&1; then
+                warn "Config test failed with new binary — aborting hot upgrade"
+                fail "Run with --force to bypass or fix $CONFIGDIR/master.conf"
+            fi
+            ok "Config test passed with new binary"
+        fi
 
-    if command -v ss >/dev/null 2>&1; then
-        PORT_PROGRAM="$(
-            ss -ltnp 'sport = :80' 2>/dev/null |
-            sed -n '2p'
-        )"
-    elif command -v lsof >/dev/null 2>&1; then
-        PORT_PROGRAM="$(
-            lsof -nP -iTCP:80 -sTCP:LISTEN 2>/dev/null |
-            sed -n '2p'
-        )"
-    elif command -v fuser >/dev/null 2>&1; then
-        PORT_PROGRAM="$(fuser 80/tcp 2>&1 || true)"
-    fi
+        PIDFILE="/run/ophan.pid"
+        # Try to get PID from config if custom
+        if [[ -f "$CONFIGDIR/master.conf" ]]; then
+            CFG_PID="$(sed -n 's/.*pid[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIGDIR/master.conf" | head -n1 || true)"
+            [[ -n "$CFG_PID" ]] && PIDFILE="$CFG_PID"
+        fi
 
-    if [[ -n "$PORT_PROGRAM" ]]; then
-        fail "Ophan could not be started because another service is already using port 80: $PORT_PROGRAM"
-    fi
+        OLD_PID="$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]' || true)"
 
-    ok "Port 80 is free"
+        if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+            info "Current PID: $OLD_PID → sending SIGQUIT for graceful upgrade"
+            if kill -QUIT "$OLD_PID" 2>/dev/null; then ok "Sent SIGQUIT to $OLD_PID"
+            elif "$BINDIR/ophan" --upgrade >/dev/null 2>&1; then ok "Sent upgrade via ophan --upgrade"
+            else warn "SIGQUIT failed"; fi
 
-    if systemctl start "$SERVICE_NAME" >/dev/null 2>&1; then
-        ok "Service started"
+            sleep 2
+            # Health check — new PID should appear
+            for i in $(seq 1 12); do
+                sleep 1
+                if [[ -f "$PIDFILE" ]]; then
+                    NEW_PID="$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]' || true)"
+                    if [[ -n "$NEW_PID" && "$NEW_PID" != "$OLD_PID" ]] && kill -0 "$NEW_PID" 2>/dev/null; then
+                        ok "Hot upgrade succeeded — new PID $NEW_PID"
+                        break
+                    fi
+                fi
+                if [[ $i -eq 12 ]]; then
+                    warn "Hot upgrade did not rotate PID — falling back to restart"
+                    systemctl restart "$SERVICE_NAME" || fail "systemctl restart failed"
+                    ok "Service restarted via systemd"
+                fi
+            done
+        else
+            warn "No running PID found — doing cold start"
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME" || fail "systemctl start failed"
+            ok "Service started"
+        fi
+
+        # Final health
+        sleep 1
+        if systemctl is-active --quiet "$SERVICE_NAME"; then ok "Service is active"
+        else fail "Service not active after upgrade — check: journalctl -u $SERVICE_NAME -f"; fi
+
     else
-        fail "Ophan could not be started. Check the logs: journalctl -u $SERVICE_NAME -f"
+        step "Starting service"
+
+        PORT_PROGRAM=""
+
+        if command -v ss >/dev/null 2>&1; then
+            PORT_PROGRAM="$(
+                ss -ltnp 'sport = :80' 2>/dev/null |
+                sed -n '2p'
+            )"
+        elif command -v lsof >/dev/null 2>&1; then
+            PORT_PROGRAM="$(
+                lsof -nP -iTCP:80 -sTCP:LISTEN 2>/dev/null |
+                sed -n '2p'
+            )"
+        elif command -v fuser >/dev/null 2>&1; then
+            PORT_PROGRAM="$(fuser 80/tcp 2>&1 || true)"
+        fi
+
+        if [[ -n "$PORT_PROGRAM" && "$FORCE" != true && "$UPGRADE" != true ]]; then
+            if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+                info "Port 80 in use by active ophan service — skipping start (idempotent)"
+            else
+                fail "Ophan could not be started because another service is already using port 80: $PORT_PROGRAM"
+            fi
+        else
+            [[ -z "$PORT_PROGRAM" ]] && ok "Port 80 is free" || info "Port 80 in use — proceeding with restart (force/upgrade)"
+
+            if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+                if systemctl restart "$SERVICE_NAME" >/dev/null 2>&1; then ok "Service restarted"
+                else fail "systemctl restart failed — check: journalctl -u $SERVICE_NAME -f"; fi
+            else
+                if systemctl start "$SERVICE_NAME" >/dev/null 2>&1; then ok "Service started"
+                else fail "Ophan could not be started. Check the logs: journalctl -u $SERVICE_NAME -f"; fi
+            fi
+        fi
     fi
 fi
 

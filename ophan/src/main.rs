@@ -19,7 +19,12 @@ fn main_entry() -> Result<(), ExitCode> {
     }
 
     match app.cmd {
-        None => ophan::bootstrap(app.pid_file.clone()),
+        None => {
+            if let Some(ref cfg) = app.config {
+                let _ = config::set_config_path(cfg);
+            }
+            ophan::bootstrap(app.pid_file.clone())
+        },
 
         Some(Command::Test) => {
             let path = app.config.unwrap_or_default();
