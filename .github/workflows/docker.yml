@@ -5,7 +5,7 @@
 # pull_request:             build only (no push), validates the Dockerfile
 # ═══════════════════════════════════════════════════════════════
 
-name: Docker
+name: Deploy Docker Image to GitHub Packages
 
 on:
     push:
