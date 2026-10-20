@@ -50,11 +50,7 @@ impl TokenBucket {
 
     pub fn check(&self, now_ms: u64) -> RateLimitResult {
         if self.emission_ns == 0 {
-            return RateLimitResult {
-                allowed: false,
-                remaining: 0,
-                retry_after: self.window_secs,
-            };
+            return RateLimitResult { allowed: false, remaining: 0, retry_after: self.window_secs };
         }
 
         let now = now_ms.saturating_mul(NANOS_PER_MS);
@@ -74,17 +70,14 @@ impl TokenBucket {
                 };
             }
 
-            match self
-                .tat_ns
-                .compare_exchange_weak(tat, new_tat, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.tat_ns.compare_exchange_weak(tat, new_tat, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => {
                     return RateLimitResult {
                         allowed: true,
                         remaining: (limit_at - new_tat) / self.emission_ns,
                         retry_after: 0,
                     };
-                }
+                },
                 // Another thread updated the state, retry
                 Err(actual) => tat = actual,
             }
