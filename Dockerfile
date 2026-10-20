@@ -15,12 +15,27 @@ FROM --platform=$BUILDPLATFORM chef AS builder
 COPY --from=planner /src/recipe.json recipe.json
 
 ARG TARGETARCH
+ARG BUILDARCH
+ARG ZIG_VERSION=0.13.0
+ARG CARGO_ZIGBUILD_VERSION=0.23.4
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     cmake \
-    musl-tools \
+    curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Zig acts as the C/C++ cross compiler and linker for the musl targets,
+RUN case "${BUILDARCH}" in \
+        amd64) ZIG_ARCH=x86_64 ;; \
+        arm64) ZIG_ARCH=aarch64 ;; \
+        *) echo "Unsupported build platform: ${BUILDARCH}"; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" \
+        | tar -xJ -C /opt \
+    && ln -s "/opt/zig-linux-${ZIG_ARCH}-${ZIG_VERSION}/zig" /usr/local/bin/zig
+
+RUN cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked
 
 RUN case "${TARGETARCH}" in \
         amd64) \
@@ -32,14 +47,11 @@ RUN case "${TARGETARCH}" in \
         *) echo "Unsupported target: ${TARGETARCH}"; exit 1 ;; \
     esac
 
-ENV CXX_x86_64_unknown_linux_musl=g++
-ENV CXX_aarch64_unknown_linux_musl=g++
-
-RUN TARGET=$(cat /.target) && cargo chef cook --release --target "$TARGET" --recipe-path recipe.json
+RUN TARGET=$(cat /.target) && cargo chef cook --release --zigbuild --target "$TARGET" --recipe-path recipe.json
 
 COPY . .
 RUN TARGET=$(cat /.target) \
-    && cargo build --release --target "$TARGET" --bin ophan \
+    && cargo zigbuild --release --target "$TARGET" --bin ophan \
     && cp "target/$TARGET/release/ophan" /ophan
 
 FROM alpine:3.21
