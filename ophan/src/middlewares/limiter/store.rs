@@ -1,6 +1,6 @@
 use std::{
     hash::{Hash, Hasher},
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -14,6 +14,12 @@ use crate::state::Reloadable;
 
 use super::algorithm::{RateLimitResult, SlidingWindow, TokenBucket};
 use super::config::{LimiterConfig, RateLimitAlgorithm};
+
+/// Network mask applied to IPv6 addresses before hashing.
+///
+/// Clients are typically assigned a full `/64` prefix, so limiting by individual
+/// IPv6 address would allow a single client to bypass the limit by rotating addresses.
+const IPV6_PREFIX_MASK: u128 = u128::MAX << 64;
 
 /// Internal rate limit state: either a sliding window or token bucket.
 pub enum LimiterState {
@@ -33,8 +39,17 @@ pub struct LimiterKey {
 }
 
 impl LimiterKey {
+    /// Builds a key from a client IP address.
+    ///
+    /// IPv4-mapped IPv6 addresses are normalized to IPv4, and IPv6 addresses
+    /// are truncated to their `/64` prefix.
     #[inline(always)]
     pub fn from_ip(ip: IpAddr, epoch: u64) -> Self {
+        let ip = match ip.to_canonical() {
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & IPV6_PREFIX_MASK)),
+            v4 => v4,
+        };
+
         let mut hasher = ahash::AHasher::default();
         ip.hash(&mut hasher);
         Self { key_hash: hasher.finish(), epoch }
@@ -57,7 +72,7 @@ impl LimiterState {
 
 /// In-memory rate limiter backed by a concurrent hash map.
 ///
-/// Uses `Instant::now().elapsed()` (monotonic clock) for time tracking,
+/// Uses `start_time.elapsed()` (monotonic clock) for time tracking,
 /// which is immune to NTP adjustments, wall-clock skew, and leap seconds.
 /// See [std::time::Instant](https://doc.rust-lang.org/std/time/struct.Instant.html).
 ///
@@ -77,11 +92,7 @@ impl Default for MemoryRateLimiter {
 
 impl MemoryRateLimiter {
     pub fn new() -> Self {
-        Self {
-            states: DashMap::with_capacity(1024),
-            start_time: Instant::now(),
-            epoch: AtomicU64::new(0),
-        }
+        Self::with_capacity(1024)
     }
 
     pub fn with_capacity(size: usize) -> Self {
@@ -92,8 +103,25 @@ impl MemoryRateLimiter {
         }
     }
 
+    #[inline]
+    fn now_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64
+    }
+
+    #[allow(unused)]
+    #[inline]
+    pub fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    /// Advances the epoch and removes all entries from previous epochs.
+    pub fn advance_epoch(&self) {
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.states.retain(|key, _| key.epoch >= epoch);
+    }
+
     pub fn consume(&self, key: LimiterKey, cfg: &LimiterConfig) -> RateLimitResult {
-        let now_ms = self.start_time.elapsed().as_millis() as u64;
+        let now_ms = self.now_ms();
         let limiter = self.states.entry(key).or_insert_with(|| Arc::new(LimiterState::new(cfg)));
 
         match limiter.value().as_ref() {
@@ -105,7 +133,7 @@ impl MemoryRateLimiter {
 
 impl Reloadable for MemoryRateLimiter {
     async fn hot_reload(&self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.advance_epoch();
     }
 }
 
@@ -121,6 +149,7 @@ impl LimiterBackend {
 
 pub struct RateLimiter {
     backend: LimiterBackend,
+    #[allow(unused)]
     epoch: AtomicU64,
 }
 
@@ -356,7 +385,7 @@ mod tests {
 
     // ── Clock / Timing ────────────────────────────────────────────────────
 
-    /// The limiter uses `Instant::now().elapsed()` (monotonic clock),
+    /// The limiter uses `start_time.elapsed()` (monotonic clock),
     /// so there should be no NTP drift or wall-clock skew issues.
     /// This test verifies that time always moves forward.
     #[test]
@@ -379,7 +408,7 @@ mod tests {
         }
     }
 
-    /// Verifies that `Instant::now().elapsed()` is used (monotonic),
+    /// Verifies that `start_time.elapsed()` is used (monotonic),
     /// not `SystemTime::now()` which could jump on NTP sync.
     #[test]
     fn uses_monotonic_not_system_clock() {

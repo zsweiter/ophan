@@ -1,117 +1,92 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::middlewares::limiter::{LimiterConfig, algorithm::RateLimitResult};
 
 /// Token bucket rate limiter.
 ///
-/// Implements the classic token bucket algorithm as described in
-/// [RFC 2697](https://datatracker.ietf.org/doc/html/rfc2697) (Single Rate Three Color Marker).
+/// Implements the token bucket algorithm through its equivalent formulation, the
+/// Generic Cell Rate Algorithm (GCRA), as defined in ITU-T Recommendation I.371.
 ///
-/// Tokens refill at a constant rate. Each request consumes one token (scaled by `SCALE`).
-/// The bucket has a maximum capacity = `(limit + burst) * SCALE`, allowing short bursts
-/// above the steady-state rate.
+/// The bucket has a maximum capacity of `limit + burst` tokens and refills at a constant
+/// rate of `limit / window`, allowing short bursts above the steady-state rate.
+///
+/// The state is stored as a single theoretical arrival time (TAT) instead of a token
+/// count and a refill timestamp, so it can be updated atomically with a single CAS.
 ///
 /// Uses a CAS loop for lock-free concurrent access.
 pub struct TokenBucket {
-    capacity: u64,
-    refill_rate_per_ms: f64,
-    per_seconds: u64,
+    /// Time required to refill a single token, in nanoseconds.
+    emission_ns: u64,
+    /// Time equivalent of a full bucket, in nanoseconds.
+    tolerance_ns: u64,
+    window_secs: u64,
 
-    tokens: AtomicU64,
-    last_refill: AtomicU64,
-    initialized: AtomicBool,
+    /// Theoretical arrival time of the next request, in nanoseconds.
+    tat_ns: AtomicU64,
 }
 
-/// Internal scale factor for sub-token precision. Allows smooth token
-/// accumulation at any rate without discrete refill intervals.
-const TOKEN_SCALE: u64 = 1_000;
+const NANOS_PER_MS: u64 = 1_000_000;
+const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 impl TokenBucket {
     pub fn new(cfg: &LimiterConfig) -> Self {
         let limit = cfg.limit();
-        let capacity = (limit + cfg.burst) * TOKEN_SCALE;
-        let refill_rate_per_ms = (limit * TOKEN_SCALE) as f64 / (cfg.window() * 1000) as f64;
+        let window_secs = cfg.window();
+        assert!(window_secs > 0, "rate limiter window must be greater than 0");
+
+        let window_ns = window_secs.saturating_mul(NANOS_PER_SEC);
+        // A zero limit disables refilling; all requests are rejected.
+        let emission_ns = if limit == 0 { 0 } else { (window_ns / limit).max(1) };
+        let capacity = limit.saturating_add(cfg.burst);
+        let tolerance_ns = emission_ns.saturating_mul(capacity);
 
         Self {
-            capacity,
-            refill_rate_per_ms,
-            per_seconds: cfg.window(),
-            tokens: AtomicU64::new(capacity),
-            last_refill: AtomicU64::new(0),
-            initialized: AtomicBool::new(false),
+            emission_ns,
+            tolerance_ns,
+            window_secs,
+            tat_ns: AtomicU64::new(0),
         }
     }
 
     pub fn check(&self, now_ms: u64) -> RateLimitResult {
+        if self.emission_ns == 0 {
+            return RateLimitResult {
+                allowed: false,
+                remaining: 0,
+                retry_after: self.window_secs,
+            };
+        }
+
+        let now = now_ms.saturating_mul(NANOS_PER_MS);
+        let limit_at = now.saturating_add(self.tolerance_ns);
+        let mut tat = self.tat_ns.load(Ordering::Acquire);
+
         loop {
-            let current_tokens = self.tokens.load(Ordering::Acquire);
+            // A TAT in the past means the bucket is full.
+            let new_tat = tat.max(now).saturating_add(self.emission_ns);
 
-            if !self.initialized.load(Ordering::Acquire) {
-                if self.initialized.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                    self.last_refill.store(now_ms, Ordering::Release);
-
-                    if current_tokens < TOKEN_SCALE {
-                        let missing = TOKEN_SCALE - current_tokens;
-                        let retry_after_ms = if self.refill_rate_per_ms > 0.0 {
-                            (missing as f64 / self.refill_rate_per_ms).ceil() as u64
-                        } else {
-                            self.per_seconds * 1000
-                        };
-                        return RateLimitResult {
-                            allowed: false,
-                            remaining: 0,
-                            retry_after: retry_after_ms.div_ceil(1000),
-                        };
-                    }
-
-                    let rem_tokens = current_tokens - TOKEN_SCALE;
-                    if self
-                        .tokens
-                        .compare_exchange(current_tokens, rem_tokens, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        return RateLimitResult {
-                            allowed: true,
-                            remaining: rem_tokens / TOKEN_SCALE,
-                            retry_after: 0,
-                        };
-                    }
-                    continue;
-                }
-                // Another thread won the race, retry
-                continue;
-            }
-
-            let last = self.last_refill.load(Ordering::Acquire);
-            let elapsed = now_ms.saturating_sub(last);
-            let refill = (elapsed as f64 * self.refill_rate_per_ms) as u64;
-            let new_tokens = (current_tokens + refill).min(self.capacity);
-
-            if new_tokens < TOKEN_SCALE {
-                let missing = TOKEN_SCALE - new_tokens;
-                let retry_after_ms = if self.refill_rate_per_ms > 0.0 {
-                    (missing as f64 / self.refill_rate_per_ms).ceil() as u64
-                } else {
-                    self.per_seconds * 1000
-                };
-
+            if new_tat > limit_at {
+                let wait_ns = new_tat - limit_at;
                 return RateLimitResult {
                     allowed: false,
                     remaining: 0,
-                    retry_after: retry_after_ms.div_ceil(1000),
+                    retry_after: wait_ns.div_ceil(NANOS_PER_SEC),
                 };
             }
 
-            let rem_tokens = new_tokens - TOKEN_SCALE;
-            let next_refill = last + elapsed;
-
-            if self.last_refill.compare_exchange(last, next_refill, Ordering::AcqRel, Ordering::Acquire).is_ok() {
-                self.tokens.store(rem_tokens, Ordering::Release);
-                return RateLimitResult {
-                    allowed: true,
-                    remaining: rem_tokens / TOKEN_SCALE,
-                    retry_after: 0,
-                };
+            match self
+                .tat_ns
+                .compare_exchange_weak(tat, new_tat, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    return RateLimitResult {
+                        allowed: true,
+                        remaining: (limit_at - new_tat) / self.emission_ns,
+                        retry_after: 0,
+                    };
+                }
+                // Another thread updated the state, retry
+                Err(actual) => tat = actual,
             }
         }
     }
@@ -258,7 +233,8 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let cfg = bucket_config(100, 0, 0);
+        // Long window so that no refill occurs during the test
+        let cfg = bucket_config(100, 60, 0);
         let tb = Arc::new(TokenBucket::new(&cfg));
 
         let mut handles = Vec::with_capacity(10);
@@ -293,5 +269,12 @@ mod tests {
         let r = tb.check(50000);
         assert!(r.allowed);
         assert_eq!(r.remaining, 4); // 5 - 1
+    }
+
+    #[test]
+    #[should_panic(expected = "window must be greater than 0")]
+    fn token_bucket_rejects_zero_window() {
+        let cfg = bucket_config(100, 0, 0);
+        let _ = TokenBucket::new(&cfg);
     }
 }
