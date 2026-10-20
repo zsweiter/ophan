@@ -450,7 +450,7 @@ mod tests {
 
         let result = cache
             .get_or_fetch("k", Some(Duration::from_secs(60)), || async {
-                Err::<i32, _>(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+                Err::<i32, _>(std::io::Error::other("boom"))
             })
             .await;
 

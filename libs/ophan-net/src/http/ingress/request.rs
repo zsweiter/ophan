@@ -131,7 +131,7 @@ mod tests {
         let raw = b"GET /test HTTP/1.1\r\nX-Custom: hello-world\r\n\r\nbody_data";
         let req = IncomingRequest::parse(raw).unwrap();
         // method points into original buffer (offset 0)
-        assert_eq!(req.method.as_ptr(), raw.as_ptr() as *const u8);
+        assert_eq!(req.method.as_ptr(), raw.as_ptr());
         // header name points into original buffer
         let h = req.header("X-Custom").unwrap();
         assert_eq!(h.name.as_ptr(), &raw[20] as *const u8);

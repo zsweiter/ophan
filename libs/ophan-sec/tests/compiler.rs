@@ -113,7 +113,7 @@ fn owasp_default_rules_compile() {
         compiled
             .request_headers
             .iter()
-            .any(|r| r.meta.as_ref().map_or(false, |m| m.id.as_ref() == "custom_sql_injection_query")),
+            .any(|r| r.meta.as_ref().is_some_and(|m| m.id.as_ref() == "custom_sql_injection_query")),
         "query regex rule must be present"
     );
 }

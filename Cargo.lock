@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "ophan"
-version = "0.1.28"
+version = "0.1.3"
 dependencies = [
  "ahash",
  "arc-swap",

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, TRANSFER_ENCODING};
 use http::request::Parts;
 use http::{HeaderMap, Method, Version};
 use serde::Serialize;
@@ -244,6 +244,13 @@ impl Request {
 
         parts.headers = self.headers;
 
+        if let Some(body) = self.body.as_ref()
+            && !parts.headers.contains_key(CONTENT_LENGTH)
+            && !parts.headers.contains_key(TRANSFER_ENCODING)
+        {
+            parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+        }
+
         if let Some(timeout) = self.timeout {
             parts.extensions.insert(timeout);
         }
@@ -303,6 +310,33 @@ mod tests {
 
     fn dummy_client() -> Client {
         Client::new()
+    }
+
+    #[test]
+    fn into_parts_sets_content_length_for_body() {
+        let req = dummy_client().post("http://example.com").json(&serde_json::json!({ "a": 1 })).request.unwrap();
+        let (parts, body, _) = req.into_parts().unwrap();
+
+        assert_eq!(parts.headers[CONTENT_LENGTH], body.unwrap().len().to_string());
+    }
+
+    #[test]
+    fn into_parts_keeps_explicit_framing_headers() {
+        let req = dummy_client()
+            .post("http://example.com")
+            .header(TRANSFER_ENCODING, "chunked")
+            .body("abc")
+            .request
+            .unwrap();
+        let (parts, _, _) = req.into_parts().unwrap();
+
+        assert!(!parts.headers.contains_key(CONTENT_LENGTH));
+    }
+
+    #[test]
+    fn into_parts_without_body_has_no_content_length() {
+        let (parts, _, _) = dummy_client().get("http://example.com").request.unwrap().into_parts().unwrap();
+        assert!(!parts.headers.contains_key(CONTENT_LENGTH));
     }
 
     #[test]

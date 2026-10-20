@@ -16,7 +16,7 @@ use http::HeaderName;
 use http::HeaderValue;
 use http::header;
 use ophan_auth::crypto::{Algorithm, HmacAlg};
-use ophan_auth::{AuthConfig as InnerAuthConfig, AuthMode, JwtValidatorConfig};
+use ophan_auth::{AuthConfig as InnerAuthConfig, AuthMode, JwtValidatorConfig, OAuthClientConfig};
 use ophan_net::http::HttpMethodSet;
 use ophan_net::tls::TlsVersion;
 use ophan_sec::l7::CompiledWafRules;
@@ -778,6 +778,23 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let mut inner_config = InnerAuthConfig::new(validator, auth_mode);
     inner_config.dpop_policy = dpop_policy;
 
+    let refresh_enabled = raw.refresh.as_ref().is_some_and(|r| r.enabled.unwrap_or(true));
+    if let Some(client_id) = raw.client_id {
+        let mut oauth_client = OAuthClientConfig::new(client_id);
+        if let Some(secret) = raw.client_secret.as_ref() {
+            oauth_client = oauth_client.with_secret(secret.resolve().map_err(|e| format!("auth: client_secret: {e}"))?);
+        }
+        if let Some(endpoint) = raw.refresh.as_ref().and_then(|r| r.endpoint) {
+            oauth_client = oauth_client.with_token_endpoint(endpoint);
+        }
+        if refresh_enabled {
+            oauth_client = oauth_client.enable_refresh_flow();
+        }
+        inner_config = inner_config.with_oauth_client(oauth_client);
+    } else if refresh_enabled {
+        return Err("auth: refresh requires client_id".to_string());
+    }
+
     // Compile inject → TokenDestination
     let inject_access_token_into: Box<[crate::middlewares::auth::TokenDestination]> = raw
         .refresh
@@ -1155,5 +1172,84 @@ fn validate_upstream_names(upstreams: &[Arc<UpstreamConfig>], errors: &mut Vec<C
         if !seen.insert(&u.name) {
             errors.push(CompileError::new(format!("upstream '{}' defined multiple times", u.name)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw_auth<'a>() -> RawAuthConfig<'a> {
+        RawAuthConfig {
+            issuer: Some("https://auth.example.com"),
+            audience: Some("api"),
+            ..Default::default()
+        }
+    }
+
+    fn raw_refresh<'a>(enabled: Option<bool>, endpoint: Option<&'a str>) -> RawRefreshConfig<'a> {
+        RawRefreshConfig { enabled, endpoint, sources: None, inject: None }
+    }
+
+    #[test]
+    fn auth_refresh_configures_oauth_client() {
+        let raw = RawAuthConfig {
+            client_id: Some("edge"),
+            client_secret: Some(RawSecretValue::Literal("s3cret")),
+            refresh: Some(raw_refresh(Some(true), Some("https://auth.example.com/oauth/token"))),
+            ..raw_auth()
+        };
+
+        let cfg = build_auth_from_raw(&raw).unwrap();
+        let client = cfg.client.oauth_client.expect("oauth client must be configured");
+
+        assert_eq!(client.client_id, "edge");
+        assert_eq!(client.client_secret.as_deref(), Some("s3cret"));
+        assert_eq!(client.token_endpoint.as_deref(), Some("https://auth.example.com/oauth/token"));
+        assert!(client.refresh_flow_enabled);
+    }
+
+    #[test]
+    fn auth_refresh_block_defaults_to_enabled() {
+        let raw = RawAuthConfig {
+            client_id: Some("edge"),
+            refresh: Some(raw_refresh(None, None)),
+            ..raw_auth()
+        };
+
+        let cfg = build_auth_from_raw(&raw).unwrap();
+        assert!(cfg.client.oauth_client.unwrap().refresh_flow_enabled);
+    }
+
+    #[test]
+    fn auth_refresh_disabled_keeps_client_without_refresh() {
+        let raw = RawAuthConfig {
+            client_id: Some("edge"),
+            refresh: Some(raw_refresh(Some(false), None)),
+            ..raw_auth()
+        };
+
+        let cfg = build_auth_from_raw(&raw).unwrap();
+        assert!(!cfg.client.oauth_client.unwrap().refresh_flow_enabled);
+    }
+
+    #[test]
+    fn auth_refresh_without_client_id_is_rejected() {
+        let raw = RawAuthConfig { refresh: Some(raw_refresh(Some(true), None)), ..raw_auth() };
+
+        let err = build_auth_from_raw(&raw).unwrap_err();
+        assert!(err.contains("client_id"), "{err}");
+    }
+
+    #[test]
+    fn auth_client_secret_from_missing_env_is_rejected() {
+        let raw = RawAuthConfig {
+            client_id: Some("edge"),
+            client_secret: Some(RawSecretValue::Env(EnvVar("OPHAN_TEST_UNSET_CLIENT_SECRET".into()))),
+            ..raw_auth()
+        };
+
+        let err = build_auth_from_raw(&raw).unwrap_err();
+        assert!(err.contains("OPHAN_TEST_UNSET_CLIENT_SECRET"), "{err}");
     }
 }

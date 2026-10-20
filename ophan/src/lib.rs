@@ -81,6 +81,14 @@ pub fn bootstrap(pid_file: Option<String>) -> Result<(), ExitCode> {
 }
 
 fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), String> {
+    let pid_path = effective_pid_path(pid_file.as_deref(), Some(get_config_path()));
+    let run_dir = pid_path.parent().filter(|p| !p.as_os_str().is_empty()).map(std::path::Path::to_path_buf);
+    if let Some(ref dir) = run_dir {
+        std::fs::create_dir_all(dir).map_err(|e| format!("failed to create pid directory '{}': {e}", dir.display()))?;
+    }
+
+    let upgrade_sock = run_dir.unwrap_or_else(|| std::path::PathBuf::from(".")).join("ophan_upgrade.sock");
+
     let mut server = Server::new_with_opt_and_conf(
         None,
         ServerConf {
@@ -89,19 +97,12 @@ fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), Strin
             pid_file: String::with_capacity(0),
             error_log: None,
             user: Some(config.master.user.clone()),
-            upgrade_sock: String::from("/tmp/ophan_upgrade.sock"),
+            upgrade_sock: upgrade_sock.to_string_lossy().into_owned(),
             work_stealing: false,
             threads: config.master.workers,
             ..Default::default()
         },
     );
-
-    let pid_path = effective_pid_path(pid_file.as_deref(), Some(get_config_path()));
-    if let Some(parent) = pid_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create pid directory '{}': {e}", parent.display()))?;
-    }
 
     let _pig_guard = PidGuard::create(pid_path)?;
 

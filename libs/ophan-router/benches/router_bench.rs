@@ -11,7 +11,7 @@ fn bench_insert_exact(c: &mut Criterion) {
             let mut router = Router::<u32>::new();
             for i in 0..10_000 {
                 let path = format!("/route/{i}");
-                black_box(router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap());
+                router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap();
             }
         });
     });
@@ -189,7 +189,7 @@ fn bench_insert_100k_exact(c: &mut Criterion) {
             let mut router = Router::<u32>::new();
             for i in 0..100_000 {
                 let path = format!("/r/{i}");
-                black_box(router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap());
+                router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap();
             }
         });
     });
@@ -223,7 +223,7 @@ fn bench_insert_10k_deep_params(c: &mut Criterion) {
             let mut router = Router::<u32>::new();
             for i in 0..10_000 {
                 let path = format!("/a/{i}/b/{i}/c/{i}/d/{i}/e/{i}");
-                black_box(router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap());
+                router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap();
             }
         });
     });
@@ -239,7 +239,7 @@ fn bench_insert_reverse_order(c: &mut Criterion) {
             let mut router = Router::<u32>::new();
             for i in (0..10_000).rev() {
                 let path = format!("/route/{i}");
-                black_box(router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap());
+                router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap();
             }
         });
     });
@@ -251,7 +251,7 @@ fn bench_insert_common_prefix(c: &mut Criterion) {
             let mut router = Router::<u32>::new();
             for i in 0..10_000 {
                 let path = format!("/api/v1/users/{i}/posts/{i}/comments/{i}");
-                black_box(router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap());
+                router.add_route(&path, HttpMethodSet::all(), vec![], i).unwrap();
             }
         });
     });
@@ -264,8 +264,8 @@ fn bench_insert_interleaved(c: &mut Criterion) {
             for i in 0..5_000 {
                 let a = format!("/static/{i}");
                 let b = format!("/api/{i}");
-                black_box(router.add_route(&a, HttpMethodSet::all(), vec![], i).unwrap());
-                black_box(router.add_route(&b, HttpMethodSet::all(), vec![], i + 5_000).unwrap());
+                router.add_route(&a, HttpMethodSet::all(), vec![], i).unwrap();
+                router.add_route(&b, HttpMethodSet::all(), vec![], i + 5_000).unwrap();
             }
         });
     });

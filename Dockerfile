@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════
 # Ophan API Gateway — Docker Image (Multi-Architecture)
-# Build:   docker buildx build --platform linux/amd64,linux/arm64 -t ophan:latest --push .
-# Run:     docker run -d -p 80:80 -p 443:443 -v /path/to/config:/etc/ophan ophan:latest
+# Build:   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/zsweiter/ophan:latest --push .
+# Run:     docker run -d -p 80:80 -p 443:443 -v /path/to/config:/etc/ophan ghcr.io/zsweiter/ophan:latest
 # ═══════════════════════════════════════════════════════════════
 
 FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-1.94 AS chef
@@ -53,9 +53,12 @@ RUN mkdir -p /etc/ophan /var/www/ /var/log/ophan /var/run/ophan
 COPY --from=builder /ophan /usr/local/bin/ophan
 
 COPY defaults/config/ /etc/ophan/
+COPY defaults/config/ /usr/share/ophan/config/
 COPY defaults/www/ /var/www/
+COPY entrypoint.sh /entrypoint.sh
 
-RUN chown -R ophan:ophan /etc/ophan /var/www /var/log/ophan /var/run/ophan \
+RUN chown -R ophan:ophan /etc/ophan /var/www /var/log/ophan /var/run/ophan /run \
+    && chmod +x /entrypoint.sh \
     && setcap 'cap_net_bind_service=+ep' /usr/local/bin/ophan \
     && apk del libcap # Clean up to keep the image lightweight
 
@@ -67,5 +70,6 @@ EXPOSE 443
 ENV OPHAN_CONFIG_DIR=/etc/ophan
 ENV OPHAN_WWW_DIR=/var/www
 ENV OPHAN_PID_FILE=/var/run/ophan/ophan.pid
+ENV OPHAN_SOCKET_PATH=/var/run/ophan_gateway.sock
 
-ENTRYPOINT ["/usr/local/bin/ophan"]
+ENTRYPOINT ["/entrypoint.sh"]

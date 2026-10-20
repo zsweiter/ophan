@@ -7,6 +7,9 @@ pub enum Command {
     #[arg(short = "t", flag = "--test", help = "Validate configuration syntax")]
     Test,
 
+    #[arg(short = "v", flag = "--version", help = "Print version and exit")]
+    Version,
+
     #[cfg(unix)]
     #[arg(flag = "--doctor", help = "Run diagnostics and system health checks")]
     Doctor,

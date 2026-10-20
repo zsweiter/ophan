@@ -18,6 +18,22 @@ pub enum RawSecretKey<'a> {
     Base64(&'a str),
 }
 
+/// A secret given either inline or as an `env("NAME")` reference.
+#[derive(Debug, Clone)]
+pub enum RawSecretValue<'a> {
+    Env(EnvVar<'a>),
+    Literal(&'a str),
+}
+
+impl RawSecretValue<'_> {
+    pub fn resolve(&self) -> Result<String, String> {
+        match self {
+            Self::Literal(value) => Ok((*value).to_owned()),
+            Self::Env(env) => env.get_value().ok_or_else(|| format!("environment variable '{}' is not set", env.0)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RawConfig<'a> {
     pub master: RawMaster<'a>,
@@ -325,6 +341,7 @@ pub struct RawAuthConfig<'a> {
     pub issuer: Option<&'a str>,
     pub audience: Option<&'a str>,
     pub client_id: Option<&'a str>,
+    pub client_secret: Option<RawSecretValue<'a>>,
     pub mode: Option<RawAuthMode<'a>>,
     pub dpop_proof: Option<&'a str>,
     pub sources: Option<Vec<RawTokenSource<'a>>>,

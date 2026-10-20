@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -1040,6 +1041,7 @@ fn parse_raw_auth_config(pairs: pest::iterators::Pairs<Rule>) -> Result<RawAuthC
         issuer: None,
         audience: None,
         client_id: None,
+        client_secret: None,
         mode: None,
         dpop_proof: None,
         sources: None,
@@ -1057,6 +1059,9 @@ fn parse_raw_auth_config(pairs: pest::iterators::Pairs<Rule>) -> Result<RawAuthC
             },
             Rule::auth_mode => {
                 config.mode = Some(parse_raw_auth_mode(body));
+            },
+            Rule::auth_client_secret => {
+                config.client_secret = body.into_inner().next().map(parse_raw_secret);
             },
             _ => {
                 if let Some((key, value)) = extract_key_value_from_pair(body) {
@@ -1217,6 +1222,13 @@ fn parse_raw_refresh(pair: pest::iterators::Pair<Rule>) -> RawRefreshConfig {
     }
 
     RawRefreshConfig { enabled, endpoint, sources, inject }
+}
+
+fn parse_raw_secret(pair: pest::iterators::Pair<'_, Rule>) -> RawSecretValue<'_> {
+    match pair.as_rule() {
+        Rule::env => RawSecretValue::Env(EnvVar(Cow::Borrowed(extract_str(pair.into_inner().next().unwrap())))),
+        _ => RawSecretValue::Literal(extract_str(pair)),
+    }
 }
 
 fn parse_raw_auth_mode(pair: pest::iterators::Pair<Rule>) -> RawAuthMode {
@@ -1984,6 +1996,34 @@ policy helmet "web-strict" {
                 assert_eq!(config.level, Some("strict"));
             },
             _ => panic!("expected Helmet policy"),
+        }
+    }
+
+    #[test]
+    fn test_parse_auth_client_secret() {
+        let input = r#"
+name = "test-gw"
+policy auth "env" {
+    issuer = "https://auth.example.com"
+    client_secret = env("OPHAN_CLIENT_SECRET")
+}
+policy auth "literal" {
+    issuer = "https://auth.example.com"
+    client_secret = "s3cret"
+}
+"#;
+        let gw = parse_raw_gateway(input).unwrap();
+        match &gw.policies[0] {
+            RawPolicy::Auth { config, .. } => {
+                assert!(matches!(&config.client_secret, Some(RawSecretValue::Env(env)) if env.0 == "OPHAN_CLIENT_SECRET"));
+            },
+            _ => panic!("expected Auth policy"),
+        }
+        match &gw.policies[1] {
+            RawPolicy::Auth { config, .. } => {
+                assert!(matches!(config.client_secret, Some(RawSecretValue::Literal("s3cret"))));
+            },
+            _ => panic!("expected Auth policy"),
         }
     }
 
