@@ -155,6 +155,6 @@ jobs:
                       all_artifacts/*.zip
                       all_artifacts/*.sha256
                   fail_on_unmatched_files: false
-                  overwrite: true
+                  overwrite_files: true
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
