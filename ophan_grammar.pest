@@ -180,9 +180,10 @@ policy_type = @{ "auth" | "waf" | "cors" | "limiter" | "helmet" }
 policy_body = _{ sources_block | refresh_block | rules_block | auth_field | waf_field | cors_field | limiter_field | helmet_field }
 
 // Auth fields
-auth_field = _{ auth_issuer | auth_client_id | auth_audience | auth_dpop_proof | auth_exclude_paths | auth_mode }
+auth_field = _{ auth_issuer | auth_client_id | auth_client_secret | auth_audience | auth_dpop_proof | auth_exclude_paths | auth_mode }
 auth_issuer = { "issuer" ~ "=" ~ string }
 auth_client_id = { "client_id" ~ "=" ~ string }
+auth_client_secret = { "client_secret" ~ "=" ~ (env | string) }
 auth_audience = { "audience" ~ "=" ~ string }
 auth_dpop_proof = { "dpop_proof" ~ "=" ~ string }
 auth_exclude_paths = { "exclude_paths" ~ "=" ~ array }

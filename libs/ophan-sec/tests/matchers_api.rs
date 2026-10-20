@@ -103,7 +103,7 @@ fn suffix_matches_end() {
 #[test]
 fn regex_matches_via_regexset() {
     let mut tm = empty();
-    tm.regex_patterns = Some(RegexSet::new(&[r"^/api/v\d+/", r"union\s+select"]).expect("regex"));
+    tm.regex_patterns = Some(RegexSet::new([r"^/api/v\d+/", r"union\s+select"]).expect("regex"));
     assert!(tm.is_match(b"/api/v2/users"));
     assert!(tm.is_match(b"select 1 union select 2"));
     assert!(!tm.is_match(b"/static/x"));
@@ -145,7 +145,7 @@ fn composition_first_hit_returns_true() {
     let mut tm = empty();
     tm.prefix_patterns = vec!["/api/".into()];
     tm.suffix_patterns = vec![".php".into()];
-    tm.regex_patterns = Some(RegexSet::new(&[r"union\s+select"]).unwrap());
+    tm.regex_patterns = Some(RegexSet::new([r"union\s+select"]).unwrap());
     assert!(tm.is_match(b"/api/login.php")); // both prefix and suffix — still true
 }
 

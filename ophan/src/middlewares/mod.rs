@@ -11,7 +11,7 @@ use crate::{
         auth::{AuthContext, AuthMiddleware},
         cors::{CorsContext, CorsMiddleware},
         helmet::Helmet,
-        limiter::{RateLimitContext, RateLimitMiddleware},
+        limiter::{LimiterIdentifier, RateLimitContext, RateLimitMiddleware},
         waf::{WafContext, WafEngineMiddleware},
     },
     state::HttpRoute,
@@ -83,11 +83,11 @@ impl Pipeline {
             }
         }
 
-        if let Some(limiter) = route.limiter_policy.as_ref() {
-            match self.rate_limit_middleware.on_request(req, limiter, ctx) {
-                FilterAction::Continue => { /* continue */ },
-                action => return action,
-            }
+        let limiter = route.limiter_policy.as_ref();
+        let limit_after_auth = limiter.is_some_and(|l| matches!(l.identifier, LimiterIdentifier::Token(_)));
+
+        if !limit_after_auth && let Some(limiter) = limiter {
+            run_policy_filter!(self.rate_limit_middleware, limiter, req, ctx);
         }
 
         if let Some(auth) = route.auth_policy.as_ref() {
@@ -95,6 +95,10 @@ impl Pipeline {
                 FilterAction::Continue => { /* continue */ },
                 action => return action,
             }
+        }
+
+        if limit_after_auth && let Some(limiter) = limiter {
+            run_policy_filter!(self.rate_limit_middleware, limiter, req, ctx);
         }
 
         FilterAction::Continue

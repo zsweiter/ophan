@@ -11,7 +11,6 @@ EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
 Environment="CONFIG_PATH=@CONFIGDIR@/master.conf"
 ExecStart=@SBINDIR@/ophan -c @CONFIGDIR@/master.conf
-ExecReload=@SBINDIR@/ophan -s reload
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
 Restart=always

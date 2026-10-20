@@ -111,7 +111,7 @@ Options:
   --bindir PATH       Binary directory (default: PREFIX/bin)
   --config PATH       Configuration directory (default: /etc/ophan)
   --no-service        Do not install systemd service
-  --upgrade           Hot upgrade: replace binary with new version (SIGQUIT)
+  --upgrade           Upgrade: replace binary and restart the running service
   --force             Force overwrite of existing config/binary even if same version
   --help              Show this help
 
@@ -286,10 +286,11 @@ VERSION="${VERSION#v}"
 
 ok "Version: v${VERSION}"
 
-if [[ -x "$BINDIR/ophan" && "$FORCE" != true && "$UPGRADE" != true ]]; then
-    INSTALLED_VER="$("$BINDIR/ophan" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+if [[ -x "$BINDIR/ophan" && "$FORCE" != true ]]; then
+    INSTALLED_VER="$("$BINDIR/ophan" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
     if [[ "$INSTALLED_VER" == "$VERSION" ]]; then
-        info "Already at v${VERSION} at $BINDIR/ophan (use --force to reinstall or --upgrade for hot upgrade)"
+        ok "Already at v${VERSION} at $BINDIR/ophan — nothing to do (use --force to reinstall)"
+        exit 0
     fi
 fi
 
@@ -394,9 +395,18 @@ step "Installing Ophan"
 
 mkdir -p "$BINDIR"
 
+if [[ -f "$CONFIGDIR/master.conf" && "$FORCE" != true ]]; then
+    if ! "$EXTRACTED/ophan" -t -c "$CONFIGDIR/master.conf" >/dev/null 2>&1; then
+        "$EXTRACTED/ophan" -t -c "$CONFIGDIR/master.conf" || true
+        fail "Existing config $CONFIGDIR/master.conf is not valid for v${VERSION} — nothing was changed (fix it or use --force)"
+    fi
+    ok "Existing config is valid for v${VERSION}"
+fi
+
+BACKUP_BIN=""
 if [[ -f "$BINDIR/ophan" ]]; then
-    BACKUP_BIN="${BINDIR}/ophan.bak.$(date +%s)"
-    cp -a "$BINDIR/ophan" "$BACKUP_BIN" 2>/dev/null || true
+    BACKUP_BIN="${BINDIR}/ophan.bak"
+    cp -a "$BINDIR/ophan" "$BACKUP_BIN"
     info "Backup of previous binary: $BACKUP_BIN"
 fi
 
@@ -546,59 +556,18 @@ if [[ "$OS" == "linux" &&
       -f "$SERVICE_FILE" ]]; then
 
     if [[ "$UPGRADE" == true ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        step "Hot upgrade (zero-downtime) via Pingora"
+        step "Upgrading service (restart)"
 
-        # Validate new binary can parse current config before signalling
-        if [[ -f "$CONFIGDIR/master.conf" ]]; then
-            if ! "$BINDIR/ophan" -t -c "$CONFIGDIR/master.conf" >/dev/null 2>&1; then
-                warn "Config test failed with new binary — aborting hot upgrade"
-                fail "Run with --force to bypass or fix $CONFIGDIR/master.conf"
-            fi
-            ok "Config test passed with new binary"
-        fi
-
-        PIDFILE="/run/ophan.pid"
-        # Try to get PID from config if custom
-        if [[ -f "$CONFIGDIR/master.conf" ]]; then
-            CFG_PID="$(sed -n 's/.*pid[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIGDIR/master.conf" | head -n1 || true)"
-            [[ -n "$CFG_PID" ]] && PIDFILE="$CFG_PID"
-        fi
-
-        OLD_PID="$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]' || true)"
-
-        if [[ -n "$OLD_PID" ]] && kill -0 "$OLD_PID" 2>/dev/null; then
-            info "Current PID: $OLD_PID → sending SIGQUIT for graceful upgrade"
-            if kill -QUIT "$OLD_PID" 2>/dev/null; then ok "Sent SIGQUIT to $OLD_PID"
-            elif "$BINDIR/ophan" --upgrade >/dev/null 2>&1; then ok "Sent upgrade via ophan --upgrade"
-            else warn "SIGQUIT failed"; fi
-
-            sleep 2
-            # Health check — new PID should appear
-            for i in $(seq 1 12); do
-                sleep 1
-                if [[ -f "$PIDFILE" ]]; then
-                    NEW_PID="$(cat "$PIDFILE" 2>/dev/null | tr -d '[:space:]' || true)"
-                    if [[ -n "$NEW_PID" && "$NEW_PID" != "$OLD_PID" ]] && kill -0 "$NEW_PID" 2>/dev/null; then
-                        ok "Hot upgrade succeeded — new PID $NEW_PID"
-                        break
-                    fi
-                fi
-                if [[ $i -eq 12 ]]; then
-                    warn "Hot upgrade did not rotate PID — falling back to restart"
-                    systemctl restart "$SERVICE_NAME" || fail "systemctl restart failed"
-                    ok "Service restarted via systemd"
-                fi
-            done
+        if systemctl restart "$SERVICE_NAME" && sleep 2 && systemctl is-active --quiet "$SERVICE_NAME"; then
+            ok "Service restarted on v${VERSION}"
+        elif [[ -n "$BACKUP_BIN" ]]; then
+            warn "Service failed on v${VERSION} — rolling back to previous binary"
+            install -m 755 "$BACKUP_BIN" "$BINDIR/ophan"
+            systemctl restart "$SERVICE_NAME" || true
+            fail "Upgrade rolled back — check: journalctl -u $SERVICE_NAME -n 100"
         else
-            warn "No running PID found — doing cold start"
-            systemctl restart "$SERVICE_NAME" 2>/dev/null || systemctl start "$SERVICE_NAME" || fail "systemctl start failed"
-            ok "Service started"
+            fail "Service not active after upgrade — check: journalctl -u $SERVICE_NAME -f"
         fi
-
-        # Final health
-        sleep 1
-        if systemctl is-active --quiet "$SERVICE_NAME"; then ok "Service is active"
-        else fail "Service not active after upgrade — check: journalctl -u $SERVICE_NAME -f"; fi
 
     else
         step "Starting service"

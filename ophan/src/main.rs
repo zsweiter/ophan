@@ -10,6 +10,16 @@ fn main() -> ExitCode {
     ExitCode::Ok
 }
 
+fn apply_config_path(path: &str) -> Result<(), ExitCode> {
+    config::set_config_path(path).map_err(|_| {
+        eprintln!(
+            "Error: config path already initialized to '{}', cannot use '{path}'",
+            config::get_config_path().display()
+        );
+        ExitCode::Software
+    })
+}
+
 fn main_entry() -> Result<(), ExitCode> {
     let app = CliApp::parse();
 
@@ -21,14 +31,19 @@ fn main_entry() -> Result<(), ExitCode> {
     match app.cmd {
         None => {
             if let Some(ref cfg) = app.config {
-                let _ = config::set_config_path(cfg);
+                apply_config_path(cfg)?;
             }
             ophan::bootstrap(app.pid_file.clone())
         },
 
+        Some(Command::Version) => {
+            println!("ophan {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        },
+
         Some(Command::Test) => {
             let path = app.config.unwrap_or_default();
-            let _ = config::set_config_path(&path);
+            apply_config_path(&path)?;
 
             match config::load_config() {
                 Ok(_) => {
@@ -91,7 +106,7 @@ fn main_entry() -> Result<(), ExitCode> {
             let mut all_ok = true;
 
             if let Some(ref path) = app.config {
-                let _ = config::set_config_path(path);
+                apply_config_path(path)?;
             }
 
             let (pid, pid_path) = read_pid(app.pid_file.as_deref(), Some(get_config_path()))?;

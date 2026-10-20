@@ -231,9 +231,12 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
         let route = Arc::clone(ctx.route()?);
         let request = session.as_downstream().req_header();
 
-        self.pipeline.on_request_body(request, &route, body, end_of_stream, ctx).await;
-
-        Ok(())
+        match self.pipeline.on_request_body(request, &route, body, end_of_stream, ctx).await {
+            FilterAction::Continue => Ok(()),
+            FilterAction::Reject(status) | FilterAction::EarlyResponse(status) => {
+                Err(Error::explain(HTTPStatus(status.as_u16()), "request body rejected by policy"))
+            },
+        }
     }
 
     /// Phase 2 – Select upstream backend (only for upstream routes).
