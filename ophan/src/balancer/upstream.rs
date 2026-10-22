@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -22,9 +23,14 @@ pub struct Upstream {
 
     last_check_ms: AtomicU64,
     pub checking: AtomicBool,
-    rr_counter: AtomicUsize,
-    lc_counter: AtomicUsize,
 }
+
+thread_local! {
+    /// Per-thread selection ticket, each thread starting at its own offset.
+    static TICKET: Cell<usize> = Cell::new(NEXT_THREAD_OFFSET.fetch_add(1, Ordering::Relaxed));
+}
+
+static NEXT_THREAD_OFFSET: AtomicUsize = AtomicUsize::new(0);
 
 impl Upstream {
     pub fn new(id: usize, name: ImmerStr, backends: Vec<Arc<Backend>>, lb: BalanceStrategy) -> Self {
@@ -34,8 +40,6 @@ impl Upstream {
             health: None,
             last_check_ms: AtomicU64::new(0),
             checking: AtomicBool::new(false),
-            rr_counter: AtomicUsize::new(0),
-            lc_counter: AtomicUsize::new(0),
             servers: ArcSwap::new(Arc::new(backends)),
             balance_strategy: lb,
         }
@@ -69,9 +73,12 @@ impl Upstream {
     #[inline]
     pub fn next_ticket(&self) -> usize {
         match self.balance_strategy {
-            BalanceStrategy::RoundRobin => self.rr_counter.fetch_add(1, Ordering::Relaxed),
-            BalanceStrategy::LeastConnections => self.lc_counter.fetch_add(1, Ordering::Relaxed),
-            _ => 0, // For other strategies, we can return 0 or handle accordingly
+            BalanceStrategy::RoundRobin | BalanceStrategy::LeastConnections => TICKET.with(|ticket| {
+                let value = ticket.get();
+                ticket.set(value.wrapping_add(1));
+                value
+            }),
+            BalanceStrategy::IpHash => 0,
         }
     }
 }

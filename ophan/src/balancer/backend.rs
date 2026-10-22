@@ -12,8 +12,6 @@ use pingora::upstreams::peer::{ALPN, HttpPeer};
 
 use crate::config::{NetworkProtocol, UpstreamAddress};
 
-const EMPTY_HOST: &str = "one.one.one.one";
-
 /// How long a resolved host backend address is reused before resolving again.
 const DNS_TTL: Duration = Duration::from_secs(30);
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,14 +32,7 @@ pub struct Backend {
     pub protocol: NetworkProtocol,
     pub host_addr: Option<HostAddr>,
 
-    active_conns: AtomicUsize,
-    score: AtomicUsize,
-    total_requests: AtomicU64,
-    failed_requests: AtomicU64,
-    bytes_in: AtomicU64,
-    bytes_out: AtomicU64,
-    total_latency_ns: AtomicU64,
-    latency_samples: AtomicU64,
+    stats: BackendStats,
 
     weight: AtomicU32,
     healthy: AtomicBool,
@@ -83,19 +74,20 @@ impl std::fmt::Display for BackendAddr {
     }
 }
 
+#[derive(Debug, Default)]
+#[repr(align(64))]
+struct BackendStats {
+    active_conns: AtomicUsize,
+    total_requests: AtomicU64,
+    failed_requests: AtomicU64,
+}
+
 impl Backend {
     pub fn new(addr: BackendAddr, weight: u32) -> Self {
         Self {
             addr,
             protocol: NetworkProtocol::default(),
-            active_conns: AtomicUsize::new(0),
-            score: AtomicUsize::new(0),
-            total_requests: AtomicU64::new(0),
-            failed_requests: AtomicU64::new(0),
-            bytes_in: AtomicU64::new(0),
-            bytes_out: AtomicU64::new(0),
-            total_latency_ns: AtomicU64::new(0),
-            latency_samples: AtomicU64::new(0),
+            stats: BackendStats::default(),
             weight: AtomicU32::new(weight),
             healthy: AtomicBool::new(true),
             check_successes: AtomicU32::new(0),
@@ -179,7 +171,7 @@ impl Backend {
     /// Route-independent peer settings. `resolved` is the address of a host backend.
     fn build_peer(&self, resolved: Option<SocketAddr>) -> pingora::Result<HttpPeer> {
         let mut peer = match (&self.addr, resolved) {
-            (BackendAddr::Tcp(addr), _) => HttpPeer::new(addr, false, EMPTY_HOST.to_string()),
+            (BackendAddr::Tcp(addr), _) => HttpPeer::new(addr, false, String::new()),
             (BackendAddr::Host(host), Some(addr)) => HttpPeer::new(addr, host.is_https(), host.sni_name().to_string()),
             (BackendAddr::Host(host), None) => {
                 return Err(pingora::Error::explain(
@@ -188,7 +180,7 @@ impl Backend {
                 ));
             },
             #[cfg(unix)]
-            (BackendAddr::Uds(path), _) => HttpPeer::new_uds(&path.to_string_lossy(), false, EMPTY_HOST.to_string())?,
+            (BackendAddr::Uds(path), _) => HttpPeer::new_uds(&path.to_string_lossy(), false, String::new())?,
         };
 
         let tls = matches!(&self.addr, BackendAddr::Host(host) if host.is_https());
@@ -231,7 +223,6 @@ impl Backend {
     }
 }
 
-#[allow(unused)] // for future use with dinamic routing
 impl Backend {
     pub fn weight(&self) -> u32 {
         self.weight.load(Ordering::Relaxed)
@@ -271,80 +262,31 @@ impl Backend {
     }
 
     pub fn active_conns(&self) -> usize {
-        self.active_conns.load(Ordering::Relaxed)
+        self.stats.active_conns.load(Ordering::Relaxed)
     }
 
     pub fn acquire(&self) {
-        self.active_conns.fetch_add(1, Ordering::Relaxed);
+        self.stats.active_conns.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn release(&self) {
-        let old = self.active_conns.fetch_sub(1, Ordering::Relaxed);
+        let old = self.stats.active_conns.fetch_sub(1, Ordering::Relaxed);
         debug_assert!(old > 0);
     }
 
     pub fn total_requests(&self) -> u64 {
-        self.total_requests.load(Ordering::Relaxed)
+        self.stats.total_requests.load(Ordering::Relaxed)
     }
 
     pub fn failed_requests(&self) -> u64 {
-        self.failed_requests.load(Ordering::Relaxed)
+        self.stats.failed_requests.load(Ordering::Relaxed)
     }
 
     pub fn record_request(&self) {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_failure(&self) {
-        self.failed_requests.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn add_bytes_in(&self, n: u64) {
-        self.bytes_in.fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub fn add_bytes_out(&self, n: u64) {
-        self.bytes_out.fetch_add(n, Ordering::Relaxed);
-    }
-
-    pub fn record_latency_ns(&self, ns: u64) {
-        self.total_latency_ns.fetch_add(ns, Ordering::Relaxed);
-        self.latency_samples.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn avg_latency_ns(&self) -> Option<u64> {
-        let samples = self.latency_samples.load(Ordering::Relaxed);
-        if samples == 0 {
-            return None;
-        }
-
-        let total = self.total_latency_ns.load(Ordering::Relaxed);
-        Some(total / samples)
-    }
-
-    pub fn score(&self) -> usize {
-        self.score.load(Ordering::Relaxed)
-    }
-
-    pub fn update_score(&self) {
-        let conns = self.active_conns.load(Ordering::Acquire);
-        let failures = self.failed_requests.load(Ordering::Acquire);
-        let latency = self.avg_latency_ns().unwrap_or(0);
-
-        let computed = (conns * 10) + (failures as usize * 50) + (latency as usize / 1_000_000);
-
-        self.score.store(computed, Ordering::Release);
-    }
-
-    pub fn load_factor(&self) -> usize {
-        let conns = self.active_conns.load(Ordering::Acquire);
-        let failures = self.failed_requests.load(Ordering::Acquire) as usize;
-        let latency = self.avg_latency_ns().unwrap_or(0) as usize;
-
-        conns + failures * 2 + latency / 1_000_000
-    }
-
-    pub fn is_overloaded(&self, threshold: usize) -> bool {
-        self.load_factor() > threshold
+        self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -87,9 +87,8 @@ process and takes over; the old process stops accepting and drains in-flight req
 
 ## Shutdown
 
-`SIGTERM` stops accepting connections, waits 3 seconds and then gives in-flight requests up
-to 5 more seconds, which fits the default 10 second stop timeout of Docker. `SIGINT` stops
-immediately.
+`SIGTERM` and `SIGINT` stop accepting connections, wait 3 seconds and then give in-flight
+requests up to 5 more seconds, which fits the default 10 second stop timeout of Docker.
 
 ## Directory Layout
 

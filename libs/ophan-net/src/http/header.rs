@@ -494,3 +494,35 @@ header_values! {
 
     (ENCODING_CHUNKED, "chunked");
 }
+
+/// Header names as written on the wire, for `insert_header`.
+pub mod wire {
+    pub const X_FORWARDED_FOR: &str = "X-Forwarded-For";
+    pub const X_FORWARDED_PROTO: &str = "X-Forwarded-Proto";
+    pub const X_FORWARDED_HOST: &str = "X-Forwarded-Host";
+    pub const X_REAL_IP: &str = "X-Real-IP";
+    pub const X_REQUEST_ID: &str = "X-Request-Id";
+    pub const X_USER_CLAIMS: &str = "X-User-Claims";
+
+    pub const X_RATE_LIMIT_LIMIT: &str = "X-RateLimit-Limit";
+    pub const X_RATE_LIMIT_REMAINING: &str = "X-RateLimit-Remaining";
+    pub const X_RATE_LIMIT_RESET: &str = "X-RateLimit-Reset";
+    pub const RETRY_AFTER: &str = "Retry-After";
+    pub const VARY: &str = "Vary";
+
+    pub const ACCESS_CONTROL_ALLOW_ORIGIN: &str = "Access-Control-Allow-Origin";
+    pub const ACCESS_CONTROL_ALLOW_CREDENTIALS: &str = "Access-Control-Allow-Credentials";
+    pub const ACCESS_CONTROL_EXPOSE_HEADERS: &str = "Access-Control-Expose-Headers";
+    pub const ACCESS_CONTROL_ALLOW_METHODS: &str = "Access-Control-Allow-Methods";
+    pub const ACCESS_CONTROL_ALLOW_HEADERS: &str = "Access-Control-Allow-Headers";
+    pub const ACCESS_CONTROL_MAX_AGE: &str = "Access-Control-Max-Age";
+
+    pub const X_CONTENT_TYPE_OPTIONS: &str = "X-Content-Type-Options";
+    pub const CROSS_ORIGIN_RESOURCE_POLICY: &str = "Cross-Origin-Resource-Policy";
+    pub const CROSS_ORIGIN_OPENER_POLICY: &str = "Cross-Origin-Opener-Policy";
+    pub const CROSS_ORIGIN_EMBEDDER_POLICY: &str = "Cross-Origin-Embedder-Policy";
+    pub const ORIGIN_AGENT_CLUSTER: &str = "Origin-Agent-Cluster";
+    pub const X_DNS_PREFETCH_CONTROL: &str = "X-DNS-Prefetch-Control";
+    pub const X_FRAME_OPTIONS: &str = "X-Frame-Options";
+    pub const REFERRER_POLICY: &str = "Referrer-Policy";
+}

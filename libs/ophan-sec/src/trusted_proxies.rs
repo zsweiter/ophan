@@ -1,5 +1,6 @@
 use flatkit::net::{IpNet, IpSet};
-use http::{HeaderMap, HeaderName};
+use http::header::GetAll;
+use http::{HeaderMap, HeaderName, HeaderValue};
 use ophan_net::http::header;
 use std::net::IpAddr;
 
@@ -93,11 +94,11 @@ impl TrustedProxies {
         }
 
         let values = headers.get_all(header::X_FORWARDED_PROTO);
-        let last = values.iter().next_back()?.to_str().ok()?.rsplit(',').next()?.trim();
+        let last = values.iter().next_back()?.as_bytes().rsplit(|b| *b == b',').next()?.trim_ascii();
 
-        if last.eq_ignore_ascii_case("https") {
+        if last.eq_ignore_ascii_case(b"https") {
             Some("https")
-        } else if last.eq_ignore_ascii_case("http") {
+        } else if last.eq_ignore_ascii_case(b"http") {
             Some("http")
         } else {
             None
@@ -138,31 +139,24 @@ impl TrustedProxies {
             return value.trim().parse::<IpAddr>().ok().map(|ip| ip.to_canonical());
         };
 
-        let mut values = headers.get_all(name).iter();
-        let first = values.next()?.to_str().ok()?;
-
-        match values.next() {
-            None => self.rightmost_untrusted(first.rsplit(',').map(parse_hop)),
-            Some(_) => {
-                let joined = headers.get_all(name).iter().map(|v| v.to_str().ok()).collect::<Option<Vec<_>>>()?.join(",");
-                self.rightmost_untrusted(joined.rsplit(',').map(parse_hop))
-            },
-        }
+        self.rightmost_untrusted(headers.get_all(name), parse_hop)
     }
 
-    /// `hops` iterates from the closest hop to the farthest one.
-    fn rightmost_untrusted(&self, hops: impl Iterator<Item = Option<IpAddr>>) -> Option<IpAddr> {
+    /// Walks the hops from the closest one to the farthest one, across every header line.
+    fn rightmost_untrusted(&self, values: GetAll<'_, HeaderValue>, parse_hop: fn(&str) -> Option<IpAddr>) -> Option<IpAddr> {
         let mut last = None;
 
-        for hop in hops {
-            // An unparsable hop breaks the chain of trust.
-            let ip = hop?.to_canonical();
+        for value in values.iter().rev() {
+            for hop in value.to_str().ok()?.rsplit(',') {
+                // An unparsable hop breaks the chain of trust.
+                let ip = parse_hop(hop)?.to_canonical();
 
-            if !self.is_trusted(ip) {
-                return Some(ip);
+                if !self.is_trusted(ip) {
+                    return Some(ip);
+                }
+
+                last = Some(ip);
             }
-
-            last = Some(ip);
         }
 
         last

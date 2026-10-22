@@ -1,5 +1,5 @@
 use std::{
-    hash::Hash,
+    hash::{BuildHasherDefault, Hash, Hasher},
     net::{IpAddr, Ipv6Addr},
     sync::{Arc, LazyLock},
     time::Instant,
@@ -30,6 +30,29 @@ static KEY_HASHER: LazyLock<ahash::RandomState> = LazyLock::new(ahash::RandomSta
 #[inline]
 pub fn hash_identifier(bytes: &[u8]) -> u64 {
     KEY_HASHER.hash_one(bytes)
+}
+
+/// Hasher for [`LimiterKey`], whose client hash is already seeded: it only mixes the two
+/// words instead of hashing them again.
+#[derive(Default, Clone, Copy)]
+pub struct PrehashedKey(u64);
+
+impl Hasher for PrehashedKey {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(*byte);
+        }
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = self.0.rotate_left(29) ^ value;
+    }
 }
 
 /// Internal rate limit state: either a sliding window or token bucket.
@@ -105,7 +128,7 @@ impl LimiterState {
 /// Idle states are removed by [`MemoryRateLimiter::evict_idle`], which keeps memory
 /// bounded by the number of active clients.
 pub struct MemoryRateLimiter {
-    states: DashMap<LimiterKey, LimiterState, ahash::RandomState>,
+    states: DashMap<LimiterKey, LimiterState, BuildHasherDefault<PrehashedKey>>,
     tracked: AtomicUsize,
     max_tracked: usize,
     start_time: Instant,
@@ -124,7 +147,7 @@ impl MemoryRateLimiter {
 
     pub fn with_capacity(size: usize) -> Self {
         Self {
-            states: DashMap::with_capacity_and_hasher(size, ahash::RandomState::new()),
+            states: DashMap::with_capacity_and_hasher(size, BuildHasherDefault::default()),
             tracked: AtomicUsize::new(0),
             max_tracked: MAX_TRACKED_CLIENTS,
             start_time: Instant::now(),

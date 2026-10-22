@@ -8,9 +8,8 @@ use crate::state::ReloadOutcome;
 /// A Unix shutdown watcher that awaits for Unix signals.
 ///
 /// - `SIGQUIT`: graceful upgrade
-/// - `SIGTERM`: graceful terminate
+/// - `SIGTERM`, `SIGINT`: graceful terminate
 /// - `SIGHUP`: graceful config reload (hot-swap if possible, upgrade if listeners changed)
-/// - `SIGINT`: fast shutdown
 pub struct UnixShutdownSignalWatch {
     pub state: Arc<AppState>,
 }
@@ -49,7 +48,7 @@ impl ShutdownSignalWatch for UnixShutdownSignalWatch {
                     return ShutdownSignal::GracefulTerminate
                 },
                 _ = sigint.recv() => {
-                    return ShutdownSignal::FastShutdown
+                    return ShutdownSignal::GracefulTerminate
                 },
             }
         }

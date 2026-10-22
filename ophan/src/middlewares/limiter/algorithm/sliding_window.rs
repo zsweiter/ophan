@@ -63,14 +63,17 @@ impl SlidingWindow {
             0
         };
 
-        let weighted_previous = previous_count as f64 * weight;
+        // Counts scaled by the window size, so the weighted sum stays exact in integers.
+        let window_scale = u128::from(window_size_ms);
+        let weighted_previous = u128::from(previous_count) * u128::from(window_size_ms - elapsed);
+        let limit = u128::from(self.max_requests) * window_scale;
         let reset_after = (window_size_ms - elapsed).div_ceil(1000);
         let mut current_count = self.current_count.load(Ordering::Acquire);
 
         loop {
-            let effective = weighted_previous + current_count as f64;
+            let effective = weighted_previous + (u128::from(current_count) + 1) * window_scale;
 
-            if effective + 1.0 > self.max_requests as f64 {
+            if effective > limit {
                 break;
             }
 
@@ -79,7 +82,7 @@ impl SlidingWindow {
                 .compare_exchange_weak(current_count, current_count + 1, Ordering::AcqRel, Ordering::Acquire)
             {
                 Ok(_) => {
-                    let remaining = self.max_requests.saturating_sub((effective + 1.0) as u64);
+                    let remaining = ((limit - effective) / window_scale) as u64;
                     return RateLimitResult { allowed: true, remaining, retry_after: 0, reset_after };
                 },
                 Err(actual) => current_count = actual,

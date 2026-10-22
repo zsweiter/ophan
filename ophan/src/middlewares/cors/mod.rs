@@ -6,6 +6,7 @@ pub use context::CorsContext;
 
 use crate::gateway::OphanCtx;
 use crate::middlewares::FilterAction;
+use ophan_net::http::header::wire;
 
 use http::{HeaderValue, Method, StatusCode, header};
 use ophan_net::http::vary::VarySet;
@@ -102,29 +103,29 @@ impl CorsMiddleware {
             return;
         };
 
-        let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+        let _ = response.insert_header(wire::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
 
         if cors.allow_credentials {
-            let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_CREDENTIALS, HeaderValue::from_static("true"));
+            let _ = response.insert_header(wire::ACCESS_CONTROL_ALLOW_CREDENTIALS, HeaderValue::from_static("true"));
         }
 
         if let Some(ref expose) = config.allow_expose_headers {
-            let _ = response.insert_header(header::ACCESS_CONTROL_EXPOSE_HEADERS, expose.clone());
+            let _ = response.insert_header(wire::ACCESS_CONTROL_EXPOSE_HEADERS, expose.clone());
         }
 
         if cors.is_preflight {
             if let Some(ref methods) = config.allow_methods {
-                let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_METHODS, methods.clone());
+                let _ = response.insert_header(wire::ACCESS_CONTROL_ALLOW_METHODS, methods.clone());
             }
 
             if let Some(ref allow_hdrs) = config.allow_headers {
-                let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, allow_hdrs.clone());
+                let _ = response.insert_header(wire::ACCESS_CONTROL_ALLOW_HEADERS, allow_hdrs.clone());
             } else if let Some(req_hdrs) = cors.allow_headers.as_ref() {
-                let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, req_hdrs.clone());
+                let _ = response.insert_header(wire::ACCESS_CONTROL_ALLOW_HEADERS, req_hdrs.clone());
             }
 
             if let Some(ref max_age) = config.allow_max_age {
-                let _ = response.insert_header(header::ACCESS_CONTROL_MAX_AGE, max_age.clone());
+                let _ = response.insert_header(wire::ACCESS_CONTROL_MAX_AGE, max_age.clone());
             }
         }
     }

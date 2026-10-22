@@ -79,11 +79,11 @@ impl RateLimitMiddleware {
     }
 
     pub fn prepare_response(&self, res: &mut ResponseParts, limiter: &RateLimitContext) {
-        let _ = res.insert_header(header::X_RATE_LIMIT_LIMIT, HeaderValue::from(limiter.limit.0));
-        let _ = res.insert_header(header::X_RATE_LIMIT_REMAINING, HeaderValue::from(limiter.remaining.0));
+        let _ = res.insert_header(header::wire::X_RATE_LIMIT_LIMIT, HeaderValue::from(limiter.limit.0));
+        let _ = res.insert_header(header::wire::X_RATE_LIMIT_REMAINING, HeaderValue::from(limiter.remaining.0));
 
         if limiter.reset_at.0 > 0 {
-            let _ = res.insert_header(header::X_RATE_LIMIT_RESET, HeaderValue::from(limiter.reset_at.0));
+            let _ = res.insert_header(header::wire::X_RATE_LIMIT_RESET, HeaderValue::from(limiter.reset_at.0));
         }
     }
 

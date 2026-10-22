@@ -7,7 +7,7 @@ use pingora::listeners::PreTlsProcess;
 use pingora::protocols::GetSocketDigest;
 use pingora::protocols::l4::socket::SocketAddr;
 use pingora::protocols::l4::stream::Stream as L4Stream;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr as InetAddr};
+use std::net::{IpAddr, SocketAddr as InetAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -71,7 +71,7 @@ impl ListenerRuntime {
 /// Listeners of a gateway, identified by their full bind address.
 #[derive(Debug, Default)]
 pub struct ListenerTable {
-    tcp: AHashMap<InetAddr, Arc<ListenerRuntime>>,
+    tcp: Vec<(InetAddr, Arc<ListenerRuntime>)>,
     unix: AHashMap<String, Arc<ListenerRuntime>>,
     /// Used when a connection matches no configured listener.
     unknown: Arc<ListenerRuntime>,
@@ -86,7 +86,9 @@ impl ListenerTable {
 
             match &listener.address {
                 ListenerAddress::Tcp(addr) => {
-                    table.tcp.insert(*addr, runtime);
+                    let addr = InetAddr::new(addr.ip().to_canonical(), addr.port());
+                    table.tcp.retain(|(bound, _)| *bound != addr);
+                    table.tcp.push((addr, runtime));
                 },
                 #[cfg(unix)]
                 ListenerAddress::Uds(path) => {
@@ -114,11 +116,18 @@ impl ListenerTable {
     /// bound to `0.0.0.0` sees connections on the host's real addresses.
     fn lookup_tcp(&self, local: InetAddr) -> Option<&Arc<ListenerRuntime>> {
         let local = InetAddr::new(local.ip().to_canonical(), local.port());
+        let mut wildcard = None;
 
-        self.tcp
-            .get(&local)
-            .or_else(|| self.tcp.get(&InetAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), local.port())))
-            .or_else(|| self.tcp.get(&InetAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), local.port())))
+        for (bound, runtime) in &self.tcp {
+            if *bound == local {
+                return Some(runtime);
+            }
+            if wildcard.is_none() && bound.port() == local.port() && bound.ip().is_unspecified() {
+                wildcard = Some(runtime);
+            }
+        }
+
+        wildcard
     }
 }
 

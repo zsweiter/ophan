@@ -90,9 +90,12 @@ impl<T> TracingId<T> {
     #[inline]
     fn generate_header_value() -> HeaderValue {
         let mut buffer = Uuid::encode_buffer();
-        let uuid = Uuid::new_v4().hyphenated().encode_lower(&mut buffer);
+        let len = Uuid::new_v4().hyphenated().encode_lower(&mut buffer).len();
 
-        HeaderValue::from_str(uuid).expect("generated UUID must always be a valid HTTP header value")
+        let mut bytes = bytes::Bytes::from_owner(buffer);
+        bytes.truncate(len);
+
+        HeaderValue::from_maybe_shared(bytes).expect("generated UUID must always be a valid HTTP header value")
     }
 
     /// Returns the header value, generating a UUID lazily if necessary.

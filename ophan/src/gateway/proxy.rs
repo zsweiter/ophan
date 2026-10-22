@@ -10,10 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::balancer::{Backend, BalancerError};
-use crate::config::{BackendTarget, GatewayConfig, StaticUpstream, UpstreamConfig};
+use crate::config::{BackendTarget, GatewayConfig, StaticUpstream};
 use crate::gateway::error::{self, ErrorKind, GatewayError, build_error_body};
 use crate::gateway::forwarding::Forwarding;
-use crate::gateway::listener::ListenerRuntime;
 use crate::logging::RequestId;
 use crate::metrics::GatewayMetrics;
 use crate::middlewares::auth::AuthMiddleware;
@@ -44,9 +43,7 @@ pub struct OphanCtx {
     /// Context snapshot taken when the request arrived. Every phase uses it, so a
     /// concurrent hot reload never mixes routes and upstreams from two configs.
     pub app: Option<Arc<AppContext>>,
-    pub listener: Option<Arc<ListenerRuntime>>,
     pub matched_route: Option<Arc<HttpRoute>>,
-    pub upstream: Option<Arc<UpstreamConfig>>,
     pub selected_backend: Option<Arc<Backend>>,
     /// Original client address (see `trusted_proxies`).
     pub client_addr: IpAddr,
@@ -59,6 +56,7 @@ pub struct OphanCtx {
     pub vary: VarySet,
 
     pub request_body_bytes: u64,
+    pub max_request_size: Option<u64>,
     /// Scheme the client used: TLS on our listener, or `X-Forwarded-Proto` from a trusted proxy.
     pub scheme: &'static str,
 
@@ -77,8 +75,6 @@ impl OphanCtx {
     pub fn new() -> Self {
         Self {
             app: None,
-            listener: None,
-            upstream: None,
             matched_route: None,
             selected_backend: None,
             client_addr: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
@@ -87,6 +83,7 @@ impl OphanCtx {
             policies: PolicyContext::default(),
             vary: VarySet::default(),
             request_body_bytes: 0,
+            max_request_size: None,
             scheme: "http",
 
             request_id: RequestId::empty(),
@@ -126,7 +123,7 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
     /// and scheme, applies keep-alive, idle timeout and request size, and normalizes the path.
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()> {
         let app = self.app_context.load_full();
-        let listener = Arc::clone(app.listeners.lookup(session.as_downstream().server_addr()));
+        let listener = app.listeners.lookup(session.as_downstream().server_addr());
 
         let tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
         let peer = session.as_downstream().client_addr().and_then(|a| a.as_inet()).map(|a| a.ip().to_canonical());
@@ -169,8 +166,8 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
         if let Some(limit) = listener.max_request_size {
             let declared = session
                 .get_header(header::CONTENT_LENGTH)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok());
+                .and_then(|v| std::str::from_utf8(v.as_bytes().trim_ascii()).ok())
+                .and_then(|v| v.parse::<u64>().ok());
 
             if declared.is_some_and(|len| len > limit) {
                 return Err(Error::explain(
@@ -199,7 +196,7 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
             session.req_header_mut().set_uri(uri);
         }
 
-        ctx.listener = Some(listener);
+        ctx.max_request_size = listener.max_request_size;
         ctx.app = Some(app);
 
         Ok(())
@@ -208,7 +205,7 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
     /// Phase 0 – Entry point for every incoming request.
     ///
     /// 1. Resolves the `[HttpRoute]` via the router (host + method + path).
-    /// 2. Stores `matched_route`, `backend_candidate`, and `client_addr` in ctx.
+    /// 2. Stores `matched_route` in ctx once the middleware pipeline ran.
     /// 3. Runs the middleware pipeline (`pre_request`):
     ///    - On `Respond` → writes the response directly (e.g. CORS preflight).
     ///    - On `Reject`  → writes an error response via `reject`.
@@ -221,63 +218,51 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
     /// - After this hook, `ctx.matched_route` is always `Some`.
     /// - `ctx.client_addr` is updated from the actual downstream socket.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        let Some(state) = ctx.app.clone() else {
+        ctx.request_id = match session.get_header(&header::X_REQUEST_ID) {
+            None => RequestId::new_uuid(),
+            Some(header) => RequestId::from(header),
+        };
+
+        let Some(app) = ctx.app.as_ref() else {
             return Err(Error::new_str("no application context"));
         };
 
         let request = session.as_downstream().req_header();
         let host = ophan_net::http::utils::client_host(request, false);
 
-        ctx.request_id = match session.get_header(&header::X_REQUEST_ID) {
-            None => RequestId::new_uuid(),
-            Some(header) => RequestId::from(header),
-        };
-
-        let matched = match state.router.match_route(host, &request.method, request.uri.path()) {
-            Ok(m) => m,
+        let route = match app.router.match_route(host, &request.method, request.uri.path()) {
+            Ok(matched) => Arc::clone(matched.value),
             Err(err) => {
                 let error = GatewayError::from(err.status_code());
-                return self.early_reject(session, ctx, error).await;
+                return Box::pin(self.early_reject(session, ctx, error)).await;
             },
         };
 
-        let matched_route = Arc::clone(matched.value);
-        ctx.matched_route = Some(Arc::clone(&matched_route));
-
-        if let Some(headers) = matched_route.headers.as_ref() {
+        if let Some(headers) = route.headers.as_ref() {
             headers.apply_to_client_request(session.req_header_mut());
         }
 
         let request = session.as_downstream().req_header();
+        let action = self.pipeline.on_request(request, &route, ctx).await;
+        ctx.matched_route = Some(route);
+        let route = ctx.route()?;
 
-        match self.pipeline.on_request(request, &matched_route, ctx).await {
+        match action {
             FilterAction::Continue => { /* continue */ },
             FilterAction::Reject(status) => {
                 self.count_rejection(ctx, status);
-                return self.early_reject(session, ctx, GatewayError::from(status)).await;
+                return Box::pin(self.early_reject(session, ctx, GatewayError::from(status))).await;
             },
             FilterAction::EarlyResponse(status) => {
-                return self.early_response(session, ctx, status).await;
+                return Box::pin(self.early_response(session, ctx, status)).await;
             },
         }
 
-        match &matched_route.backend {
-            BackendTarget::Upstream(target) => {
-                ctx.upstream = Some(Arc::clone(target));
-            },
+        match &route.backend {
+            BackendTarget::Upstream(_) => {},
 
             BackendTarget::Static(static_cfg) => {
-                match static_cfg.as_ref() {
-                    StaticUpstream::Local(serve_config) => match self.static_service.serve(serve_config, request).await {
-                        Ok(response) => {
-                            self.terminate_response(session, ctx, response).await?;
-                        },
-                        Err(error) => {
-                            self.handle_error(session, ctx, GatewayError::from(error.status)).await?;
-                        },
-                    },
-                }
-
+                Box::pin(self.serve_static(session, ctx, static_cfg)).await?;
                 return Ok(RequestFlow::TERMINATE);
             },
         }
@@ -301,10 +286,7 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
         if let Some(chunk) = body.as_ref() {
             ctx.request_body_bytes += chunk.len() as u64;
 
-            let max_request_size = ctx.listener.as_ref().and_then(|l| l.max_request_size);
-
-            // Enforce the listener's max request size limit. If the request body exceeds this limit, return a 413 error.
-            if max_request_size.is_some_and(|limit| ctx.request_body_bytes > limit) {
+            if ctx.max_request_size.is_some_and(|limit| ctx.request_body_bytes > limit) {
                 return Err(Error::explain(HTTPStatus(413), "request body exceeds the listener limit"));
             }
         }
@@ -335,7 +317,10 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
             previous.record_failure();
         }
 
-        let (Some(upstream), Some(app)) = (ctx.upstream.as_ref(), ctx.app.as_ref()) else {
+        let (Some(route), Some(app)) = (ctx.matched_route.as_deref(), ctx.app.as_deref()) else {
+            return Err(Error::new_str("no upstream candidate"));
+        };
+        let BackendTarget::Upstream(upstream) = &route.backend else {
             return Err(Error::new_str("no upstream candidate"));
         };
 
@@ -350,7 +335,6 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
         ctx.selected_backend = Some(Arc::clone(&backend));
 
         let mut peer = backend.peer().await?;
-        let route = ctx.route()?;
         let websocket = backend.protocol.allow_websocket_upgrade();
 
         if !websocket
@@ -423,7 +407,7 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
             upstream_request.insert_header(header::HOST, host.clone())?;
         }
 
-        upstream_request.insert_header(header::X_REQUEST_ID, ctx.request_id.as_header_value().clone())?;
+        upstream_request.insert_header(header::wire::X_REQUEST_ID, ctx.request_id.as_header_value().clone())?;
 
         if let Some(headers) = route.headers.as_ref() {
             headers.apply_to_upstream_request(upstream_request)?;
@@ -574,7 +558,7 @@ impl OphanGateway {
 
     /// Request id and route `outbound_headers` rules, applied to every response we send.
     fn finish_response(response: &mut ResponseParts, ctx: &OphanCtx) {
-        let _ = response.insert_header(header::X_REQUEST_ID, ctx.request_id.as_header_value().clone());
+        let _ = response.insert_header(header::wire::X_REQUEST_ID, ctx.request_id.as_header_value().clone());
 
         if let Some(headers) = ctx.matched_route.as_ref().and_then(|r| r.headers.as_ref()) {
             headers.apply_to_client_response(response);
@@ -618,7 +602,6 @@ impl OphanGateway {
         self.terminate_response(session, ctx, response).await
     }
 
-    #[inline]
     async fn terminate_response(&self, session: &mut Session, ctx: &OphanCtx, response: HttpResponse) -> Result<()> {
         let (mut header, body) = response.into_parts();
         let route = ctx.matched_route.as_deref();
@@ -629,17 +612,22 @@ impl OphanGateway {
         session.write_response(header, body).await
     }
 
-    // AUto reject helpers
+    async fn serve_static(&self, session: &mut Session, ctx: &OphanCtx, upstream: &StaticUpstream) -> Result<()> {
+        match upstream {
+            StaticUpstream::Local(serve_config) => match self.static_service.serve(serve_config, session.req_header()).await {
+                Ok(response) => self.terminate_response(session, ctx, response).await,
+                Err(error) => self.handle_error(session, ctx, GatewayError::from(error.status)).await,
+            },
+        }
+    }
+
     /// Writes an error response and terminates the request.
-    #[inline(always)]
     async fn early_reject(&self, session: &mut Session, ctx: &OphanCtx, err: GatewayError) -> Result<bool> {
         self.handle_error(session, ctx, err).await?;
         Ok(RequestFlow::TERMINATE)
     }
 
-    // Auto reject helpers
-    /// Writes an normal response and terminates the request.
-    #[inline(always)]
+    /// Writes an empty response and terminates the request.
     async fn early_response(&self, session: &mut Session, ctx: &OphanCtx, status: StatusCode) -> Result<bool> {
         let mut response = HttpResponse::with_capacity(status, 2);
 

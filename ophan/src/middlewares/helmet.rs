@@ -45,8 +45,6 @@ impl HelmetConfig {
     }
 }
 
-/// Disables the legacy buggy browser XSS auditor to prevent side-channel exploits.
-/// @see <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-XSS-Protection>
 /// Prevents browsers from guessing/sniffing the MIME type of a response away from what is declared.
 /// @see <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options>
 const CONTENT_TYPE_NOSNIFF: &str = "nosniff";
@@ -77,10 +75,6 @@ const OAC_ENABLED: &str = "?1";
 /// @see <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-DNS-Prefetch-Control>
 const DNS_PREFETCH_OFF: &str = "off";
 
-/// Restricts Adobe Flash and PDF web clients from loading unauthorized cross-domain policy files.
-/// @see <https://owasp.org/www-project-secure-headers/#x-permitted-cross-domain-policies>
-/// Legacy header for IE8+ that blocks running downloads directly in the site context.
-/// @see <https://learn.microsoft.com/en-us/previous-versions/windows/internet-explorer/ie-developer/compatibility/dd565647(v=vs.85)>
 /// Forces cross-origin resources to explicitly grant loading permission via CORS or CORP.
 /// @see <https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cross-Origin-Embedder-Policy>
 const COEP_REQUIRE_CORP: &str = "require-corp";
@@ -108,19 +102,34 @@ impl Helmet {
     /// Documents a browser renders (HTML, XHTML, SVG) also get the framing, referrer and
     /// cross-origin isolation headers, which have no effect on other content types.
     pub fn prepare_response(&self, config: HelmetConfig, response: &mut ResponseParts) {
-        push_if_missing(response, header::X_CONTENT_TYPE_OPTIONS, CONTENT_TYPE_NOSNIFF);
+        push_if_missing(
+            response,
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::wire::X_CONTENT_TYPE_OPTIONS,
+            CONTENT_TYPE_NOSNIFF,
+        );
 
         if config.is_disabled() {
             return;
         }
 
-        push_if_missing(response, header::CROSS_ORIGIN_RESOURCE_POLICY, CORP_SAME_ORIGIN);
+        push_if_missing(
+            response,
+            header::CROSS_ORIGIN_RESOURCE_POLICY,
+            header::wire::CROSS_ORIGIN_RESOURCE_POLICY,
+            CORP_SAME_ORIGIN,
+        );
 
         let strict = matches!(config.level, HelmetLevel::Strict);
 
         if !config.is_web() {
             if strict {
-                push_if_missing(response, header::REFERRER_POLICY, REFERRER_NO_REFERRER);
+                push_if_missing(
+                    response,
+                    header::REFERRER_POLICY,
+                    header::wire::REFERRER_POLICY,
+                    REFERRER_NO_REFERRER,
+                );
             }
             return;
         }
@@ -129,17 +138,34 @@ impl Helmet {
             return;
         }
 
-        push_if_missing(response, header::CROSS_ORIGIN_OPENER_POLICY, COOP_SAME_ORIGIN);
-        push_if_missing(response, header::ORIGIN_AGENT_CLUSTER, OAC_ENABLED);
-        push_if_missing(response, header::X_DNS_PREFETCH_CONTROL, DNS_PREFETCH_OFF);
+        push_if_missing(
+            response,
+            header::CROSS_ORIGIN_OPENER_POLICY,
+            header::wire::CROSS_ORIGIN_OPENER_POLICY,
+            COOP_SAME_ORIGIN,
+        );
+        push_if_missing(
+            response,
+            header::ORIGIN_AGENT_CLUSTER,
+            header::wire::ORIGIN_AGENT_CLUSTER,
+            OAC_ENABLED,
+        );
+        push_if_missing(
+            response,
+            header::X_DNS_PREFETCH_CONTROL,
+            header::wire::X_DNS_PREFETCH_CONTROL,
+            DNS_PREFETCH_OFF,
+        );
         push_if_missing(
             response,
             header::X_FRAME_OPTIONS,
+            header::wire::X_FRAME_OPTIONS,
             if strict { FRAME_DENY } else { FRAME_SAMEORIGIN },
         );
         push_if_missing(
             response,
             header::REFERRER_POLICY,
+            header::wire::REFERRER_POLICY,
             if strict {
                 REFERRER_NO_REFERRER
             } else {
@@ -148,28 +174,33 @@ impl Helmet {
         );
 
         if strict {
-            push_if_missing(response, header::CROSS_ORIGIN_EMBEDDER_POLICY, COEP_REQUIRE_CORP);
+            push_if_missing(
+                response,
+                header::CROSS_ORIGIN_EMBEDDER_POLICY,
+                header::wire::CROSS_ORIGIN_EMBEDDER_POLICY,
+                COEP_REQUIRE_CORP,
+            );
         }
     }
 
     /// Whether the response is a document a browser renders.
     fn is_document(response: &ResponseParts) -> bool {
-        let Some(content_type) = response.headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()) else {
+        let Some(content_type) = response.headers.get(header::CONTENT_TYPE) else {
             return false;
         };
 
-        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        let media_type = content_type.as_bytes().split(|b| *b == b';').next().unwrap_or_default().trim_ascii();
 
-        ["text/html", "application/xhtml+xml", "image/svg+xml"]
+        [b"text/html".as_slice(), b"application/xhtml+xml", b"image/svg+xml"]
             .iter()
             .any(|t| media_type.eq_ignore_ascii_case(t))
     }
 }
 
 #[inline]
-fn push_if_missing(response: &mut ResponseParts, name: HeaderName, value: &'static str) {
+fn push_if_missing(response: &mut ResponseParts, name: HeaderName, wire: &'static str, value: &'static str) {
     if !response.headers.contains_key(&name) {
-        let _ = response.insert_header(name, HeaderValue::from_static(value));
+        let _ = response.insert_header(wire, HeaderValue::from_static(value));
     }
 }
 

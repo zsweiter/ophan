@@ -1,6 +1,7 @@
 use http::HeaderValue;
 use ophan_net::http::header;
 use pingora::http::RequestHeader;
+use std::io::Write;
 use std::net::IpAddr;
 
 /// `X-Forwarded-*` and `X-Real-IP` headers sent to the upstream.
@@ -19,27 +20,74 @@ pub struct Forwarding<'a> {
 
 impl Forwarding<'_> {
     pub fn apply(&self, request: &mut RequestHeader) -> pingora::Result<()> {
-        let received = request.headers.get(header::X_FORWARDED_FOR).and_then(|v| v.to_str().ok());
+        let client = Self::ip_value(self.client);
 
-        let forwarded_for = match (received, self.peer) {
-            (Some(chain), Some(peer)) if self.peer_trusted => format!("{chain}, {peer}"),
-            (Some(chain), None) if self.peer_trusted => chain.to_string(),
-            (_, Some(peer)) => peer.to_string(),
-            (_, None) => self.client.to_string(),
-        };
+        match (request.headers.get(header::X_FORWARDED_FOR), self.peer) {
+            (Some(chain), Some(peer)) if self.peer_trusted => {
+                let mut value = Vec::with_capacity(chain.len() + 41);
+                value.extend_from_slice(chain.as_bytes());
+                value.extend_from_slice(b", ");
+                let _ = write!(value, "{peer}");
 
-        request.insert_header(header::X_FORWARDED_FOR, forwarded_for)?;
-        request.insert_header(header::X_REAL_IP, self.client.to_string())?;
-        request.insert_header(header::X_FORWARDED_PROTO, HeaderValue::from_static(self.scheme))?;
+                let value = HeaderValue::from_maybe_shared(bytes::Bytes::from(value))
+                    .map_err(|e| pingora::Error::because(pingora::ErrorType::InternalError, "invalid X-Forwarded-For", e))?;
+                request.insert_header(header::wire::X_FORWARDED_FOR, value)?;
+            },
+            (Some(_), None) if self.peer_trusted => {},
+            (_, Some(peer)) if peer != self.client => {
+                request.insert_header(header::wire::X_FORWARDED_FOR, Self::ip_value(peer))?
+            },
+            _ => request.insert_header(header::wire::X_FORWARDED_FOR, client.clone())?,
+        }
+
+        request.insert_header(header::wire::X_REAL_IP, client)?;
+        request.insert_header(header::wire::X_FORWARDED_PROTO, HeaderValue::from_static(self.scheme))?;
 
         match self.host {
-            Some(host) => request.insert_header(header::X_FORWARDED_HOST, host.clone())?,
+            Some(host) => request.insert_header(header::wire::X_FORWARDED_HOST, host.clone())?,
             None => {
                 request.remove_header(&header::X_FORWARDED_HOST);
             },
         }
 
         Ok(())
+    }
+
+    fn ip_value(ip: IpAddr) -> HeaderValue {
+        let mut buf = [0u8; 45];
+
+        let len = match ip {
+            IpAddr::V4(v4) => {
+                let mut len = 0;
+                for (i, octet) in v4.octets().into_iter().enumerate() {
+                    if i > 0 {
+                        buf[len] = b'.';
+                        len += 1;
+                    }
+                    if octet >= 100 {
+                        buf[len] = b'0' + octet / 100;
+                        len += 1;
+                    }
+                    if octet >= 10 {
+                        buf[len] = b'0' + octet / 10 % 10;
+                        len += 1;
+                    }
+                    buf[len] = b'0' + octet % 10;
+                    len += 1;
+                }
+                len
+            },
+            IpAddr::V6(v6) => {
+                let mut cursor = std::io::Cursor::new(&mut buf[..]);
+                let _ = write!(cursor, "{v6}");
+                cursor.position() as usize
+            },
+        };
+
+        let mut bytes = bytes::Bytes::from_owner(buf);
+        bytes.truncate(len);
+
+        HeaderValue::from_maybe_shared(bytes).unwrap_or_else(|_| HeaderValue::from_static(""))
     }
 }
 
@@ -57,6 +105,13 @@ mod tests {
 
     fn header_of(req: &RequestHeader, name: &str) -> Option<String> {
         req.headers.get(name).map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[test]
+    fn formats_addresses() {
+        for ip in ["0.0.0.0", "9.10.99.100", "255.255.255.255", "203.0.113.9", "2001:db8::1", "::ffff:10.0.0.1"] {
+            assert_eq!(Forwarding::ip_value(ip.parse().unwrap()).to_str().unwrap(), ip);
+        }
     }
 
     #[test]

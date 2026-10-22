@@ -119,38 +119,57 @@ impl VarySet {
             return;
         }
 
-        let existing = response.headers.get_all(header::VARY).iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>();
+        let mut present = VarySet::empty();
+        let mut received = 0;
 
-        if existing.is_empty() {
-            let value = if self == VarySet::ORIGIN {
-                Some(HeaderValue::from_static("origin"))
-            } else {
-                Option::<HeaderValue>::from(self)
-            };
+        for value in response.headers.get_all(header::VARY) {
+            received += value.len() + 2;
+            for token in value.as_bytes().split(|b| *b == b',') {
+                present |= Self::from_token(token.trim_ascii());
+            }
+        }
 
-            if let Some(value) = value {
-                let _ = response.insert_header(header::VARY, value);
+        if received == 0 {
+            if let Some(value) = Option::<HeaderValue>::from(self) {
+                let _ = response.insert_header(crate::http::header::wire::VARY, value);
             }
             return;
         }
 
-        let has_token = |token: &str| existing.iter().flat_map(|v| v.split(',')).any(|t| t.trim().eq_ignore_ascii_case(token));
-
-        if has_token("*") {
+        let missing = self.difference(present);
+        if present.contains(VarySet::STAR) || missing.is_empty() {
             return;
         }
 
-        let ours = self.to_string();
-        let missing = ours.split(',').map(str::trim).filter(|t| !t.is_empty() && !has_token(t)).collect::<Vec<_>>();
-
-        if missing.is_empty() {
-            return;
+        let mut merged = Vec::with_capacity(received + 64);
+        for value in response.headers.get_all(header::VARY) {
+            if !merged.is_empty() {
+                merged.extend_from_slice(b", ");
+            }
+            merged.extend_from_slice(value.as_bytes());
         }
+        missing.write_tokens(&mut merged);
 
-        let merged = existing.iter().copied().chain(missing).collect::<Vec<_>>().join(", ");
+        if let Ok(value) = HeaderValue::from_maybe_shared(bytes::Bytes::from(merged)) {
+            let _ = response.insert_header(crate::http::header::wire::VARY, value);
+        }
+    }
 
-        if let Ok(value) = HeaderValue::from_str(&merged) {
-            let _ = response.insert_header(header::VARY, value);
+    fn from_token(token: &[u8]) -> VarySet {
+        ALL_VARIES
+            .iter()
+            .find(|(_, vary)| vary.as_str().as_bytes().eq_ignore_ascii_case(token))
+            .map_or(VarySet::empty(), |(flag, _)| *flag)
+    }
+
+    fn write_tokens(self, out: &mut Vec<u8>) {
+        for (flag, vary) in ALL_VARIES {
+            if self.contains(flag) {
+                if !out.is_empty() {
+                    out.extend_from_slice(b", ");
+                }
+                out.extend_from_slice(vary.as_str().as_bytes());
+            }
         }
     }
 }
@@ -158,10 +177,15 @@ impl VarySet {
 impl From<VarySet> for Option<HeaderValue> {
     fn from(vary_set: VarySet) -> Self {
         if vary_set.is_empty() {
-            None
-        } else {
-            HeaderValue::from_str(&vary_set.to_string()).ok()
+            return None;
         }
+        if vary_set == VarySet::ORIGIN {
+            return Some(HeaderValue::from_static("origin"));
+        }
+
+        let mut value = Vec::with_capacity(64);
+        vary_set.write_tokens(&mut value);
+        HeaderValue::from_maybe_shared(bytes::Bytes::from(value)).ok()
     }
 }
 
@@ -214,6 +238,20 @@ mod merge_tests {
         let mut res = response_with_vary(&["origin"]);
         VarySet::ORIGIN.merge_into(&mut res);
         assert_eq!(vary_of(&res), vec!["origin"]);
+    }
+
+    #[test]
+    fn matches_tokens_case_insensitively() {
+        let mut res = response_with_vary(&["Accept-Encoding, ORIGIN"]);
+        (VarySet::ORIGIN | VarySet::ACCEPT).merge_into(&mut res);
+        assert_eq!(vary_of(&res), vec!["Accept-Encoding, ORIGIN, accept"]);
+    }
+
+    #[test]
+    fn star_is_left_alone() {
+        let mut res = response_with_vary(&["*"]);
+        VarySet::ORIGIN.merge_into(&mut res);
+        assert_eq!(vary_of(&res), vec!["*"]);
     }
 
     #[test]

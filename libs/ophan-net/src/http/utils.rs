@@ -39,9 +39,8 @@ pub fn strip_port(host: &str) -> &str {
 pub fn normalize_path(path: &str) -> Option<String> {
     let bytes = path.as_bytes();
 
-    let suspicious = memchr::memchr(b'%', bytes).is_some()
-        || memchr::memmem::find(bytes, b"/.").is_some()
-        || memchr::memmem::find(bytes, b"//").is_some();
+    let suspicious =
+        memchr::memchr2_iter(b'%', b'/', bytes).any(|i| bytes[i] == b'%' || matches!(bytes.get(i + 1), Some(b'/' | b'.')));
 
     if !suspicious {
         return None;

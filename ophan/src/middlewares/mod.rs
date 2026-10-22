@@ -22,6 +22,8 @@ use http::StatusCode;
 use ophan_net::http::vary::VarySet;
 use ophan_net::proxy::{RequestParts, ResponseParts};
 
+const X_USER_CLAIMS: http::HeaderName = http::HeaderName::from_static("x-user-claims");
+
 #[derive(Debug, Default)]
 pub struct PolicyContext {
     pub cors: Option<CorsContext>,         // stage 1
@@ -102,7 +104,7 @@ impl Pipeline {
 
         if let Some(auth) = route.auth_policy.as_ref() {
             let scheme = ctx.scheme;
-            match self.auth_middleware.on_request_with_scheme(req, scheme, auth, ctx).await {
+            match Box::pin(self.auth_middleware.on_request_with_scheme(req, scheme, auth, ctx)).await {
                 FilterAction::Continue => { /* continue */ },
                 action => return action,
             }
@@ -150,14 +152,14 @@ impl Pipeline {
         _route: &HttpRoute,
         ctx: &PolicyContext,
     ) -> Result<(), pingora::BError> {
-        upstream_request.remove_header("x-user-claims");
+        upstream_request.remove_header(&X_USER_CLAIMS);
 
         if let Some(auth) = ctx.auth.as_ref() {
             let header_value = auth
                 .claims_header()
                 .ok_or_else(|| pingora::Error::explain(pingora::ErrorType::InternalError, "failed to encode user claims"))?;
 
-            upstream_request.insert_header("x-user-claims", header_value.clone())?;
+            upstream_request.insert_header(ophan_net::http::header::wire::X_USER_CLAIMS, header_value.clone())?;
         }
 
         Ok(())

@@ -7,7 +7,7 @@
 //!
 //! | Windows event | `ShutdownSignal`        | Unix equivalent   |
 //! |--------------|-------------------------|-------------------|
-//! | `Ctrl+C`     | `FastShutdown`          | `SIGINT`          |
+//! | `Ctrl+C`     | `GracefulTerminate`     | `SIGINT`          |
 //! | `Ctrl+Break` | `GracefulTerminate`     | `SIGTERM`         |
 //!
 //! ## Known limitations on Windows (NT)
@@ -52,9 +52,7 @@ impl ShutdownSignalWatch for WindowsShutdownSignalWatch {
         let ctrl_break = windows::ctrl_break().expect("failed to install Ctrl+Break handler");
 
         tokio::select! {
-            // Fast shutdown: drop in-flight work immediately.
-            _ = ctrl_c => ShutdownSignal::FastShutdown,
-            // Graceful terminate: drain existing connections.
+            _ = ctrl_c => ShutdownSignal::GracefulTerminate,
             _ = ctrl_break => ShutdownSignal::GracefulTerminate,
         }
     }

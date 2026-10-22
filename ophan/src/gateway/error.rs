@@ -140,6 +140,7 @@ impl From<StatusCode> for GatewayError {
     }
 }
 
+#[cold]
 pub fn build_error_body(error: &GatewayError, accept: Option<&[u8]>, request_id: &str) -> (StatusCode, Bytes, HeaderValue) {
     let status: StatusCode = error.kind.into();
 
