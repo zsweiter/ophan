@@ -52,6 +52,13 @@ pub struct RawMaster<'a> {
     pub pid: &'a str,
     pub error_log: &'a str,
     pub includes: Vec<&'a str>,
+    pub metrics: Option<RawMetrics<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawMetrics<'a> {
+    pub listen: Option<&'a str>,
+    pub path: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,9 +90,26 @@ pub struct RawListener<'a> {
     pub address: &'a str,
     pub protocols: Vec<&'a str>,
     pub tls: Option<RawTls<'a>>,
+    pub permissions: Option<&'a str>,
+    pub firewall: Option<RawFirewall<'a>>,
+    pub trusted_proxies: Option<RawTrustedProxies<'a>>,
+    /// Deprecated: superseded by `firewall` and `trusted_proxies`.
     pub network_policy: Option<RawNetworkPolicy<'a>>,
     pub limits: Option<RawListenerLimits>,
     pub timeouts: Option<RawListenerTimeouts>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RawFirewall<'a> {
+    pub allow: Vec<&'a str>,
+    pub deny: Vec<&'a str>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RawTrustedProxies<'a> {
+    pub allowed_ips: Vec<&'a str>,
+    pub real_ip_header: Option<&'a str>,
+    pub on_untrusted: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +128,7 @@ pub struct RawNetworkPolicy<'a> {
     pub blocked_ip_ranges: Vec<&'a str>,
     pub real_ip_header: Option<&'a str>,
     pub proxy_allowed_ips: Option<Vec<&'a str>>,
+    pub policy: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]

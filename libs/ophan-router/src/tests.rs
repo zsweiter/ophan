@@ -109,14 +109,81 @@ fn multi_segment_wildcard_single() {
 }
 
 #[test]
-fn multi_segment_wildcard_no_match_empty() {
+fn multi_segment_wildcard_matches_its_base() {
     let mut r = router();
     r.add_route("/api/files/*", HttpMethodSet::all(), vec![], 50).unwrap();
-    // Catch-all requires at least one path segment after the prefix
+
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/api/files").unwrap().value, 50);
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/api/files/").unwrap().value, 50);
     assert_eq!(
-        r.match_route(None, &http::Method::GET, "/api/files").unwrap_err(),
+        r.match_route(None, &http::Method::GET, "/api/filesystem").unwrap_err(),
         MatchError::NotFound
     );
+}
+
+#[test]
+fn explicit_base_route_wins_over_wildcard() {
+    let mut r = router();
+    r.add_route("/api/*", HttpMethodSet::all(), vec![], 1).unwrap();
+    r.add_route("/api", HttpMethodSet::all(), vec![], 2).unwrap();
+
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/api").unwrap().value, 2);
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/api/x").unwrap().value, 1);
+}
+
+#[test]
+fn root_after_catch_all_does_not_conflict() {
+    let mut r = router();
+    r.add_route("/*", HttpMethodSet::all(), vec![], 1).unwrap();
+    r.add_route("/", HttpMethodSet::all(), vec![], 2).unwrap();
+
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/").unwrap().value, 2);
+}
+
+#[test]
+fn route_is_registered_on_every_host() {
+    let mut r = router();
+    r.add_route("/x", HttpMethodSet::all(), vec!["a.com", "b.com"], 7).unwrap();
+
+    assert_eq!(*r.match_route(Some("a.com"), &http::Method::GET, "/x").unwrap().value, 7);
+    assert_eq!(*r.match_route(Some("b.com:8080"), &http::Method::GET, "/x").unwrap().value, 7);
+}
+
+#[test]
+fn route_without_methods_accepts_all_on_shared_host() {
+    let mut r = router();
+    r.add_route("/get-only", HttpMethodSet::new(HttpMethod::GET), vec!["a.com"], 1).unwrap();
+    r.add_route("/any", HttpMethodSet::new(HttpMethod::from_bits(0)), vec!["a.com"], 2).unwrap();
+
+    assert_eq!(*r.match_route(Some("a.com"), &http::Method::POST, "/any").unwrap().value, 2);
+}
+
+#[test]
+fn unknown_path_is_not_found_before_method_check() {
+    let mut r = router();
+    r.add_route("/x", HttpMethodSet::new(HttpMethod::GET), vec!["a.com"], 1).unwrap();
+
+    assert_eq!(
+        r.match_route(Some("a.com"), &http::Method::POST, "/missing").unwrap_err(),
+        MatchError::NotFound
+    );
+}
+
+#[test]
+fn trailing_slash_pattern_matches() {
+    let mut r = router();
+    r.add_route("/users/", HttpMethodSet::all(), vec![], 1).unwrap();
+
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/users").unwrap().value, 1);
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/users/").unwrap().value, 1);
+}
+
+#[test]
+fn ipv6_host_with_port() {
+    let mut r = router();
+    r.add_route("/", HttpMethodSet::all(), vec!["::1"], 9).unwrap();
+
+    assert_eq!(*r.match_route(Some("[::1]:8080"), &http::Method::GET, "/").unwrap().value, 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -348,20 +415,23 @@ fn method_vhost_specific_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn merge_methods_on_same_host() {
+fn methods_are_checked_per_route_on_same_host() {
     let mut r = Router::new();
     r.add_route("/a", HttpMethodSet::new(HttpMethod::GET), vec!["merge.test"], 1).unwrap();
     r.add_route("/b", HttpMethodSet::new(HttpMethod::POST), vec!["merge.test"], 2).unwrap();
-    // Both methods should be allowed
+
     assert_eq!(*r.match_route(Some("merge.test"), &http::Method::GET, "/a").unwrap().value, 1);
-    assert_eq!(
-        *r.match_route(Some("merge.test"), &http::Method::POST, "/a").unwrap().value,
-        1
-    );
-    assert_eq!(*r.match_route(Some("merge.test"), &http::Method::GET, "/b").unwrap().value, 2);
     assert_eq!(
         *r.match_route(Some("merge.test"), &http::Method::POST, "/b").unwrap().value,
         2
+    );
+    assert_eq!(
+        r.match_route(Some("merge.test"), &http::Method::POST, "/a").unwrap_err(),
+        MatchError::MethodNotAllowed
+    );
+    assert_eq!(
+        r.match_route(Some("merge.test"), &http::Method::GET, "/b").unwrap_err(),
+        MatchError::MethodNotAllowed
     );
 }
 

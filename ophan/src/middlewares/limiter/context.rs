@@ -36,7 +36,7 @@ pub struct RateLimitContext {
     /// Number of requests remaining in the current window.
     pub remaining: RemainingRequests,
 
-    /// Unix timestamp when the current rate limit window resets.
+    /// Seconds until the quota is fully restored, or until the next request is allowed when limited.
     ///
     /// A value of `0` indicates that no reset time should be emitted.
     pub reset_at: ResetAt,

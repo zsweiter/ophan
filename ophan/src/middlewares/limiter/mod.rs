@@ -3,14 +3,15 @@ mod config;
 mod context;
 mod store;
 
-use std::hash::Hasher;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 pub use config::{LimiterConfig, LimiterIdentifier, LimiterRate, RateLimitAlgorithm};
 pub use context::RateLimitContext;
 use ophan_auth::Claims;
 use ophan_net::http::header;
 use ophan_net::proxy::{RequestParts, ResponseParts};
+pub use store::MemoryRateLimiter;
 
 use http::{HeaderMap, HeaderValue, StatusCode};
 
@@ -37,6 +38,12 @@ impl RateLimitMiddleware {
         Self { limiter: RateLimiter::new(LimiterBackend::new_memory(1024)) }
     }
 
+    pub fn store(&self) -> Arc<MemoryRateLimiter> {
+        match self.limiter.backend() {
+            LimiterBackend::Memory(store) => Arc::clone(store),
+        }
+    }
+
     pub fn on_request(&self, request: &RequestParts, config: &LimiterConfig, ctx: &mut OphanCtx) -> FilterAction {
         if config.skip_patterns.as_ref().is_some_and(|p| p.is_match(request.uri.path().as_bytes())) {
             return FilterAction::Continue;
@@ -44,16 +51,24 @@ impl RateLimitMiddleware {
 
         let claims = ctx.policies.auth.as_ref().map(|a| &a.claims);
 
-        let current_epoch = self.limiter.current_epoch();
-        let limiter_key = self.resolve_key(config, ctx.client_addr, claims, &request.headers, current_epoch);
+        let limiter_key = self.resolve_key(config, ctx.client_addr, claims, &request.headers);
 
         let result = self.limiter.consume(limiter_key, config);
 
+        let limit = match config.algorithm {
+            RateLimitAlgorithm::TokenBucket => config.bucket_capacity(),
+            RateLimitAlgorithm::SlidingWindow => config.limit(),
+        };
+
         ctx.policies.limiter = Some(RateLimitContext {
             limited: !result.allowed,
-            limit: context::RateLimit(config.limit()),
+            limit: context::RateLimit(limit),
             remaining: context::RemainingRequests(result.remaining),
-            reset_at: context::ResetAt(result.retry_after),
+            reset_at: context::ResetAt(if result.allowed {
+                result.reset_after
+            } else {
+                result.retry_after
+            }),
         });
 
         if !result.allowed {
@@ -72,53 +87,42 @@ impl RateLimitMiddleware {
         }
     }
 
-    pub fn resolve_key(
-        &self,
-        config: &LimiterConfig,
-        ip: IpAddr,
-        claims: Option<&Claims>,
-        headers: &HeaderMap,
-        epoch: u64,
-    ) -> LimiterKey {
+    pub fn resolve_key(&self, config: &LimiterConfig, ip: IpAddr, claims: Option<&Claims>, headers: &HeaderMap) -> LimiterKey {
+        let scope = config.scope;
+
         match &config.identifier {
-            LimiterIdentifier::Ip => LimiterKey::from_ip(ip, epoch),
+            LimiterIdentifier::Ip => LimiterKey::from_ip(ip, scope),
 
             LimiterIdentifier::Token(path) => {
                 let claim_value = claims.and_then(|c| c.get_by_dot(path));
 
                 let Some(sub) = claim_value else {
-                    tracing::warn!(
+                    tracing::debug!(
                         path = %path,
                         client_ip = %ip,
                         "Token identifier claim not found; degrading to IP rate limiting"
                     );
 
-                    return LimiterKey::from_ip(ip, epoch);
+                    return LimiterKey::from_ip(ip, scope);
                 };
 
-                let mut hasher = ahash::AHasher::default();
-                hasher.write(sub.as_bytes());
-
-                LimiterKey::from_raw_hash(hasher.finish(), epoch)
+                LimiterKey::from_raw_hash(store::hash_identifier(sub.as_bytes()), scope)
             },
 
             LimiterIdentifier::Header(header_name) => {
                 let header_bytes = match headers.get(header_name) {
                     Some(val) => val.as_bytes(),
                     None => {
-                        tracing::warn!(
+                        tracing::debug!(
                             header = %header_name,
                             client_ip = %ip,
                             "Rate limit header not found; degrading to IP rate limiting"
                         );
-                        return LimiterKey::from_ip(ip, epoch);
+                        return LimiterKey::from_ip(ip, scope);
                     },
                 };
 
-                let mut hasher = ahash::AHasher::default();
-                hasher.write(header_bytes);
-
-                LimiterKey::from_raw_hash(hasher.finish(), epoch)
+                LimiterKey::from_raw_hash(store::hash_identifier(header_bytes), scope)
             },
         }
     }
@@ -144,6 +148,7 @@ mod tests {
             algorithm,
             identifier: LimiterIdentifier::Ip,
             skip_patterns: None,
+            scope: 0,
         }
     }
 
@@ -314,8 +319,8 @@ mod tests {
         let cfg = make_config(10, 60, RateLimitAlgorithm::SlidingWindow);
         let headers = HeaderMap::new();
 
-        let key = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
-        let key2 = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
+        let key = mw.resolve_key(&cfg, ip(1), None, &headers);
+        let key2 = mw.resolve_key(&cfg, ip(1), None, &headers);
         assert_eq!(key, key2);
     }
 
@@ -325,8 +330,8 @@ mod tests {
         let cfg = make_config(10, 60, RateLimitAlgorithm::SlidingWindow);
         let headers = HeaderMap::new();
 
-        let k1 = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
-        let k2 = mw.resolve_key(&cfg, ip(2), None, &headers, 0);
+        let k1 = mw.resolve_key(&cfg, ip(1), None, &headers);
+        let k2 = mw.resolve_key(&cfg, ip(2), None, &headers);
         assert_ne!(k1, k2);
     }
 
@@ -354,9 +359,9 @@ mod tests {
             extra_data: serde_json::Map::new(),
         };
 
-        let key = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers, 0);
+        let key = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers);
         // Same header value should produce same key
-        let key2 = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers, 0);
+        let key2 = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers);
         assert_eq!(key, key2);
     }
 
@@ -368,7 +373,7 @@ mod tests {
 
         let headers = HeaderMap::new(); // No header present
 
-        let key = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
+        let key = mw.resolve_key(&cfg, ip(1), None, &headers);
         let ip_key = LimiterKey::from_ip(ip(1), 0);
         assert_eq!(key, ip_key);
     }
@@ -395,8 +400,8 @@ mod tests {
         };
 
         let headers = HeaderMap::new();
-        let key = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers, 0);
-        let key2 = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers, 0);
+        let key = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers);
+        let key2 = mw.resolve_key(&cfg, ip(1), Some(&claims), &headers);
         assert_eq!(key, key2);
     }
 
@@ -408,19 +413,26 @@ mod tests {
 
         let headers = HeaderMap::new();
         // No claims provided → should degrade to IP
-        let key = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
+        let key = mw.resolve_key(&cfg, ip(1), None, &headers);
         let ip_key = LimiterKey::from_ip(ip(1), 0);
         assert_eq!(key, ip_key);
     }
 
     #[test]
-    fn resolve_key_epoch_affects_key() {
+    fn resolve_key_scope_affects_key() {
         let mw = make_middleware();
-        let cfg = make_config(10, 60, RateLimitAlgorithm::SlidingWindow);
+        let cfg_a = LimiterConfig {
+            scope: 1,
+            ..make_config(10, 60, RateLimitAlgorithm::SlidingWindow)
+        };
+        let cfg_b = LimiterConfig {
+            scope: 2,
+            ..make_config(10, 60, RateLimitAlgorithm::SlidingWindow)
+        };
         let headers = HeaderMap::new();
 
-        let k0 = mw.resolve_key(&cfg, ip(1), None, &headers, 0);
-        let k1 = mw.resolve_key(&cfg, ip(1), None, &headers, 1);
+        let k0 = mw.resolve_key(&cfg_a, ip(1), None, &headers);
+        let k1 = mw.resolve_key(&cfg_b, ip(1), None, &headers);
         assert_ne!(k0, k1);
     }
 

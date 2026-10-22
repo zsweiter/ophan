@@ -7,6 +7,7 @@ edition = "2024"
 ophan-net = { workspace = true }
 ahash = { workspace = true }
 http = { workspace = true }
+smallvec = "1"
 
 [dev-dependencies]
 rayon = { workspace = true }

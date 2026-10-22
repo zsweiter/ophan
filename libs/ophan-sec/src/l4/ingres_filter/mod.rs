@@ -85,14 +85,15 @@ impl IngressFilter {
                     return PacketAction::DROP;
                 }
 
-                if port.is_some_and(|p| b.matches_port(p)) {
-                    return PacketAction::DROP;
+                if b.is_allowed(ip, port) {
+                    return PacketAction::PASS;
                 }
 
-                if b.is_allowed(ip, port) {
-                    PacketAction::PASS
-                } else {
+                // Monitored ports only admit allowed networks; any other port passes.
+                if port.is_some_and(|p| b.matches_port(p)) {
                     PacketAction::DROP
+                } else {
+                    PacketAction::PASS
                 }
             },
             #[cfg(all(target_os = "linux", feature = "xdp"))]

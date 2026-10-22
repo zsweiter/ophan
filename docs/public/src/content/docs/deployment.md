@@ -66,7 +66,30 @@ Ophan supports atomic configuration reload without dropping connections. Send a 
 kill -HUP $(cat /run/ophan.pid)
 ```
 
-> **⚠️ In development** — Hot reload behavior is being implemented and may change.
+Routes, upstreams and policies are swapped in place; in-flight requests finish on the old
+configuration. Backends that did not change keep their health state and rate-limit counters
+of unchanged policies are kept.
+
+When listeners, gateways or the `metrics` block change, the process starts a new copy of
+itself, hands it the listening sockets and drains. If the new process cannot start, the
+current one keeps serving.
+
+## Binary Upgrade
+
+Install the new binary over the old one and run:
+
+```bash
+ophan --upgrade -c /etc/ophan/master.conf
+```
+
+The new binary starts in upgrade mode, receives the listening sockets from the running
+process and takes over; the old process stops accepting and drains in-flight requests.
+
+## Shutdown
+
+`SIGTERM` stops accepting connections, waits 3 seconds and then gives in-flight requests up
+to 5 more seconds, which fits the default 10 second stop timeout of Docker. `SIGINT` stops
+immediately.
 
 ## Directory Layout
 

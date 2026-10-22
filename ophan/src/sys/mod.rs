@@ -1,5 +1,7 @@
+pub mod allocator;
 pub mod error;
 pub mod pid;
+pub mod upgrade;
 
 #[cfg(unix)]
 pub mod unix_signal;

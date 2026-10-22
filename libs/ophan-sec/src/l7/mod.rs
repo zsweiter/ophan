@@ -331,7 +331,7 @@ impl<'e> WafSession<'e> {
     ///   (IP → method → path → host → query → user-agent → headers) in
     ///   fail-fast order.
     /// - `client_ip`: already-resolved real client IP (from the proxy's
-    ///   `NetPolicy`); passed rather than re-derived.
+    ///   `TrustedProxies`); passed rather than re-derived.
     ///
     /// Returns [`WafResult::Block`] immediately (fail-fast) when a blocking
     /// rule fires, so the proxy can reject before touching the body.

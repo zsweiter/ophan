@@ -40,10 +40,11 @@ impl SniTableRouter {
     /// Wildcard routes must use the `*.domain.tld` format.
     #[inline]
     pub fn add_route(&mut self, host: &str, target_id: u32) {
+        let host = host.to_ascii_lowercase();
         if let Some(suffix) = host.strip_prefix("*.") {
             self.wildcard.insert(suffix.into(), target_id);
         } else {
-            self.exact.insert(host.into(), target_id);
+            self.exact.insert(host.into_boxed_str(), target_id);
         }
     }
 
@@ -54,18 +55,46 @@ impl SniTableRouter {
     /// - the hostname exceeds configured limits;
     /// - no route matches.
     ///
-    /// Exact routes take precedence over wildcards.
+    /// Exact routes take precedence over wildcards. Matching is ASCII
+    /// case-insensitive, as host names are.
     /// TODO: Handle error like MAX_SNI_LEN and MAX_LABELS
     #[inline]
     pub fn route(&self, sni: &str) -> Option<u32> {
+        // A fully qualified name may end with the root label.
+        let sni = sni.strip_suffix('.').unwrap_or(sni);
         let len = sni.len();
 
         if len == 0 || len > MAX_SNI_LEN {
             return None;
         }
 
+        // Keys are stored lowercase, so a hit on the raw name is always correct.
         if let Some(id) = self.exact.get(sni) {
             return Some(*id);
+        }
+
+        if !sni.bytes().any(|b| b.is_ascii_uppercase()) {
+            return self.route_wildcard(sni);
+        }
+
+        let mut buf = [0u8; MAX_SNI_LEN];
+        let lower = &mut buf[..len];
+        lower.copy_from_slice(sni.as_bytes());
+        lower.make_ascii_lowercase();
+
+        // SAFETY: ASCII case mapping keeps the bytes valid UTF-8.
+        let lower = unsafe { std::str::from_utf8_unchecked(lower) };
+
+        match self.exact.get(lower) {
+            Some(id) => Some(*id),
+            None => self.route_wildcard(lower),
+        }
+    }
+
+    #[inline]
+    fn route_wildcard(&self, sni: &str) -> Option<u32> {
+        if self.wildcard.is_empty() {
+            return None;
         }
 
         let bytes = sni.as_bytes();
@@ -94,6 +123,37 @@ impl SniTableRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_matching_is_case_insensitive() {
+        let mut router = SniTableRouter::new();
+
+        router.add_route("Example.COM", 10);
+        router.add_route("*.Api.example.com", 20);
+
+        assert_eq!(router.route("example.com"), Some(10));
+        assert_eq!(router.route("EXAMPLE.com"), Some(10));
+        assert_eq!(router.route("v1.API.Example.com"), Some(20));
+    }
+
+    #[test]
+    fn uppercase_host_prefers_exact_over_wildcard() {
+        let mut router = SniTableRouter::new();
+
+        router.add_route("*.example.com", 1);
+        router.add_route("api.example.com", 2);
+
+        assert_eq!(router.route("API.example.com"), Some(2));
+    }
+
+    #[test]
+    fn trailing_dot_is_ignored() {
+        let mut router = SniTableRouter::new();
+
+        router.add_route("example.com", 3);
+
+        assert_eq!(router.route("example.com."), Some(3));
+    }
 
     #[test]
     fn exact_match() {

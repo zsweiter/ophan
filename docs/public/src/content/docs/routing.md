@@ -29,13 +29,20 @@ routes {
 | ---------------------- | -------------------- | -------------------- | ---------------- |
 | Exact                  | `/api/users`         | `/api/users`         | `/api/users/123` |
 | Param simple           | `/api/users/:id`     | `/api/users/1`       | `/api/users/1/x` |
-| Multi-segment wildcard | `/api/files/*`       | `/api/files/a/b/c`   | —                |
-| Param + wildcard mix   | `/users/:id/posts/*` | `/users/1/posts/a/b` | `/users/1/posts` |
+| Multi-segment wildcard | `/api/files/*`       | `/api/files/a/b/c`, `/api/files` | `/api/filesystem` |
+| Param + wildcard mix   | `/users/:id/posts/*` | `/users/1/posts/a/b`, `/users/1/posts` | `/users/1/x` |
 | Catch-all              | `/*`                 | any path             | —                |
+
+- `/x/*` also matches `/x` and `/x/`, unless `/x` has a route of its own.
+- A trailing slash is ignored on both the pattern and the request (`/users/` ≡ `/users`).
+- Before routing, the request path is normalized: `.` and `..` segments are resolved,
+  repeated slashes are merged and percent-encoded unreserved characters are decoded.
+  Upstreams and policies see the normalized path.
 
 ## Host Filtering
 
-Restrict a route to specific hostnames via the `Host` header:
+Restrict a route to specific hostnames via the `Host` header. The route is registered on
+every listed host; host matching ignores case, the port and a trailing dot:
 
 ```hcl
 path "/" {

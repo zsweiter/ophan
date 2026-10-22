@@ -111,16 +111,22 @@ master "ophan-01" {
     pid       = "/run/ophan.pid"
     error_log = "/var/log/ophan/error.log"
     includes  = "/etc/ophan/gateways/*.conf"
+
+    metrics {
+        listen = "127.0.0.1:9100"   # or "unix:/run/ophan/metrics.sock"
+        path   = "/metrics"
+    }
 }
 ```
 
-| Property    | Type     | Description                            |
-| ----------- | -------- | -------------------------------------- |
-| `user`      | `String` | Drop privileges to this user           |
-| `workers`   | `String` | `"auto"` or an explicit count          |
-| `pid`       | `String` | PID file path                          |
-| `error_log` | `String` | Error log path                         |
-| `includes`  | `String` | Additional config files end in \*.conf |
+| Property    | Type     | Description                                              |
+| ----------- | -------- | -------------------------------------------------------- |
+| `user`      | `String` | Drop privileges to this user                             |
+| `workers`   | `String` | `"auto"` or an explicit count                            |
+| `pid`       | `String` | PID file path                                            |
+| `error_log` | `String` | Error log path                                           |
+| `includes`  | `String` | Additional config files end in \*.conf                   |
+| `metrics`   | `Block`  | Prometheus endpoint, see [Observability](/observability) |
 
 ---
 
@@ -143,11 +149,15 @@ listeners {
             ciphers     = ["TLS_AES_256_GCM_SHA384"]   # planned
         }
 
-        network_policy {
-            allowed_ip_ranges = ["10.0.0.0/8"]
-            blocked_ip_ranges = ["10.0.0.0/8"]
-            real_ip_header    = "X-Forwarded-For"
-            proxy_allowed_ips = ["173.245.48.0/20"]
+        firewall {
+            allow = ["10.0.0.0/8"]
+            deny  = ["10.0.0.66/32"]
+        }
+
+        trusted_proxies {
+            allowed_ips    = ["173.245.48.0/20"]
+            real_ip_header = "CF-Connecting-IP"
+            on_untrusted   = "degrade"           # degrade | reject
         }
 
         limits {      # planned
@@ -168,7 +178,9 @@ listeners {
 | `address`        | `Address`       | Yes      | Bind address or UNIX socket                           |
 | `protocols`      | `Array<String>` | Yes      | `http1`, `http2`, `grpc`, `websocket`, `https`, `wss` |
 | `tls`            | `Block`         | No       | TLS/mTLS (required on `:443`)                         |
-| `network_policy` | `Block`         | No       | L4 IP filtering                                       |
+| `firewall`        | `Block`         | No       | Connection access control (`allow`, `deny`)            |
+| `trusted_proxies` | `Block`         | No       | Original client address behind edge proxies            |
+| `permissions`     | `String`        | No       | Octal file mode of a UNIX socket (e.g. `"0660"`)       |
 | `limits`         | `Block`         | No       | Connection / size limits (planned)                    |
 | `timeouts`       | `Block`         | No       | Idle / keepalive (planned)                            |
 

@@ -1,4 +1,4 @@
-use futures::future::{FutureExt, Shared};
+use futures::future::{FutureExt, WeakShared};
 use pingora_memory_cache::CacheStatus as PingoraCacheStatus;
 use pingora_memory_cache::MemoryCache as PingoraMemoryCache;
 use std::{
@@ -7,20 +7,58 @@ use std::{
     future::Future,
     hash::{Hash, Hasher},
     pin::Pin,
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
-use tokio::sync::Mutex as AsyncMutex;
 
 /// Number of shards used by default for the single-flight in-flight table.
 const DEFAULT_SHARDS: usize = 16;
+
+/// Number of entries a shard may hold before dead in-flight entries and
+/// expired failures are swept.
+const SHARD_SWEEP_THRESHOLD: usize = 64;
 
 /// Type-erased error used by [`MemoryCache::get_or_fetch`] so the in-flight
 /// table doesn't need a per-call error generic.
 pub type BoxError = Arc<dyn std::error::Error + Send + Sync>;
 
-type BoxedFuture<T> = Pin<Box<dyn Future<Output = Result<T, BoxError>> + Send>>;
-type InFlightFetch<T> = Shared<BoxedFuture<T>>;
+type Fetched<T> = (T, Option<Duration>);
+type BoxedFuture<T> = Pin<Box<dyn Future<Output = Result<Fetched<T>, BoxError>> + Send>>;
+
+/// A fetch currently running for a key.
+///
+/// Only a weak handle is stored: the fetch is owned by the callers awaiting
+/// it, so once all of them are dropped (e.g. cancelled) the fetch is dropped
+/// too and the next caller starts a new one instead of joining a dead entry.
+struct Flight<T> {
+    id: u64,
+    fetch: WeakShared<BoxedFuture<T>>,
+}
+
+/// A recently failed fetch, returned to callers until `expires_at`.
+struct Failure {
+    expires_at: Instant,
+    error: BoxError,
+}
+
+struct Shard<K, T> {
+    inflight: HashMap<K, Flight<T>>,
+    failures: HashMap<K, Failure>,
+}
+
+impl<K, T> Shard<K, T> {
+    fn sweep(&mut self, now: Instant) {
+        if self.inflight.len() >= SHARD_SWEEP_THRESHOLD {
+            self.inflight.retain(|_, flight| flight.fetch.upgrade().is_some());
+        }
+        if self.failures.len() >= SHARD_SWEEP_THRESHOLD {
+            self.failures.retain(|_, failure| failure.expires_at > now);
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 /// [CacheStatus] indicates the response type for a query.
@@ -82,11 +120,15 @@ impl From<PingoraCacheStatus> for CacheStatus {
 /// A high performant in-memory cache with S3-FIFO + TinyLFU
 pub struct MemoryCache<K: Hash, T: Clone> {
     inner: PingoraMemoryCache<K, T>,
-    /// Sharded table of in-flight fetches, used by [`MemoryCache::get_or_fetch`]
-    /// to implement single-flight request coalescing. Each shard has its own
-    /// lock so concurrent misses on different keys don't contend on a single
-    /// global mutex.
-    inflight: Vec<AsyncMutex<HashMap<K, InFlightFetch<T>>>>,
+    /// Sharded table of in-flight fetches and recent failures, used by
+    /// [`MemoryCache::get_or_fetch`] to implement single-flight request
+    /// coalescing. Each shard has its own lock so concurrent misses on
+    /// different keys don't contend on a single global mutex. The locks are
+    /// never held across an `.await`.
+    shards: Vec<Mutex<Shard<K, T>>>,
+    /// How long a failed fetch is remembered and returned to callers.
+    negative_ttl: Duration,
+    next_flight_id: AtomicU64,
 }
 
 impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
@@ -105,8 +147,21 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
         let shards = shards.max(1);
         MemoryCache {
             inner: PingoraMemoryCache::new(size),
-            inflight: (0..shards).map(|_| AsyncMutex::new(HashMap::new())).collect(),
+            shards: (0..shards)
+                .map(|_| Mutex::new(Shard { inflight: HashMap::new(), failures: HashMap::new() }))
+                .collect(),
+            negative_ttl: Duration::ZERO,
+            next_flight_id: AtomicU64::new(0),
         }
+    }
+
+    /// Remember failed fetches of [`Self::get_or_fetch`] for `ttl`, returning
+    /// the same error to callers in that window instead of fetching again.
+    ///
+    /// Defaults to zero (failures are not remembered).
+    pub fn with_negative_ttl(mut self, ttl: Duration) -> Self {
+        self.negative_ttl = ttl;
+        self
     }
 
     /// Fetch the key and return its value in addition to a [CacheStatus].
@@ -209,17 +264,36 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
     }
 
     /// Pick which shard of the in-flight table a key belongs to.
-    fn shard_for<Q>(&self, key: &Q) -> usize
+    fn shard_for<Q>(&self, key: &Q) -> &Mutex<Shard<K, T>>
     where
         Q: Hash + ?Sized,
     {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.inflight.len()
+        &self.shards[(hasher.finish() as usize) % self.shards.len()]
+    }
+
+    fn lock_shard(shard: &Mutex<Shard<K, T>>) -> MutexGuard<'_, Shard<K, T>> {
+        shard.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Fetch `key` from the cache, or -- on a miss -- run `fetch` to compute
     /// it, store the result with `ttl`, and return it.
+    ///
+    /// See [`Self::get_or_fetch_with_ttl`] for the coalescing semantics.
+    pub async fn get_or_fetch<F, Fut, E>(&self, key: K, ttl: Option<Duration>, fetch: F) -> Result<T, BoxError>
+    where
+        K: Eq + Clone,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        self.get_or_fetch_with_ttl(key, move || async move { fetch().await.map(|value| (value, ttl)) })
+            .await
+    }
+
+    /// Fetch `key` from the cache, or -- on a miss -- run `fetch` to compute
+    /// it together with the TTL to store it under, and return it.
     ///
     /// This implements **single-flight** request coalescing: if several
     /// callers concurrently request the same missing key, only the first one
@@ -227,6 +301,11 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
     /// "follower") awaits that same in-flight future instead of running its
     /// own `fetch`, so a cache miss never causes duplicate work against your
     /// origin/database for the same key.
+    ///
+    /// The fetch is driven by whichever caller polls it, so dropping the
+    /// leader does not stall followers. If every caller is dropped before
+    /// the fetch completes, the fetch is dropped too and the next caller
+    /// starts a fresh one.
     ///
     /// The in-flight table is **sharded** (see [`Self::new_with_shards`]):
     /// each key only ever touches the lock of its own shard, so misses on
@@ -236,14 +315,15 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
     /// duration of the fetch itself.
     ///
     /// Errors from `fetch` are type-erased into [`BoxError`] so the in-flight
-    /// table doesn't need a per-call error type parameter; a failed fetch is
-    /// never written to the cache, and the key is freed up so a later call
-    /// can retry it.
-    pub async fn get_or_fetch<F, Fut, E>(&self, key: K, ttl: Option<Duration>, fetch: F) -> Result<T, BoxError>
+    /// table doesn't need a per-call error type parameter. A failed fetch is
+    /// never written to the cache; it is returned to callers for the
+    /// negative TTL (see [`Self::with_negative_ttl`]), after which the next
+    /// call retries it.
+    pub async fn get_or_fetch_with_ttl<F, Fut, E>(&self, key: K, fetch: F) -> Result<T, BoxError>
     where
         K: Eq + Clone,
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: Future<Output = Result<T, E>> + Send + 'static,
+        Fut: Future<Output = Result<(T, Option<Duration>), E>> + Send + 'static,
         E: std::error::Error + Send + Sync + 'static,
     {
         // Fast path: already cached, no locking needed at all.
@@ -251,35 +331,78 @@ impl<K: Hash, T: Clone + Send + Sync + 'static> MemoryCache<K, T> {
             return Ok(value);
         }
 
-        let shard_idx = self.shard_for(&key);
+        let shard = self.shard_for(&key);
 
         // Either join an existing in-flight fetch, or become the leader that
         // registers a new one. The shard lock is only held for this quick
         // check-and-insert, not while the fetch itself runs.
-        let (shared, is_leader) = {
-            let mut shard = self.inflight[shard_idx].lock().await;
-            if let Some(existing) = shard.get(&key) {
-                (existing.clone(), false)
-            } else {
-                let boxed: BoxedFuture<T> = Box::pin(async move { fetch().await.map_err(|e| Arc::new(e) as BoxError) });
-                let shared = boxed.shared();
-                shard.insert(key.clone(), shared.clone());
-                (shared, true)
+        let (shared, id) = {
+            let mut guard = Self::lock_shard(shard);
+            let now = Instant::now();
+
+            if let Some(failure) = guard.failures.get(&key) {
+                if failure.expires_at > now {
+                    return Err(Arc::clone(&failure.error));
+                }
+                guard.failures.remove(&key);
+            }
+
+            let joined = guard.inflight.get(&key).and_then(|flight| flight.fetch.upgrade().map(|shared| (shared, flight.id)));
+
+            match joined {
+                Some(joined) => joined,
+                None => {
+                    // A flight may have completed between the fast path and
+                    // taking the lock.
+                    if let Some(value) = self.get_value(&key) {
+                        return Ok(value);
+                    }
+
+                    let boxed: BoxedFuture<T> = Box::pin(async move { fetch().await.map_err(|e| Arc::new(e) as BoxError) });
+                    let shared = boxed.shared();
+                    let id = self.next_flight_id.fetch_add(1, Ordering::Relaxed);
+
+                    if let Some(fetch) = shared.downgrade() {
+                        guard.sweep(now);
+                        guard.inflight.insert(key.clone(), Flight { id, fetch });
+                    }
+
+                    (shared, id)
+                },
             }
         };
 
         let result = shared.await;
+        self.complete_flight(shard, &key, id, &result);
 
-        if is_leader {
-            // Free the slot so future misses on this key can retry, and
-            // populate the cache on success.
-            self.inflight[shard_idx].lock().await.remove(&key);
-            if let Ok(ref value) = result {
-                self.put(&key, value.clone(), ttl);
-            }
+        result.map(|(value, _)| value)
+    }
+
+    /// Records the outcome of flight `id` and frees its slot. Only the first
+    /// caller to observe the completion does this; the cache is written
+    /// before the slot is freed so a new caller never misses both.
+    fn complete_flight(&self, shard: &Mutex<Shard<K, T>>, key: &K, id: u64, result: &Result<Fetched<T>, BoxError>)
+    where
+        K: Eq + Clone,
+    {
+        let mut guard = Self::lock_shard(shard);
+        if guard.inflight.get(key).is_none_or(|flight| flight.id != id) {
+            return;
         }
 
-        result
+        match result {
+            Ok((value, ttl)) => self.put(key, value.clone(), *ttl),
+            Err(error) if !self.negative_ttl.is_zero() => {
+                let failure = Failure {
+                    expires_at: Instant::now() + self.negative_ttl,
+                    error: Arc::clone(error),
+                };
+                guard.failures.insert(key.clone(), failure);
+            },
+            Err(_) => {},
+        }
+
+        guard.inflight.remove(key);
     }
 }
 
@@ -455,6 +578,124 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+        assert_eq!(cache.get_value(&"k"), None);
+
+        let retried = cache
+            .get_or_fetch("k", Some(Duration::from_secs(60)), || async { Ok::<i32, std::io::Error>(3) })
+            .await;
+        assert_eq!(retried.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_cancelled_leader_does_not_poison_key() {
+        let cache = Arc::new(MemoryCache::<&str, i32>::new(100));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let leader = {
+            let cache = cache.clone();
+            let calls = calls.clone();
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch("k", Some(Duration::from_secs(60)), move || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<i32, std::io::Error>(1)
+                    })
+                    .await
+            })
+        };
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        leader.abort();
+        let _ = leader.await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.get_or_fetch("k", Some(Duration::from_secs(60)), || async { Ok::<i32, std::io::Error>(2) }),
+        )
+        .await
+        .expect("a new caller must not join the cancelled flight");
+
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(cache.get_value(&"k"), Some(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_followers_complete_after_leader_cancelled() {
+        let cache = Arc::new(MemoryCache::<&str, i32>::new(100));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let spawn_caller = |cache: Arc<MemoryCache<&'static str, i32>>, calls: Arc<AtomicUsize>| {
+            tokio::spawn(async move {
+                cache
+                    .get_or_fetch("k", Some(Duration::from_secs(60)), move || async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        Ok::<i32, std::io::Error>(7)
+                    })
+                    .await
+            })
+        };
+
+        let leader = spawn_caller(cache.clone(), calls.clone());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let follower = spawn_caller(cache.clone(), calls.clone());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        leader.abort();
+
+        assert_eq!(follower.await.unwrap().unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.get_value(&"k"), Some(7));
+
+        let fresh = cache
+            .get_or_fetch("k", Some(Duration::from_secs(60)), || async {
+                panic!("value must be served from the cache");
+                #[allow(unreachable_code)]
+                Ok::<i32, std::io::Error>(0)
+            })
+            .await;
+        assert_eq!(fresh.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_remembers_failures_for_negative_ttl() {
+        let cache = MemoryCache::<&str, i32>::new(100).with_negative_ttl(Duration::from_millis(50));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let calls = calls.clone();
+            let result = cache
+                .get_or_fetch("k", Some(Duration::from_secs(60)), move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<i32, _>(std::io::Error::other("down"))
+                })
+                .await;
+            assert!(result.is_err());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let result = cache
+            .get_or_fetch("k", Some(Duration::from_secs(60)), || async { Ok::<i32, std::io::Error>(9) })
+            .await;
+        assert_eq!(result.unwrap(), 9);
+    }
+
+    #[tokio::test]
+    async fn get_or_fetch_with_ttl_uses_fetched_ttl() {
+        let cache = MemoryCache::<&str, i32>::new(100);
+
+        let result = cache
+            .get_or_fetch_with_ttl("k", || async {
+                Ok::<_, std::io::Error>((5, Some(Duration::from_millis(20))))
+            })
+            .await;
+        assert_eq!(result.unwrap(), 5);
+        assert_eq!(cache.get_value(&"k"), Some(5));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(cache.get_value(&"k"), None);
     }
 }

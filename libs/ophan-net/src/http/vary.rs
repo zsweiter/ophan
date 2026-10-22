@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use http::HeaderValue;
+use http::header;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Vary {
@@ -111,6 +112,49 @@ impl std::fmt::Display for VarySet {
     }
 }
 
+impl VarySet {
+    /// Adds these tokens to the response `Vary`, keeping the tokens it already has.
+    pub fn merge_into(self, response: &mut crate::proxy::ResponseParts) {
+        if self.is_empty() {
+            return;
+        }
+
+        let existing = response.headers.get_all(header::VARY).iter().filter_map(|v| v.to_str().ok()).collect::<Vec<_>>();
+
+        if existing.is_empty() {
+            let value = if self == VarySet::ORIGIN {
+                Some(HeaderValue::from_static("origin"))
+            } else {
+                Option::<HeaderValue>::from(self)
+            };
+
+            if let Some(value) = value {
+                let _ = response.insert_header(header::VARY, value);
+            }
+            return;
+        }
+
+        let has_token = |token: &str| existing.iter().flat_map(|v| v.split(',')).any(|t| t.trim().eq_ignore_ascii_case(token));
+
+        if has_token("*") {
+            return;
+        }
+
+        let ours = self.to_string();
+        let missing = ours.split(',').map(str::trim).filter(|t| !t.is_empty() && !has_token(t)).collect::<Vec<_>>();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        let merged = existing.iter().copied().chain(missing).collect::<Vec<_>>().join(", ");
+
+        if let Ok(value) = HeaderValue::from_str(&merged) {
+            let _ = response.insert_header(header::VARY, value);
+        }
+    }
+}
+
 impl From<VarySet> for Option<HeaderValue> {
     fn from(vary_set: VarySet) -> Self {
         if vary_set.is_empty() {
@@ -140,3 +184,42 @@ const ALL_VARIES: [(VarySet, Vary); 17] = [
     (VarySet::SEC_CH_UA_MOBILE, Vary::SecChUaMobile),
     (VarySet::SEC_CH_UA_PLATFORM, Vary::SecChUaPlatform),
 ];
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use crate::proxy::ResponseParts;
+
+    fn response_with_vary(values: &[&'static str]) -> ResponseParts {
+        let mut res = ResponseParts::build(200, None).unwrap();
+        for v in values {
+            res.append_header(header::VARY, HeaderValue::from_static(v)).unwrap();
+        }
+        res
+    }
+
+    fn vary_of(res: &ResponseParts) -> Vec<String> {
+        res.headers.get_all(header::VARY).iter().map(|v| v.to_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_upstream_tokens() {
+        let mut res = response_with_vary(&["Accept-Encoding"]);
+        VarySet::ORIGIN.merge_into(&mut res);
+        assert_eq!(vary_of(&res), vec!["Accept-Encoding, origin"]);
+    }
+
+    #[test]
+    fn does_not_duplicate_tokens() {
+        let mut res = response_with_vary(&["origin"]);
+        VarySet::ORIGIN.merge_into(&mut res);
+        assert_eq!(vary_of(&res), vec!["origin"]);
+    }
+
+    #[test]
+    fn inserts_when_absent() {
+        let mut res = response_with_vary(&[]);
+        VarySet::ORIGIN.merge_into(&mut res);
+        assert_eq!(vary_of(&res), vec!["origin"]);
+    }
+}

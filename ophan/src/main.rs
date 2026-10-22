@@ -2,6 +2,9 @@ use ophan::cli::{CliApp, Command};
 use ophan::config;
 use ophan::sys::error::ExitCode;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     if let Err(code) = main_entry() {
         return code;
@@ -87,12 +90,31 @@ fn main_entry() -> Result<(), ExitCode> {
             let config_path = app.config.as_ref().map(std::path::PathBuf::from);
             let (pid, _) = read_pid(app.pid_file.as_deref(), config_path.as_ref())?;
 
+            let mut args: Vec<std::ffi::OsString> = Vec::new();
+            if let Some(cfg) = app.config.as_ref() {
+                args.extend(["-c".into(), cfg.into()]);
+            }
+            if let Some(pid_file) = app.pid_file.as_ref() {
+                args.extend(["--pid-file".into(), pid_file.into()]);
+            }
+
+            let program = std::env::current_exe().map_err(|e| {
+                eprintln!("Error: cannot locate the ophan binary: {e}");
+                ExitCode::OsErr
+            })?;
+
+            let new_pid = ophan::sys::upgrade::Upgrade::spawn(&program, args).map_err(|e| {
+                eprintln!("Error: failed to start the new process: {e}");
+                ExitCode::OsErr
+            })?;
+
             if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGQUIT) {
                 eprintln!("Error: failed to send upgrade signal to PID {pid}: {e}");
+                let _ = kill(Pid::from_raw(new_pid as i32), Signal::SIGTERM);
                 return Err(ExitCode::OsErr);
             }
 
-            println!("Upgrade signal sent to PID {pid}");
+            println!("Upgrade started: PID {pid} hands its listeners over to PID {new_pid}");
             Ok(())
         },
 

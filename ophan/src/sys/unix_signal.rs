@@ -30,8 +30,14 @@ impl ShutdownSignalWatch for UnixShutdownSignalWatch {
                 },
                 _ = sighup.recv() => {
                     match self.state.reload() {
-                        ReloadOutcome::NeedsUpgrade => {
-                            return ShutdownSignal::GracefulUpgrade;
+                        ReloadOutcome::NeedsUpgrade => match crate::sys::upgrade::Upgrade::respawn_self() {
+                            Ok(pid) => {
+                                tracing::warn!("listeners changed, handing over to new process {pid}");
+                                return ShutdownSignal::GracefulUpgrade;
+                            },
+                            Err(e) => {
+                                tracing::error!("listeners changed but the new process could not start, keeping the current one: {e}");
+                            },
                         },
                         ReloadOutcome::Swapped => {
                             tracing::info!("config reloaded");

@@ -425,6 +425,33 @@ impl RewriteEngine {
         Some((*prio, re.replace(path, to.as_ref()).into_owned()))
     }
 
+    /// Applies the rules to the path of `uri`, keeping its query. Returns `None` when the
+    /// path is unchanged.
+    pub fn rewrite_uri(&self, uri: &http::Uri) -> Result<Option<http::Uri>, http::uri::InvalidUri> {
+        let path = uri.path();
+        let rewritten = self.apply(path);
+
+        // Borrowed results are sub-slices of `path`, so equal length means unchanged.
+        if matches!(rewritten, Cow::Borrowed(_)) && rewritten.len() == path.len() {
+            return Ok(None);
+        }
+
+        let query = uri.query();
+        let mut path_and_query = String::with_capacity(rewritten.len() + 2 + query.map_or(0, str::len));
+
+        if !rewritten.starts_with('/') {
+            path_and_query.push('/');
+        }
+        path_and_query.push_str(&rewritten);
+
+        if let Some(query) = query {
+            path_and_query.push('?');
+            path_and_query.push_str(query);
+        }
+
+        Ok(Some(http::Uri::from(http::uri::PathAndQuery::try_from(path_and_query)?)))
+    }
+
     /// Apply the configured trailing-slash policy.
     ///
     /// Special care is taken to keep `Cow::Borrowed` when possible (zero
@@ -762,5 +789,42 @@ mod tests {
             Cow::Borrowed(s) => assert_eq!(s, "/keep"),
             Cow::Owned(_) => panic!("expected Cow::Borrowed after trailing-slash strip"),
         }
+    }
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::*;
+
+    fn engine(strip_prefix: Option<&str>, trailing_slash: TrailingSlashAction) -> RewriteEngine {
+        RewriteEngine::new(Vec::new(), strip_prefix, None, trailing_slash).unwrap()
+    }
+
+    fn rewrite(engine: &RewriteEngine, uri: &str) -> Option<String> {
+        engine.rewrite_uri(&uri.parse().unwrap()).unwrap().map(|u| u.to_string())
+    }
+
+    #[test]
+    fn rewrite_strip_prefix_keeps_query() {
+        let e = engine(Some("/api"), TrailingSlashAction::Ignore);
+        assert_eq!(rewrite(&e, "/api/users?id=1").as_deref(), Some("/users?id=1"));
+    }
+
+    #[test]
+    fn rewrite_strip_prefix_to_root() {
+        let e = engine(Some("/api"), TrailingSlashAction::Ignore);
+        assert_eq!(rewrite(&e, "/api").as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn rewrite_trailing_slash_never_is_applied() {
+        let e = engine(None, TrailingSlashAction::Never);
+        assert_eq!(rewrite(&e, "/users/").as_deref(), Some("/users"));
+    }
+
+    #[test]
+    fn rewrite_unchanged_path_returns_none() {
+        let e = engine(Some("/api"), TrailingSlashAction::Ignore);
+        assert_eq!(rewrite(&e, "/other?x=1"), None);
     }
 }

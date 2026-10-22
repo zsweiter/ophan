@@ -27,9 +27,27 @@ impl Error {
 
     #[inline]
     pub fn from_io(err: io::Error, path: &str) -> Self {
-        let status = map_io_kind(err.kind());
+        let status = if is_symlink_loop(&err) {
+            StatusCode::FORBIDDEN
+        } else {
+            map_io_kind(err.kind())
+        };
 
         Self { status, path: path.into(), source: Some(err) }
+    }
+
+    #[inline]
+    pub fn internal(path: &str, err: io::Error) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            path: path.into(),
+            source: Some(err),
+        }
+    }
+
+    #[inline]
+    pub fn bad_request(path: impl Into<Box<str>>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, path)
     }
 
     #[inline]
@@ -78,10 +96,25 @@ impl StdError for Error {
     }
 }
 
+/// `ELOOP`, raised when `O_NOFOLLOW` meets a symbolic link.
+#[inline]
+fn is_symlink_loop(err: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
 #[inline]
 pub fn map_io_kind(kind: io::ErrorKind) -> StatusCode {
     match kind {
-        io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => StatusCode::NOT_FOUND,
         io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         io::ErrorKind::AlreadyExists => StatusCode::CONFLICT,
         io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => StatusCode::BAD_REQUEST,

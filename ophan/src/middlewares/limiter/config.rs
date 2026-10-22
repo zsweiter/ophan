@@ -1,4 +1,8 @@
-use std::{str::FromStr, time::Duration};
+use std::{
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use flatkit::matchers::PathMatcherSet;
 
@@ -13,9 +17,17 @@ pub struct LimiterConfig {
     pub algorithm: RateLimitAlgorithm,
     pub identifier: LimiterIdentifier,
     pub skip_patterns: Option<PathMatcherSet>,
+    /// Identity of this policy instance. Clients are counted separately per scope,
+    /// so routes with different policies never share counters.
+    pub scope: u64,
 }
 
 impl LimiterConfig {
+    pub fn next_scope() -> u64 {
+        static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
+        NEXT_SCOPE.fetch_add(1, Ordering::Relaxed)
+    }
+
     #[inline]
     pub fn limit(&self) -> u64 {
         self.rate.requests
@@ -40,6 +52,7 @@ impl Default for LimiterConfig {
             algorithm: RateLimitAlgorithm::default(),
             identifier: LimiterIdentifier::default(),
             skip_patterns: None,
+            scope: Self::next_scope(),
         }
     }
 }

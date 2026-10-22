@@ -19,7 +19,7 @@ policies ── reusable security & behavior
 
 ## Listeners
 
-A listener defines a physical ingress point: a TCP address, a set of protocols, and optional TLS. Optional `network_policy` filtering can be applied at the L4 layer.
+A listener defines a physical ingress point: a TCP address, a set of protocols, and optional TLS. Optional `firewall` (connection access control) and `trusted_proxies` (original client address behind an edge proxy) blocks apply per listener.
 
 ```hcl
 listeners {

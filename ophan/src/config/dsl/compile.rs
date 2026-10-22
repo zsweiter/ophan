@@ -18,12 +18,13 @@ use http::header;
 use ophan_auth::crypto::{Algorithm, HmacAlg};
 use ophan_auth::{AuthConfig as InnerAuthConfig, AuthMode, JwtValidatorConfig, OAuthClientConfig};
 use ophan_net::http::HttpMethodSet;
-use ophan_net::tls::TlsVersion;
+use ophan_net::tls::{ALPN, TlsVersion};
 use ophan_sec::l7::CompiledWafRules;
 use ophan_sec::l7::WafConfig;
 use ophan_sec::l7::WafMode;
 // use ophan_sec::config::{WafAction, WafCondition, WafConfig, WafMode, WafPhase, WafRule};
-use ophan_sec::{NetPolicy, PolicyMode};
+use ophan_sec::l4::ListenerFirewall;
+use ophan_sec::{OnUntrusted, TrustedProxies};
 use ophan_static::FsFlags;
 
 use crate::balancer::BalanceStrategy;
@@ -44,11 +45,17 @@ use crate::config::domain::*;
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub message: String,
+    /// Warnings are reported but do not reject the configuration.
+    pub warning: bool,
 }
 
 impl CompileError {
     pub fn new(msg: impl Into<String>) -> Self {
-        Self { message: msg.into() }
+        Self { message: msg.into(), warning: false }
+    }
+
+    pub fn warning(msg: impl Into<String>) -> Self {
+        Self { message: msg.into(), warning: true }
     }
 }
 
@@ -78,6 +85,13 @@ pub fn compile(raw: &RawConfig) -> CResult<OphanConfig> {
 
             gateways.insert(ImmerStr::from(*name), compiled_gateway);
         }
+    }
+
+    let (warnings, errors): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| e.warning);
+
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+        tracing::warn!("config: {warning}");
     }
 
     if errors.is_empty() {
@@ -131,6 +145,8 @@ fn compile_master(raw: &RawMaster, errors: &mut Vec<CompileError>) -> MasterConf
         },
     };
 
+    let metrics = raw.metrics.as_ref().and_then(|m| compile_metrics(m, errors));
+
     MasterConfig {
         name: name.into(),
         user,
@@ -138,7 +154,31 @@ fn compile_master(raw: &RawMaster, errors: &mut Vec<CompileError>) -> MasterConf
         pid,
         error_log,
         includes: includes.into_boxed_slice(),
+        metrics,
     }
+}
+
+fn compile_metrics(raw: &RawMetrics, errors: &mut Vec<CompileError>) -> Option<MetricsConfig> {
+    let Some(listen) = raw.listen else {
+        errors.push(CompileError::new("metrics: 'listen' is required".to_string()));
+        return None;
+    };
+
+    let listen = match ListenerAddress::from_str(listen) {
+        Ok(addr) => addr,
+        Err(e) => {
+            errors.push(CompileError::new(format!("metrics: invalid listen address '{listen}': {e}")));
+            return None;
+        },
+    };
+
+    let path = raw.path.unwrap_or("/metrics");
+    if !path.starts_with('/') {
+        errors.push(CompileError::new(format!("metrics: path '{path}' must start with '/'")));
+        return None;
+    }
+
+    Some(MetricsConfig { listen, path: path.to_string() })
 }
 
 struct GatewayScope<'a> {
@@ -193,7 +233,6 @@ fn compile_gateway(raw: &RawGateway, errors: &mut Vec<CompileError>) -> Option<G
         listeners,
         upstreams,
         routes: routes.into_boxed_slice(),
-        net_policy: None,
     })
 }
 
@@ -251,7 +290,8 @@ fn build_limiter_map(raw: &RawGateway, errors: &mut Vec<CompileError>) -> HashMa
     for rp in &raw.policies {
         if let RawPolicy::Limiter { name, config } = rp {
             match build_limiter_from_raw(config) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
+                    cfg.scope = limiter_scope(&format!("policy:{name}"), &cfg);
                     map.insert(name.to_string(), Arc::new(cfg));
                 },
                 Err(e) => errors.push(CompileError::new(format!("policy limiter '{}': {}", name, e))),
@@ -309,13 +349,64 @@ fn compile_listener(raw: &RawListener, errors: &mut Vec<CompileError>) -> Option
                     .ok()?
             };
 
+            let client_ca = match ssl.client_ca {
+                None => None,
+                Some(path) => match std::fs::read(path) {
+                    Ok(pem) => Some(pem),
+                    Err(e) => {
+                        errors.push(CompileError::new(format!(
+                            "listener '{}': ssl client_ca '{}': {}",
+                            name, path, e
+                        )));
+                        None
+                    },
+                },
+            };
+
+            let client_auth_required = match ssl.client_auth {
+                None => client_ca.is_some(),
+                Some("required") => true,
+                Some("none") => false,
+                Some("optional") => {
+                    errors.push(CompileError::warning(format!(
+                        "listener '{}': ssl client_auth = \"optional\" is not supported by the TLS backend, client certificates are not requested",
+                        name
+                    )));
+                    false
+                },
+                Some(other) => {
+                    errors.push(CompileError::new(format!(
+                        "listener '{}': ssl client_auth '{}' is not supported, expected 'required', 'optional' or 'none'",
+                        name, other
+                    )));
+                    false
+                },
+            };
+
+            if client_auth_required && client_ca.is_none() {
+                errors.push(CompileError::new(format!(
+                    "listener '{}': ssl client_auth = \"required\" needs client_ca",
+                    name
+                )));
+            }
+
+            if !ssl.ciphers.is_empty() {
+                errors.push(CompileError::warning(format!(
+                    "listener '{}': ssl ciphers are ignored, the cipher suite follows the TLS versions policy",
+                    name
+                )));
+            }
+
+            let http2 = protocols.iter().any(NetworkProtocol::is_http2);
+
             SecurityConfig::Tls {
                 certs: TlsCerts {
                     cert: ssl.cert.to_string(),
                     key: ssl.key.to_string(),
-                    client_ca: ssl.client_ca.map(|s| s.to_string().as_bytes().to_owned()), // TODO read ca bytes
+                    client_ca,
+                    client_auth_required,
                 },
-                alpn_protocols: None,
+                alpn_protocols: http2.then_some(ALPN::H2H1),
                 min_version,
             }
         },
@@ -330,6 +421,10 @@ fn compile_listener(raw: &RawListener, errors: &mut Vec<CompileError>) -> Option
     if let Some(ref limits) = raw.limits {
         if let Some(connections) = limits.connections {
             listener.connection.max_connections = Some(connections as u32);
+            errors.push(CompileError::warning(format!(
+                "listener '{}': limits.connections is not enforced yet",
+                listener.name
+            )));
         }
         if let Some(ref request_size) = limits.request_size {
             listener.connection.max_request_size = Some(*request_size);
@@ -342,12 +437,10 @@ fn compile_listener(raw: &RawListener, errors: &mut Vec<CompileError>) -> Option
         listener.connection.keepalive_timeout = timeouts.keepalive;
     }
 
-    if let Some(ref raw_policy) = raw.network_policy {
-        match compile_net_policy(raw_policy) {
-            Ok(policy) => listener.policy = Some(Arc::new(policy)),
-            Err(e) => errors.push(CompileError::new(format!("listener '{}': net_policy: {}", listener.name, e))),
-        }
-    }
+    let (firewall, trusted_proxies) = compile_listener_access(raw, &listener.address, errors);
+    listener.firewall = firewall;
+    listener.trusted_proxies = trusted_proxies;
+    listener.permissions = compile_permissions(raw.name, raw.permissions, &listener.address, errors);
 
     Some(Arc::new(listener))
 }
@@ -423,7 +516,13 @@ fn parse_detailed_server(raw: &RawUpstreamServer) -> Result<UpstreamServer, Stri
 }
 
 fn compile_health_check(raw: &RawHealthCheck) -> Result<HealthCheckConfig, String> {
-    let path = raw.path.unwrap_or("/").to_string();
+    let path = match raw.path {
+        Some(p) if !p.starts_with('/') => return Err(format!("health_check: path '{p}' must start with '/'")),
+        Some(p) if p.bytes().any(|b| b.is_ascii_control() || b == b' ') => {
+            return Err(format!("health_check: path '{p}' contains invalid characters"));
+        },
+        p => p.map(str::to_string),
+    };
     let interval = raw.interval.unwrap_or(Duration::from_secs(10));
     let timeout = raw.timeout.unwrap_or(Duration::from_secs(5));
     let unhealthy_threshold = raw.unhealthy_threshold.unwrap_or(3);
@@ -445,8 +544,11 @@ fn compile_health_check(raw: &RawHealthCheck) -> Result<HealthCheckConfig, Strin
 fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileError>) -> Option<Arc<RoutesConfig>> {
     let route = match raw {
         RawRoute::Path(p) => p,
-        RawRoute::Group(_g) => {
-            // !TODO: implement group routes
+        RawRoute::Group(g) => {
+            errors.push(CompileError::new(format!(
+                "route group '{}': route groups are not supported yet",
+                g.name
+            )));
             return None;
         },
     };
@@ -462,6 +564,13 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
             Ok(proto) => protocols.push(proto),
             Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
         }
+    }
+
+    if !protocols.is_empty() {
+        errors.push(CompileError::warning(format!(
+            "route '{}': protocols is ignored, the upstream server protocol decides",
+            path
+        )));
     }
 
     let mut auth: Option<Arc<AuthConfig>> = None;
@@ -481,6 +590,10 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
                 Ok(cfg) => waf = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
+            errors.push(CompileError::warning(format!(
+                "route '{}': the WAF engine is disabled in this build, the waf policy has no effect",
+                path
+            )));
         }
         if let Some(ref action) = policies.cors {
             match resolve_cors(action, scope) {
@@ -489,7 +602,7 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
             }
         }
         if let Some(ref action) = policies.limiter {
-            match resolve_limiter(action, scope) {
+            match resolve_limiter(action, scope, &path) {
                 Ok(cfg) => limiter = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
@@ -507,7 +620,13 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
         buffering: rs.buffering.unwrap_or(true),
         chunked: rs.chunked.unwrap_or(true),
     });
-    let headers = compile_headers(&route.inbound_headers, &route.outbound_headers);
+    if route.streaming.as_ref().is_some_and(|rs| rs.chunked.is_some()) {
+        errors.push(CompileError::warning(format!(
+            "route '{}': streaming.chunked is ignored, framing follows the upstream response",
+            path
+        )));
+    }
+    let headers = compile_headers(&path, &route.inbound_headers, &route.outbound_headers, errors);
 
     Some(Arc::new(RoutesConfig {
         path,
@@ -582,86 +701,62 @@ fn compile_rewrite(raw: &RawUriRewrite) -> RouteRewrites {
 }
 
 fn compile_headers(
+    route: &str,
     inbound: &Option<RawRouteHeadersOpts<'_, RawHeadersOps<'_>>>,
     outbound: &Option<RawRouteHeadersOpts<'_, RawHeadersRemove<'_>>>,
+    errors: &mut Vec<CompileError>,
 ) -> Option<HeaderMutations> {
-    let has_inbound = inbound.as_ref().is_some_and(|h| {
-        !h.opts.set.is_empty() || !h.opts.remove.is_empty() || !h.upstream.set.is_empty() || !h.upstream.remove.is_empty()
+    let mut header_set = |pairs: &[(&str, &str)]| -> AHashMap<HeaderName, HeaderValue> {
+        pairs
+            .iter()
+            .filter_map(
+                |(k, v)| match (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                    (Ok(name), Ok(value)) => Some((name, value)),
+                    _ => {
+                        errors.push(CompileError::new(format!("route '{route}': invalid header '{k}: {v}'")));
+                        None
+                    },
+                },
+            )
+            .collect()
+    };
+
+    let inbound_set = inbound.as_ref().map(|h| (header_set(&h.opts.set), header_set(&h.upstream.set)));
+    let outbound_set = outbound.as_ref().map(|h| header_set(&h.opts.set));
+
+    let mut header_names = |names: &[&str]| -> Box<[HeaderName]> {
+        names
+            .iter()
+            .filter_map(|k| match HeaderName::from_bytes(k.as_bytes()) {
+                Ok(name) => Some(name),
+                Err(_) => {
+                    errors.push(CompileError::new(format!("route '{route}': invalid header name '{k}'")));
+                    None
+                },
+            })
+            .collect()
+    };
+
+    let inbound = inbound.as_ref().zip(inbound_set).map(|(h, (client_set, to_upstream_set))| InboundHeaderMutations {
+        client_set,
+        client_remove: header_names(&h.opts.remove),
+        to_upstream_set,
+        to_upstream_remove: header_names(&h.upstream.remove),
     });
-    let has_outbound = outbound
-        .as_ref()
-        .is_some_and(|h| !h.opts.set.is_empty() || !h.opts.remove.is_empty() || !h.upstream.remove.is_empty());
 
-    if !has_inbound && !has_outbound {
-        return None;
-    }
+    let outbound = outbound.as_ref().zip(outbound_set).map(|(h, client_set)| OutboundHeaderMutations {
+        from_upstream_set: AHashMap::new(),
+        from_upstream_remove: header_names(&h.upstream.remove),
+        client_set,
+        client_remove: header_names(&h.opts.remove),
+    });
 
-    let inbound_mutations = inbound
-        .as_ref()
-        .map(|h| {
-            let client_set: AHashMap<HeaderName, HeaderValue> = h
-                .opts
-                .set
-                .iter()
-                .filter_map(|(k, v)| {
-                    let name = HeaderName::from_bytes(k.as_bytes()).ok()?;
-                    let value = HeaderValue::from_str(v).ok()?;
-                    Some((name, value))
-                })
-                .collect();
-            let client_remove: Box<[HeaderName]> =
-                h.opts.remove.iter().filter_map(|k| HeaderName::from_bytes(k.as_bytes()).ok()).collect();
-            let to_upstream_set: AHashMap<HeaderName, HeaderValue> = h
-                .upstream
-                .set
-                .iter()
-                .filter_map(|(k, v)| {
-                    let name = HeaderName::from_bytes(k.as_bytes()).ok()?;
-                    let value = HeaderValue::from_str(v).ok()?;
-                    Some((name, value))
-                })
-                .collect();
-            let to_upstream_remove: Box<[HeaderName]> =
-                h.upstream.remove.iter().filter_map(|k| HeaderName::from_bytes(k.as_bytes()).ok()).collect();
+    let mutations = HeaderMutations {
+        inbound: inbound.unwrap_or_default(),
+        outbound: outbound.unwrap_or_default(),
+    };
 
-            InboundHeaderMutations {
-                client_set,
-                client_remove,
-                to_upstream_set,
-                to_upstream_remove,
-            }
-        })
-        .unwrap_or_default();
-
-    let outbound_mutations = outbound
-        .as_ref()
-        .map(|h| {
-            let from_upstream_set: AHashMap<HeaderName, HeaderValue> = h
-                .opts
-                .set
-                .iter()
-                .filter_map(|(k, v)| {
-                    let name = HeaderName::from_bytes(k.as_bytes()).ok()?;
-                    let value = HeaderValue::from_str(v).ok()?;
-                    Some((name, value))
-                })
-                .collect();
-            let from_upstream_remove: Box<[HeaderName]> =
-                h.opts.remove.iter().filter_map(|k| HeaderName::from_bytes(k.as_bytes()).ok()).collect();
-            let client_set: AHashMap<HeaderName, HeaderValue> = AHashMap::new();
-            let client_remove: Box<[HeaderName]> =
-                h.upstream.remove.iter().filter_map(|k| HeaderName::from_bytes(k.as_bytes()).ok()).collect();
-
-            OutboundHeaderMutations {
-                from_upstream_set,
-                from_upstream_remove,
-                client_set,
-                client_remove,
-            }
-        })
-        .unwrap_or_default();
-
-    Some(HeaderMutations { inbound: inbound_mutations, outbound: outbound_mutations })
+    (!mutations.is_empty()).then_some(mutations)
 }
 
 // ============================================================================
@@ -674,7 +769,7 @@ fn resolve_auth(action: &RawRouteAction<RawAuthConfig>, scope: &GatewayScope) ->
         RawRouteAction::Extends { base, overrides } => {
             let base = scope.auth.get(*base).ok_or_else(|| format!("auth policy '{}' not found", base))?;
             let mut cfg = base.as_ref().clone();
-            merge_auth_override(&mut cfg, overrides);
+            merge_auth_override(&mut cfg, overrides)?;
             Ok(Arc::new(cfg))
         },
         RawRouteAction::Inline(config) => Ok(Arc::new(build_auth_from_raw(config)?)),
@@ -707,7 +802,22 @@ fn resolve_cors(action: &RawRouteAction<RawCorsConfig>, scope: &GatewayScope) ->
     }
 }
 
-fn resolve_limiter(action: &RawRouteAction<RawLimiterConfig>, scope: &GatewayScope) -> Result<Arc<LimiterConfig>, String> {
+/// Stable identity of a limiter policy instance. It only changes when the policy itself
+/// changes, so a reload keeps the counters of untouched policies.
+fn limiter_scope(origin: &str, cfg: &LimiterConfig) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::hash::DefaultHasher::new();
+    origin.hash(&mut hasher);
+    format!("{:?}|{}|{:?}|{:?}", cfg.rate, cfg.burst, cfg.algorithm, cfg.identifier).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn resolve_limiter(
+    action: &RawRouteAction<RawLimiterConfig>,
+    scope: &GatewayScope,
+    route: &str,
+) -> Result<Arc<LimiterConfig>, String> {
     match action {
         RawRouteAction::Ref(name) => {
             scope.limiter.get(*name).cloned().ok_or_else(|| format!("limiter policy '{}' not found", name))
@@ -716,9 +826,14 @@ fn resolve_limiter(action: &RawRouteAction<RawLimiterConfig>, scope: &GatewaySco
             let base = scope.limiter.get(*base).ok_or_else(|| format!("limiter policy '{}' not found", base))?;
             let mut cfg = base.as_ref().clone();
             merge_limiter_override(&mut cfg, overrides);
+            cfg.scope = limiter_scope(&format!("route:{route}:extends"), &cfg);
             Ok(Arc::new(cfg))
         },
-        RawRouteAction::Inline(config) => Ok(Arc::new(build_limiter_from_raw(config)?)),
+        RawRouteAction::Inline(config) => {
+            let mut cfg = build_limiter_from_raw(config)?;
+            cfg.scope = limiter_scope(&format!("route:{route}"), &cfg);
+            Ok(Arc::new(cfg))
+        },
     }
 }
 
@@ -730,12 +845,11 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let issuer = raw.issuer.ok_or_else(|| "auth: issuer is required".to_string())?;
     let audience = raw.audience.ok_or_else(|| "auth: audience is required".to_string())?;
 
-    let mut validator = JwtValidatorConfig::new(issuer);
-    validator.audience = vec![ImmerStr::from(audience)].into_boxed_slice();
+    let validator = JwtValidatorConfig::new(issuer).with_audiences(vec![ImmerStr::from(audience)]);
 
     let dpop_policy = raw.dpop_proof.and_then(|dpop| dpop.parse().ok()).unwrap_or_default();
 
-    let (auth_mode, token_ttl) = match raw.mode.as_ref() {
+    let (auth_mode, key_cache_ttl) = match raw.mode.as_ref() {
         Some(RawAuthMode::Jwks { uri, algorithms, ttl }) => {
             let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(a).ok()).collect::<Vec<_>>();
             let uri = uri.as_deref().map(str::to_owned).unwrap_or_else(|| format!("{}/.well-known/jwks.json", issuer));
@@ -775,8 +889,9 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
         },
     };
 
-    let mut inner_config = InnerAuthConfig::new(validator, auth_mode);
-    inner_config.dpop_policy = dpop_policy;
+    let mut inner_config = InnerAuthConfig::new(validator, auth_mode)
+        .with_dpop_policy(dpop_policy)
+        .with_key_cache_ttl(key_cache_ttl);
 
     let refresh_enabled = raw.refresh.as_ref().is_some_and(|r| r.enabled.unwrap_or(true));
     if let Some(client_id) = raw.client_id {
@@ -810,7 +925,7 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
         .unwrap_or_default();
 
     // Compile refresh sources
-    let refresh_sources = raw.refresh.as_ref().and_then(|r| r.sources.as_ref().map(compile_token_source));
+    let refresh_sources = raw.refresh.as_ref().and_then(|r| r.sources.as_ref().map(compile_token_source)).transpose()?;
 
     // Compile skip_patterns from exclude_paths
     let skip_patterns = if raw.exclude_paths.is_empty() {
@@ -819,16 +934,21 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
         Some(PathMatcherSet::try_from(raw.exclude_paths.to_owned()).map_err(|e| e.to_string())?)
     };
 
-    let sources = raw.sources.as_ref().map(|s| s.iter().map(compile_token_source).collect()).unwrap_or_default();
+    let sources = match raw.sources.as_ref() {
+        Some(sources) => sources.iter().map(compile_token_source).collect::<Result<_, _>>()?,
+        None => Box::new([TokenSource::bearer()]) as Box<[TokenSource]>,
+    };
+    let dpop_source = (!inner_config.dpop_policy.is_disabled()).then(TokenSource::dpop);
 
     Ok(AuthConfig {
         client: inner_config,
         sources,
         refresh_sources,
-        dpop_source: None,
+        dpop_source,
         inject_access_token_into,
         inject_refresh_token_into,
-        token_ttl,
+        token_ttl: None,
+        refresh_token_ttl: None,
         skip_patterns,
     })
 }
@@ -934,22 +1054,24 @@ fn build_limiter_from_raw(raw: &RawLimiterConfig) -> Result<LimiterConfig, Strin
 // AUTH merge (route-level overrides)
 // ============================================================================
 
-fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
+fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) -> Result<(), String> {
     if let Some(issuer) = overrides.issuer {
-        cfg.client.validator.issuer = Box::new([ImmerStr::from(issuer)]);
+        cfg.client.validator.set_issuers(vec![ImmerStr::from(issuer)]);
     }
     if let Some(audience) = overrides.audience {
-        cfg.client.validator.audience = Box::new([ImmerStr::from(audience)]);
+        cfg.client.validator.set_audiences(vec![ImmerStr::from(audience)]);
     }
     if let Some(ref mode) = overrides.mode {
         cfg.client.auth_mode = match mode {
-            RawAuthMode::Jwks { uri, algorithms, .. } => {
+            RawAuthMode::Jwks { uri, algorithms, ttl } => {
                 let algs = algorithms.iter().filter_map(|a| Algorithm::from_str(a).ok()).collect::<Vec<_>>();
                 let uri_str = uri.as_deref().unwrap_or("");
+                cfg.client.key_cache_ttl = *ttl;
                 AuthMode::new_jwks(uri_str.to_string(), algs.into_boxed_slice())
             },
-            RawAuthMode::Oidc { discovery_url, .. } => {
+            RawAuthMode::Oidc { discovery_url, ttl } => {
                 let url = discovery_url.as_deref().unwrap_or("");
+                cfg.client.key_cache_ttl = *ttl;
                 AuthMode::new_oidc(url.to_owned())
             },
             RawAuthMode::Static { secret_key, alg } => {
@@ -970,10 +1092,10 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
         };
     }
     if let Some(ref sources) = overrides.sources {
-        cfg.sources = sources.iter().map(compile_token_source).collect();
+        cfg.sources = sources.iter().map(compile_token_source).collect::<Result<_, _>>()?;
     }
     if let Some(ref refresh) = overrides.refresh {
-        cfg.refresh_sources = refresh.sources.as_ref().map(compile_token_source);
+        cfg.refresh_sources = refresh.sources.as_ref().map(compile_token_source).transpose()?;
         if let Some(ref inject) = refresh.inject {
             cfg.inject_access_token_into = inject.access_token.iter().map(compile_inject_target).collect();
             cfg.inject_refresh_token_into = inject.refresh_token.iter().map(compile_inject_target).collect();
@@ -982,13 +1104,14 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) {
     if !overrides.exclude_paths.is_empty() {
         cfg.skip_patterns = PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).ok();
     }
+
+    Ok(())
 }
 
-fn compile_token_source(raw: &RawTokenSource) -> TokenSource {
-    match raw {
-        RawTokenSource::Header { name, prefix } => TokenSource::Header {
-            name: name.to_string(),
-            prefix: prefix.map(|s| s.to_string()),
+fn compile_token_source(raw: &RawTokenSource) -> Result<TokenSource, String> {
+    Ok(match raw {
+        RawTokenSource::Header { name, prefix } => {
+            TokenSource::header(name, *prefix).map_err(|e| format!("auth: invalid header name '{name}': {e}"))?
         },
         RawTokenSource::Cookie { name, prefix } => TokenSource::Cookie {
             name: name.to_string(),
@@ -998,7 +1121,7 @@ fn compile_token_source(raw: &RawTokenSource) -> TokenSource {
             name: name.to_string(),
             prefix: prefix.map(|s| s.to_string()),
         },
-    }
+    })
 }
 
 fn compile_inject_target(raw: &RawInjectTarget) -> crate::middlewares::auth::TokenDestination {
@@ -1126,30 +1249,172 @@ fn merge_limiter_override(cfg: &mut LimiterConfig, overrides: &RawLimiterConfig)
 }
 
 // ============================================================================
-// TRUSTED PROXIES
+// LISTENER ACCESS (firewall + trusted proxies)
 // ============================================================================
 
-fn compile_net_policy(raw: &RawNetworkPolicy) -> Result<NetPolicy, String> {
-    let real_ip_header = raw
-        .real_ip_header
-        .unwrap_or("X-Forwarded-For")
-        .parse::<HeaderName>()
-        .map_err(|_| format!("invalid real_ip_header '{}'", raw.real_ip_header.unwrap_or("X-Forwarded-For")))?;
+type ListenerAccess = (Option<Arc<ListenerFirewall>>, Option<Arc<TrustedProxies>>);
 
-    let mut all_ranges: Vec<&str> = Vec::new();
-    all_ranges.extend(raw.allowed_ip_ranges.iter().copied());
-    if let Some(ref proxy_ips) = raw.proxy_allowed_ips {
-        all_ranges.extend(proxy_ips.iter().copied());
+fn compile_listener_access(raw: &RawListener, address: &ListenerAddress, errors: &mut Vec<CompileError>) -> ListenerAccess {
+    let name = raw.name;
+    let legacy = raw.network_policy.as_ref();
+
+    if legacy.is_some() && (raw.firewall.is_some() || raw.trusted_proxies.is_some()) {
+        errors.push(CompileError::new(format!(
+            "listener '{name}': network_policy cannot be combined with firewall or trusted_proxies"
+        )));
+        return (None, None);
     }
 
-    let allowed_ip_ranges: Vec<IpNet> = all_ranges
-        .into_iter()
-        .map(|ip| ip.parse::<IpNet>().map_err(|e| e.to_string()))
-        .collect::<Result<_, _>>()?;
+    let (firewall, trusted) = match legacy {
+        None => (raw.firewall.clone(), raw.trusted_proxies.clone()),
+        Some(policy) => {
+            errors.push(CompileError::warning(format!(
+                "listener '{name}': network_policy is deprecated, use `firewall` and `trusted_proxies`"
+            )));
+            legacy_listener_access(policy)
+        },
+    };
 
-    let policy = raw.proxy_allowed_ips.as_ref().map(|_| PolicyMode::Degrade).unwrap_or(PolicyMode::Deny);
+    let is_unix = !matches!(address, ListenerAddress::Tcp(_));
 
-    Ok(NetPolicy::builder(real_ip_header, allowed_ip_ranges).with_policy_mode(policy).build())
+    let firewall = firewall.and_then(|fw| {
+        if is_unix {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': firewall does not apply to unix sockets, restrict access with `permissions`"
+            )));
+            return None;
+        }
+
+        let allow = parse_ip_ranges(name, "firewall.allow", &fw.allow, errors);
+        let deny = parse_ip_ranges(name, "firewall.deny", &fw.deny, errors);
+
+        Some(Arc::new(ListenerFirewall::new(&allow, &deny)))
+    });
+
+    let trusted = match trusted {
+        Some(tp) => compile_trusted_proxies(name, &tp, is_unix, errors),
+        None if is_unix => {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': unix sockets have no client address, `trusted_proxies.real_ip_header` is required"
+            )));
+            None
+        },
+        None => None,
+    };
+
+    (firewall, trusted)
+}
+
+fn compile_trusted_proxies(
+    name: &str,
+    raw: &RawTrustedProxies,
+    is_unix: bool,
+    errors: &mut Vec<CompileError>,
+) -> Option<Arc<TrustedProxies>> {
+    let allowed_ips = parse_ip_ranges(name, "trusted_proxies.allowed_ips", &raw.allowed_ips, errors);
+
+    if allowed_ips.iter().any(|net| net.prefix() == 0) {
+        errors.push(CompileError::new(format!(
+            "listener '{name}': trusted_proxies.allowed_ips cannot contain 0.0.0.0/0 or ::/0, anyone could forge the client address"
+        )));
+    }
+
+    let real_ip_header = match raw.real_ip_header.map(HeaderName::from_str) {
+        None => None,
+        Some(Ok(header)) => Some(header),
+        Some(Err(_)) => {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': invalid trusted_proxies.real_ip_header '{}'",
+                raw.real_ip_header.unwrap_or_default()
+            )));
+            None
+        },
+    };
+
+    let on_untrusted = match raw.on_untrusted.map(OnUntrusted::try_from) {
+        None => OnUntrusted::default(),
+        Some(Ok(mode)) => mode,
+        Some(Err(e)) => {
+            errors.push(CompileError::new(format!("listener '{name}': {e}")));
+            OnUntrusted::default()
+        },
+    };
+
+    if is_unix {
+        if !allowed_ips.is_empty() || raw.on_untrusted.is_some() {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': unix sockets have no peer address, only `real_ip_header` applies"
+            )));
+        }
+        if raw.real_ip_header.is_none() {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': unix sockets have no client address, `trusted_proxies.real_ip_header` is required"
+            )));
+        }
+    } else {
+        if allowed_ips.is_empty() && raw.real_ip_header.is_some() {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': trusted_proxies.real_ip_header needs allowed_ips, the header is only read from those proxies"
+            )));
+        }
+        if allowed_ips.is_empty() && on_untrusted == OnUntrusted::Reject {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': on_untrusted = \"reject\" needs allowed_ips, otherwise every connection is rejected"
+            )));
+        }
+    }
+
+    Some(Arc::new(TrustedProxies::new(&allowed_ips, real_ip_header, on_untrusted)))
+}
+
+/// Maps the deprecated `network_policy` block onto `firewall` and `trusted_proxies`.
+fn legacy_listener_access<'a>(policy: &RawNetworkPolicy<'a>) -> (Option<RawFirewall<'a>>, Option<RawTrustedProxies<'a>>) {
+    let firewall = (!policy.allowed_ip_ranges.is_empty() || !policy.blocked_ip_ranges.is_empty()).then(|| RawFirewall {
+        allow: policy.allowed_ip_ranges.clone(),
+        deny: policy.blocked_ip_ranges.clone(),
+    });
+
+    let trusted = policy.proxy_allowed_ips.as_ref().map(|proxies| RawTrustedProxies {
+        allowed_ips: proxies.clone(),
+        real_ip_header: Some(policy.real_ip_header.unwrap_or("X-Forwarded-For")),
+        on_untrusted: policy.policy.map(|mode| if mode.eq_ignore_ascii_case("deny") { "reject" } else { mode }),
+    });
+
+    (firewall, trusted)
+}
+
+fn parse_ip_ranges(name: &str, field: &str, ranges: &[&str], errors: &mut Vec<CompileError>) -> Vec<IpNet> {
+    ranges
+        .iter()
+        .filter_map(|range| match range.parse::<IpNet>() {
+            Ok(net) => Some(net),
+            Err(e) => {
+                errors.push(CompileError::new(format!("listener '{name}': {field} '{range}': {e}")));
+                None
+            },
+        })
+        .collect()
+}
+
+fn compile_permissions(name: &str, raw: Option<&str>, address: &ListenerAddress, errors: &mut Vec<CompileError>) -> Option<u32> {
+    let raw = raw?;
+
+    if matches!(address, ListenerAddress::Tcp(_)) {
+        errors.push(CompileError::new(format!(
+            "listener '{name}': permissions only apply to unix sockets"
+        )));
+        return None;
+    }
+
+    match u32::from_str_radix(raw.trim_start_matches("0o"), 8) {
+        Ok(mode) if mode <= 0o777 => Some(mode),
+        _ => {
+            errors.push(CompileError::new(format!(
+                "listener '{name}': invalid permissions '{raw}', expected an octal mode like \"0660\""
+            )));
+            None
+        },
+    }
 }
 
 // ============================================================================
@@ -1178,6 +1443,197 @@ fn validate_upstream_names(upstreams: &[Arc<UpstreamConfig>], errors: &mut Vec<C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn listener_from(dsl: &str) -> (Option<Arc<ListenerConfig>>, Vec<CompileError>) {
+        let source = format!("listeners {{ {dsl} }}");
+        let raw = crate::config::dsl::parser::parse_raw_gateway(&source).expect("valid syntax");
+        let mut errors = Vec::new();
+        let listener = compile_listener(&raw.listeners[0], &mut errors);
+        (listener, errors)
+    }
+
+    fn fatal(errors: &[CompileError]) -> Vec<&str> {
+        errors.iter().filter(|e| !e.warning).map(|e| e.message.as_str()).collect()
+    }
+
+    #[test]
+    fn listener_firewall_and_trusted_proxies() {
+        let (listener, errors) = listener_from(
+            r#"listener "public" {
+                address = "0.0.0.0:8443"
+                firewall { allow = [] deny = ["203.0.113.0/24"] }
+                trusted_proxies {
+                    allowed_ips = ["173.245.48.0/20"]
+                    real_ip_header = "CF-Connecting-IP"
+                    on_untrusted = "reject"
+                }
+            }"#,
+        );
+
+        assert!(errors.is_empty(), "{:?}", fatal(&errors));
+        let listener = listener.unwrap();
+        let firewall = listener.firewall.as_ref().unwrap();
+        let trusted = listener.trusted_proxies.as_ref().unwrap();
+
+        assert!(!firewall.admits("203.0.113.7".parse().unwrap()));
+        assert!(trusted.is_trusted("173.245.48.9".parse().unwrap()));
+        assert_eq!(trusted.on_untrusted(), OnUntrusted::Reject);
+        assert_eq!(trusted.real_ip_header().unwrap(), "cf-connecting-ip");
+    }
+
+    #[test]
+    fn header_without_allowed_ips_is_rejected() {
+        let (_, errors) =
+            listener_from(r#"listener "l" { address = "0.0.0.0:8080" trusted_proxies { real_ip_header = "X-Forwarded-For" } }"#);
+        assert!(fatal(&errors).iter().any(|e| e.contains("needs allowed_ips")));
+    }
+
+    #[test]
+    fn reject_without_allowed_ips_is_rejected() {
+        let (_, errors) =
+            listener_from(r#"listener "l" { address = "0.0.0.0:8080" trusted_proxies { on_untrusted = "reject" } }"#);
+        assert!(fatal(&errors).iter().any(|e| e.contains("every connection is rejected")));
+    }
+
+    #[test]
+    fn open_ranges_cannot_be_trusted() {
+        let (_, errors) = listener_from(
+            r#"listener "l" { address = "0.0.0.0:8080" trusted_proxies { allowed_ips = ["0.0.0.0/0"] real_ip_header = "X-Real-IP" } }"#,
+        );
+        assert!(fatal(&errors).iter().any(|e| e.contains("0.0.0.0/0")));
+    }
+
+    #[test]
+    fn invalid_on_untrusted_is_rejected() {
+        let (_, errors) = listener_from(
+            r#"listener "l" { address = "0.0.0.0:8080" trusted_proxies { allowed_ips = ["10.0.0.0/8"] on_untrusted = "deny" } }"#,
+        );
+        assert!(fatal(&errors).iter().any(|e| e.contains("on_untrusted")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_requires_real_ip_header() {
+        let (_, errors) = listener_from(r#"listener "uds" { address = "unix:/run/ophan.sock" }"#);
+        assert!(fatal(&errors).iter().any(|e| e.contains("real_ip_header` is required")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_rejects_firewall_and_allowed_ips() {
+        let (_, errors) = listener_from(
+            r#"listener "uds" {
+                address = "unix:/run/ophan.sock"
+                firewall { deny = ["203.0.113.0/24"] }
+                trusted_proxies { allowed_ips = ["10.0.0.0/8"] real_ip_header = "CF-Connecting-IP" }
+            }"#,
+        );
+        let errors = fatal(&errors);
+        assert!(errors.iter().any(|e| e.contains("firewall does not apply")));
+        assert!(errors.iter().any(|e| e.contains("only `real_ip_header` applies")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_socket_with_header_and_permissions() {
+        let (listener, errors) = listener_from(
+            r#"listener "uds" {
+                address = "unix:/run/ophan.sock"
+                permissions = "0660"
+                trusted_proxies { real_ip_header = "CF-Connecting-IP" }
+            }"#,
+        );
+        assert!(errors.is_empty(), "{:?}", fatal(&errors));
+        assert_eq!(listener.unwrap().permissions, Some(0o660));
+    }
+
+    #[test]
+    fn permissions_only_apply_to_unix_sockets() {
+        let (_, errors) = listener_from(r#"listener "l" { address = "0.0.0.0:8080" permissions = "0660" }"#);
+        assert!(fatal(&errors).iter().any(|e| e.contains("only apply to unix sockets")));
+    }
+
+    #[test]
+    fn legacy_network_policy_is_mapped_with_a_warning() {
+        let (listener, errors) = listener_from(
+            r#"listener "l" {
+                address = "0.0.0.0:8080"
+                network_policy {
+                    allowed_ip_ranges = ["10.0.0.0/8"]
+                    blocked_ip_ranges = ["10.0.0.66/32"]
+                    proxy_allowed_ips = ["10.1.0.0/16"]
+                    policy = "deny"
+                }
+            }"#,
+        );
+
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        assert!(errors.iter().any(|e| e.warning && e.message.contains("deprecated")));
+
+        let listener = listener.unwrap();
+        let firewall = listener.firewall.as_ref().unwrap();
+        let trusted = listener.trusted_proxies.as_ref().unwrap();
+
+        assert!(!firewall.admits("10.0.0.66".parse().unwrap()));
+        assert!(firewall.admits("10.2.0.1".parse().unwrap()));
+        assert_eq!(trusted.on_untrusted(), OnUntrusted::Reject);
+        assert_eq!(trusted.real_ip_header().unwrap(), "x-forwarded-for");
+    }
+
+    #[test]
+    fn legacy_and_new_blocks_cannot_be_mixed() {
+        let (_, errors) = listener_from(
+            r#"listener "l" {
+                address = "0.0.0.0:8080"
+                network_policy { allowed_ip_ranges = ["10.0.0.0/8"] }
+                firewall { deny = ["203.0.113.0/24"] }
+            }"#,
+        );
+        assert!(fatal(&errors).iter().any(|e| e.contains("cannot be combined")));
+    }
+
+    #[test]
+    fn metrics_defaults_path_and_accepts_tcp() {
+        let mut errors = Vec::new();
+        let raw = RawMetrics { listen: Some("127.0.0.1:9100"), path: None };
+
+        let cfg = compile_metrics(&raw, &mut errors).unwrap();
+
+        assert!(errors.is_empty());
+        assert_eq!(cfg.listen, ListenerAddress::Tcp("127.0.0.1:9100".parse().unwrap()));
+        assert_eq!(cfg.path, "/metrics");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metrics_accepts_unix_socket() {
+        let mut errors = Vec::new();
+        let raw = RawMetrics {
+            listen: Some("unix:/run/ophan/metrics.sock"),
+            path: Some("/m"),
+        };
+
+        let cfg = compile_metrics(&raw, &mut errors).unwrap();
+
+        assert_eq!(cfg.listen, ListenerAddress::Uds("/run/ophan/metrics.sock".into()));
+        assert_eq!(cfg.path, "/m");
+    }
+
+    #[test]
+    fn metrics_rejects_missing_listen_and_bad_path() {
+        let mut errors = Vec::new();
+
+        assert!(compile_metrics(&RawMetrics { listen: None, path: None }, &mut errors).is_none());
+        assert!(
+            compile_metrics(
+                &RawMetrics { listen: Some("127.0.0.1:9100"), path: Some("metrics") },
+                &mut errors
+            )
+            .is_none()
+        );
+        assert!(compile_metrics(&RawMetrics { listen: Some("example.com:9100"), path: None }, &mut errors).is_none());
+        assert_eq!(errors.len(), 3);
+    }
 
     fn raw_auth<'a>() -> RawAuthConfig<'a> {
         RawAuthConfig {

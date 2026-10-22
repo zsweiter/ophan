@@ -36,12 +36,17 @@ gateway_file = { SOI ~ gateway_body* ~ EOI }
 
 // ========== MASTER BLOCK ==========
 master_block = { "master" ~ string ~ "{" ~ master_entry* ~ "}" }
-master_entry = _{ master_user | master_workers | master_pid | master_error_log | master_includes }
+master_entry = _{ master_user | master_workers | master_pid | master_error_log | master_includes | metrics_block }
 master_user = { "user" ~ "=" ~ string }
 master_workers = { "workers" ~ "=" ~ ( string | number ) }
 master_pid = { "pid" ~ "=" ~ string }
 master_error_log = { "error_log" ~ "=" ~ string }
 master_includes = { "includes" ~ "=" ~ string }
+
+metrics_block = { "metrics" ~ "{" ~ metrics_entry* ~ "}" }
+metrics_entry = _{ metrics_listen | metrics_path }
+metrics_listen = { "listen" ~ "=" ~ string }
+metrics_path = { "path" ~ "=" ~ string }
 
 // ========== GATEWAY BODY ==========
 gateway_body = _{
@@ -58,9 +63,30 @@ name_assignment = { "name" ~ "=" ~ string }
 // ========== LISTENERS ==========
 listeners_block = { "listeners" ~ "{" ~ listener_def* ~ "}" }
 listener_def = { "listener" ~ string ~ "{" ~ listener_body* ~ "}" }
-listener_body = _{ ssl_block | listener_address | listener_protocols | network_policy_block | limits_block | listener_timeouts_block }
+listener_body = _{
+    ssl_block
+  | listener_address
+  | listener_protocols
+  | listener_permissions
+  | firewall_block
+  | trusted_proxies_block
+  | network_policy_block
+  | limits_block
+  | listener_timeouts_block
+}
 listener_address = { "address" ~ "=" ~ string }
 listener_protocols = { "protocols" ~ "=" ~ array }
+listener_permissions = { "permissions" ~ "=" ~ string }
+
+firewall_block = { "firewall" ~ "{" ~ firewall_entry* ~ "}" }
+firewall_entry = _{ firewall_allow | firewall_deny }
+firewall_allow = { "allow" ~ "=" ~ array }
+firewall_deny  = { "deny" ~ "=" ~ array }
+
+trusted_proxies_block = { "trusted_proxies" ~ "{" ~ trusted_proxies_entry* ~ "}" }
+trusted_proxies_entry = _{ trusted_allowed_ips | real_ip_header | trusted_on_untrusted }
+trusted_allowed_ips   = { "allowed_ips" ~ "=" ~ array }
+trusted_on_untrusted  = { "on_untrusted" ~ "=" ~ string }
 
 ssl_block = { ("ssl" | "tls") ~ "{" ~ ssl_entry* ~ "}" }
 ssl_entry = _{ ssl_cert | ssl_key | ssl_client_ca | ssl_versions | ssl_client_auth | ssl_ciphers }
@@ -81,6 +107,7 @@ listener_timeout_entry = _{ listener_timeout_idle | listener_timeout_keepalive }
 listener_timeout_idle = { "idle" ~ "=" ~ value }
 listener_timeout_keepalive = { "keepalive" ~ "=" ~ value }
 
+// Deprecated: superseded by `firewall` and `trusted_proxies` inside each listener.
 network_policy_block = { "network_policy" ~ "{" ~ network_entry* ~ "}" }
 network_entry        = _{ allowed_ip_ranges | blocked_ip_ranges | real_ip_header | proxy_allowed_ips | tp_policy }
 allowed_ip_ranges    = { "allowed_ip_ranges" ~ "=" ~ array }

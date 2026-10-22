@@ -7,7 +7,7 @@ order: 502
 
 Ophan monitors backend availability with active health checks. Unhealthy servers are removed from the load balancing pool; circuit breaking ejects them temporarily.
 
-> **⚠️ In development** — Active health checks are being implemented; circuit breaking is planned.
+> **⚠️ Partial** — Active health checks are available; circuit breaking is planned.
 
 ---
 
@@ -23,11 +23,11 @@ upstreams {
             { address = "10.0.1.11:8080", weight = 50 }
         ]
 
-        health_check {
-            path                = "/health"   # omit for TCP-only checks
-            interval            = "10s"
-            timeout             = "2s"
-            healthy_threshold   = 2
+        health_check = {
+            path                = "/health",   # omit for TCP-only checks
+            interval            = 10s,
+            timeout             = 2s,
+            healthy_threshold   = 2,
             unhealthy_threshold = 3
         }
     }
@@ -48,7 +48,10 @@ upstreams {
 
 - Servers failing health checks are excluded from load balancing
 - Servers that recover are automatically re-added to the pool
-- Health checks use HTTP GET requests to the configured path (or TCP connect when `path` is omitted)
+- Health checks use HTTP GET requests to the configured path (or TCP connect when `path` is omitted); any 2xx or 3xx status is healthy
+- HTTPS backends are checked with a TCP connect only
+- Upstreams without a `health_check` block are never actively checked
+- The current state is exported as `ophan_upstream_healthy` (see [Observability](/observability))
 - `on_finish` updates health state on every request
 
 ## Circuit Breaking <span class="status-badge badge-planned">Planned</span>

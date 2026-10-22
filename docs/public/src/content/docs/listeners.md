@@ -66,24 +66,33 @@ listener "public-https" {
         ciphers = ["TLS_AES_256_GCM_SHA384"]   # planned
     }
 
-    # Optional L4 access control
-    network_policy {
-        allowed_ip_ranges = ["10.0.0.0/8"]
-        blocked_ip_ranges = ["10.0.0.0/8"]
+    # Connection access control (see Network Filtering)
+    firewall {
+        allow = ["10.0.0.0/8"]
+        deny  = ["10.0.0.66/32"]
     }
 
-    # Optional (planned)
+    # Original client address behind an edge proxy
+    trusted_proxies {
+        allowed_ips    = ["173.245.48.0/20"]
+        real_ip_header = "CF-Connecting-IP"
+        on_untrusted   = "degrade"
+    }
+
     limits {
-        connections  = 100000
-        request_size = "10mb"
+        connections  = 100000   # planned, not enforced yet
+        request_size = "10mb"   # larger bodies get 413
     }
 
     timeouts {
-        idle      = "60s"
-        keepalive = "30s"
+        idle      = "60s"       # downstream read/write timeout
+        keepalive = "30s"       # idle time between requests (default 60s)
     }
 }
 ```
+
+`http2` in `protocols` enables HTTP/2 through ALPN on TLS listeners and h2c (prior
+knowledge) on plaintext listeners. An HTTP/1 connection is recycled after 10,000 requests.
 
 ## Protocols
 
@@ -102,9 +111,9 @@ listener "public-https" {
 | `cert`        | `String`   | Yes      | Absolute path to `.pem` cert       |
 | `key`         | `String`   | Yes      | Absolute path to `.pem` private key |
 | `versions`    | `Array`    | No       | `TLS1.2`, `TLS1.3`                 |
-| `client_auth` | `String`   | No       | `optional` or `required` (mTLS)    |
-| `client_ca`   | `String`   | No       | CA bundle for client certs         |
-| `ciphers`     | `Array`    | No       | Cipher suites (planned)            |
+| `client_auth` | `String`   | No       | `required` (default when `client_ca` is set) or `none`; `optional` behaves as `none` |
+| `client_ca`   | `String`   | No       | Path to the CA bundle for client certs |
+| `ciphers`     | `Array`    | No       | Ignored; the suite follows `versions` |
 
 ## Mutual TLS (mTLS) <span class="status-badge badge-dev">In development</span>
 

@@ -25,7 +25,10 @@ ophan-static = { path = "./libs/ophan-static" }
 ophan-sec = { path = "./libs/ophan-sec" }
 ophan-router = { path = "./libs/ophan-router" }
 
-pingora = { version = "0.8", default-features = false }
+pingora = { version = "0.9", default-features = false }
+prometheus = { version = "0.14", default-features = false }
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.18", features = ["io"] }
 futures = { version = "0.3" }
@@ -45,7 +48,7 @@ bitflags = "2.13.1"
 
 aho-corasick = "1.1"
 
-uuid = { version = "1", default-features = false, features = ["v4"] }
+uuid = { version = "1", default-features = false, features = ["v4", "fast-rng"] }
 pest = { version = "2.7", default-features = false }
 pest_derive = { version = "2.7" }
 
@@ -62,6 +65,7 @@ fastbloom-rs = "0.5.10"
 ## Used for loggs
 tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
 tracing-log = "0.2"
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 ## Http and networking
@@ -89,10 +93,9 @@ opt-level = 0
 debug = true
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
 
 [profile.test]

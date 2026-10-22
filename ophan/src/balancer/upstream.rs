@@ -1,32 +1,13 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 
 use arc_swap::ArcSwap;
 use flatkit::str::ImmerStr;
 
 use crate::balancer::{Backend, BalanceStrategy};
-
-#[derive(Clone, Debug)]
-pub struct HealthConfig {
-    pub interval: Duration,
-    pub timeout: Duration,
-    pub concurrency: usize,
-}
-
-impl Default for HealthConfig {
-    fn default() -> Self {
-        Self {
-            interval: Duration::from_secs(10),
-            timeout: Duration::from_secs(3),
-            concurrency: 1,
-        }
-    }
-}
+use crate::config::HealthCheckConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct UpstreamId(pub usize);
@@ -35,11 +16,12 @@ pub struct UpstreamId(pub usize);
 pub struct Upstream {
     pub id: UpstreamId,
     pub name: ImmerStr,
-    pub health: HealthConfig,
+    pub health: Option<HealthCheckConfig>,
     pub servers: ArcSwap<Vec<Arc<Backend>>>,
     pub balance_strategy: BalanceStrategy,
 
     last_check_ms: AtomicU64,
+    pub checking: AtomicBool,
     rr_counter: AtomicUsize,
     lc_counter: AtomicUsize,
 }
@@ -49,8 +31,9 @@ impl Upstream {
         Self {
             id: UpstreamId(id),
             name,
-            health: HealthConfig::default(),
+            health: None,
             last_check_ms: AtomicU64::new(0),
+            checking: AtomicBool::new(false),
             rr_counter: AtomicUsize::new(0),
             lc_counter: AtomicUsize::new(0),
             servers: ArcSwap::new(Arc::new(backends)),
@@ -66,13 +49,17 @@ impl Upstream {
         self.servers.store(Arc::new(backends));
     }
 
-    pub fn update_health_config(&mut self, health: HealthConfig) {
+    pub fn update_health_config(&mut self, health: Option<HealthCheckConfig>) {
         self.health = health;
     }
 
     pub fn is_due(&self, now_ms: u64) -> bool {
+        let Some(health) = &self.health else {
+            return false;
+        };
+
         let last = self.last_check_ms.load(Ordering::Relaxed);
-        now_ms.saturating_sub(last) >= self.health.interval.as_millis() as u64
+        last == 0 || now_ms.saturating_sub(last) >= health.interval.as_millis() as u64
     }
 
     pub fn mark_checked(&self, now_ms: u64) {

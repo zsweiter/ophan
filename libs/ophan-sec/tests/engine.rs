@@ -352,7 +352,7 @@ fn header_rule_fires() {
     let engine = engine_from(expr, WafMode::Blocking, 10);
     let mut session = engine.session(None);
     let mut req = get_req("/x");
-    req.headers.insert("x-custom", http::HeaderValue::from_static("this is forbidden"));
+    req.insert_header("x-custom", http::HeaderValue::from_static("this is forbidden")).unwrap();
     match session.on_request_headers(None, &req, None) {
         WafResult::Block { action, matched, .. } => {
             assert_eq!(action, WafAction::Block { status: 403 });

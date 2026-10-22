@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 #[derive(Debug)]
 pub enum Error {
@@ -14,9 +14,17 @@ pub enum Error {
 
     ClientNotConfigured,
     RefreshFlowDisabled,
+    /// Too many token refreshes are in flight.
+    RefreshBusy,
     ProviderStatus(String),
+    /// The OIDC discovery document is inconsistent with the configuration.
+    InvalidDiscovery(String),
 
     Dpop(DpopError),
+
+    /// An error produced by an operation shared between concurrent callers.
+    /// Use [`Error::resolve`] to inspect the original error.
+    Shared(Arc<dyn std::error::Error + Send + Sync>),
 }
 
 #[derive(Debug)]
@@ -32,11 +40,20 @@ pub enum DpopError {
     ProofRequired,
     Disabled,
     BindingMissing,
+    /// A DPoP-bound token (`cnf.jkt`) was presented with the Bearer scheme.
+    BoundTokenAsBearer,
+    /// The proof's `jti` was already used.
+    Replayed,
+    /// Too many live proofs are recorded to detect replays.
+    ReplayCacheFull,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Shared(e) => write!(f, "{e}"),
+            Self::RefreshBusy => write!(f, "Too many concurrent token refreshes"),
+            Self::InvalidDiscovery(reason) => write!(f, "Invalid OIDC discovery document: {reason}"),
             Self::Transport(e) => write!(f, "Network or HTTP transport error: {e}"),
             Self::Serialization(e) => write!(f, "Serialization or parsing failed: {e}"),
             Self::InvalidToken(e) => write!(f, "Cryptographic token processing or signature verification failed: {e}"),
@@ -74,6 +91,9 @@ impl fmt::Display for DpopError {
             Self::ProofRequired => write!(f, "DPoP token presented but no proof was provided"),
             Self::Disabled => write!(f, "DPoP is disabled but a DPoP token was presented"),
             Self::BindingMissing => write!(f, "Token lacks cnf claim required for DPoP binding"),
+            Self::BoundTokenAsBearer => write!(f, "DPoP-bound token presented with the Bearer scheme"),
+            Self::Replayed => write!(f, "DPoP proof jti was already used"),
+            Self::ReplayCacheFull => write!(f, "DPoP replay cache is full"),
         }
     }
 }
@@ -84,6 +104,7 @@ impl std::error::Error for Error {
             Self::Transport(e) => Some(e),
             Self::Serialization(e) => Some(e),
             Self::InvalidToken(e) => Some(e),
+            Self::Shared(e) => Some(e.as_ref()),
             _ => None,
         }
     }
@@ -110,39 +131,48 @@ impl From<jsonwebtoken::errors::Error> for Error {
 }
 
 impl Error {
-    pub fn is_refreshable(&self) -> bool {
+    /// Returns the original error behind [`Error::Shared`], or `self`.
+    pub fn resolve(&self) -> &Error {
         match self {
+            Self::Shared(shared) => shared.downcast_ref::<Error>().map_or(self, Error::resolve),
+            _ => self,
+        }
+    }
+
+    pub fn is_refreshable(&self) -> bool {
+        match self.resolve() {
             Self::InvalidToken(err) => {
                 use jsonwebtoken::errors::ErrorKind;
                 matches!(err.kind(), ErrorKind::ExpiredSignature | ErrorKind::InvalidSignature)
             },
             Self::MissingToken => true,
-            Self::Dpop(DpopError::Required) => true,
             _ => false,
         }
     }
 
     pub fn status_code(&self) -> u16 {
-        match self {
+        match self.resolve() {
             Self::InvalidToken(_) | Self::MissingToken | Self::KeyNotFound(_) => 401,
+            Self::Dpop(DpopError::ReplayCacheFull) => 503,
             Self::Dpop(_) => 401,
             Self::ClientNotConfigured => 404,
             Self::RefreshFlowDisabled => 403,
-            Self::ProviderStatus(_) => 502,
+            Self::RefreshBusy => 503,
+            Self::ProviderStatus(_) | Self::InvalidDiscovery(_) => 502,
             _ => 500,
         }
     }
 
     /// RFC 6750 §3: Return the appropriate WWW-Authenticate challenge for 401 responses.
     pub fn www_authenticate(&self) -> &'static str {
-        match self {
+        match self.resolve() {
             Self::Dpop(_) => "DPoP",
             _ => "Bearer",
         }
     }
 
     pub fn log_and_explain(&self) -> &'static str {
-        match self {
+        match self.resolve() {
             Self::MissingToken => {
                 tracing::info!("{}", self);
                 "missing authentication token"
@@ -177,6 +207,26 @@ impl Error {
             Self::Dpop(DpopError::InvalidFormat) | Self::Dpop(DpopError::InvalidType) => {
                 tracing::warn!("Invalid DPoP proof format: {}", self);
                 "invalid DPoP proof format"
+            },
+            Self::Dpop(DpopError::BoundTokenAsBearer) => {
+                tracing::warn!("DPoP-bound token used as bearer token: {}", self);
+                "DPoP-bound token requires the DPoP scheme"
+            },
+            Self::Dpop(DpopError::Replayed) => {
+                tracing::warn!("DPoP proof replay detected: {}", self);
+                "DPoP proof was already used"
+            },
+            Self::Dpop(DpopError::ReplayCacheFull) => {
+                tracing::error!("{}", self);
+                "DPoP proof cannot be verified right now"
+            },
+            Self::RefreshBusy => {
+                tracing::warn!("{}", self);
+                "token refresh temporarily unavailable"
+            },
+            Self::InvalidDiscovery(_) => {
+                tracing::error!("{}", self);
+                "identity provider misconfigured"
             },
             Self::KeyNotFound(kid) => {
                 tracing::warn!("Key not found for kid '{}': {}", kid, self);
@@ -245,8 +295,20 @@ mod tests {
     }
 
     #[test]
-    fn test_is_refreshable_dpop_required() {
-        assert!(Error::Dpop(DpopError::Required).is_refreshable());
+    fn test_is_refreshable_dpop_required_not_refreshable() {
+        assert!(!Error::Dpop(DpopError::Required).is_refreshable());
+        assert!(!Error::Dpop(DpopError::BoundTokenAsBearer).is_refreshable());
+    }
+
+    #[test]
+    fn test_shared_error_resolves_to_original() {
+        let shared = Error::Shared(Arc::new(Error::InvalidToken(make_jwt_error(JwtErrorKind::ExpiredSignature))));
+        assert!(matches!(shared.resolve(), Error::InvalidToken(_)));
+        assert!(shared.is_refreshable());
+        assert_eq!(shared.status_code(), 401);
+
+        let transport = Error::Shared(Arc::new(Error::ProviderStatus("503".into())));
+        assert_eq!(transport.status_code(), 502);
     }
 
     #[test]

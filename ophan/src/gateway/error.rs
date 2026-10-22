@@ -25,12 +25,17 @@ pub enum ErrorKind {
     TooManyRequests,
     PayloadTooLarge,
     UnsupportedMediaType,
+    RangeNotSatisfiable,
+    MisdirectedRequest,
 
     BadGateway,
     ServiceUnavailable,
     GatewayTimeout,
 
     InternalServerError,
+
+    /// Any other error status, with its canonical reason as message.
+    Other(StatusCode),
 }
 
 impl From<ErrorKind> for StatusCode {
@@ -45,12 +50,15 @@ impl From<ErrorKind> for StatusCode {
             ErrorKind::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ErrorKind::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ErrorKind::RangeNotSatisfiable => StatusCode::RANGE_NOT_SATISFIABLE,
+            ErrorKind::MisdirectedRequest => StatusCode::MISDIRECTED_REQUEST,
 
             ErrorKind::BadGateway => StatusCode::BAD_GATEWAY,
             ErrorKind::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorKind::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
 
             ErrorKind::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorKind::Other(status) => status,
         }
     }
 }
@@ -67,19 +75,22 @@ impl From<StatusCode> for ErrorKind {
             StatusCode::TOO_MANY_REQUESTS => ErrorKind::TooManyRequests,
             StatusCode::PAYLOAD_TOO_LARGE => ErrorKind::PayloadTooLarge,
             StatusCode::UNSUPPORTED_MEDIA_TYPE => ErrorKind::UnsupportedMediaType,
+            StatusCode::RANGE_NOT_SATISFIABLE => ErrorKind::RangeNotSatisfiable,
+            StatusCode::MISDIRECTED_REQUEST => ErrorKind::MisdirectedRequest,
 
             StatusCode::BAD_GATEWAY => ErrorKind::BadGateway,
             StatusCode::SERVICE_UNAVAILABLE => ErrorKind::ServiceUnavailable,
             StatusCode::GATEWAY_TIMEOUT => ErrorKind::GatewayTimeout,
 
             StatusCode::INTERNAL_SERVER_ERROR => ErrorKind::InternalServerError,
+            status if status.is_client_error() || status.is_server_error() => ErrorKind::Other(status),
             _ => ErrorKind::InternalServerError,
         }
     }
 }
 
 impl ErrorKind {
-    pub const fn default_message(&self) -> &'static str {
+    pub fn default_message(&self) -> &'static str {
         match self {
             Self::BadRequest => "Bad request",
             Self::Unauthorized => "Authentication required",
@@ -90,10 +101,16 @@ impl ErrorKind {
             Self::TooManyRequests => "Rate limit exceeded",
             Self::PayloadTooLarge => "Payload too large",
             Self::UnsupportedMediaType => "Unsupported media type",
+            Self::RangeNotSatisfiable => "Requested range not satisfiable",
+            Self::MisdirectedRequest => "No site is configured for this host",
             Self::BadGateway => "Bad gateway",
             Self::ServiceUnavailable => "Service unavailable",
             Self::GatewayTimeout => "Upstream server timeout",
             Self::InternalServerError => "Internal server error",
+            Self::Other(status) => match status.canonical_reason() {
+                Some(reason) => reason,
+                None => "Error",
+            },
         }
     }
 }

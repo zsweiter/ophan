@@ -18,8 +18,12 @@ impl PidGuard {
 
 impl Drop for PidGuard {
     fn drop(&mut self) {
-        println!("pid deleted");
-        let _ = std::fs::remove_file(&self.path);
+        // After an upgrade the file already holds the new process' PID.
+        let ours = std::fs::read_to_string(&self.path).is_ok_and(|pid| pid.trim() == std::process::id().to_string());
+
+        if ours {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

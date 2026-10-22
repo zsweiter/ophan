@@ -6,10 +6,18 @@ use crate::serialization::b64_encode;
 
 /// DPoP request context.
 ///
-/// Contains the values that must match the proof.
+/// Contains the values that must match the proof. The proof's `htu` is
+/// compared against `scheme://authority/path` (RFC 9449 §4.3), so the
+/// caller must supply the scheme and authority the client used, not only
+/// the request target.
 pub struct DPoPRequestContext<'a> {
     pub method: &'a str,
-    pub uri: &'a str,
+    /// Request scheme (`https` or `http`).
+    pub scheme: &'a str,
+    /// Request authority (`host[:port]`), e.g. from `:authority` or `Host`.
+    pub authority: &'a str,
+    /// Request path, without query or fragment.
+    pub path: &'a str,
     pub nonce: Option<&'a str>,
 
     pub dpop_proof: Option<&'a str>, // The DPoP proof token

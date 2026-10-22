@@ -378,7 +378,7 @@ request
 ## 🧭 Vision
 
 - **Simplicity** — Declarative config, minimal moving parts
-- **Performance** — Zero-copy routing, lock-free hot path, ~5M req/s
+- **Performance** — Allocation-free routing, lock-free hot path, upstream connection reuse by default
 - **Hot Reload** — Atomic config swap without dropping connections
 - **Modular** — Plug policies, backends, and protocols
 

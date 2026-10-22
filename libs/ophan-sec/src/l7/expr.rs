@@ -259,7 +259,7 @@ pub enum Field {
     /// jar; the WAF receives a single `name → value` mapping per cookie.
     Cookie(ImmerStr),
     /// Client IP. **Resolved externally** by the proxy middleware using the
-    /// per-listener `NetPolicy` (handles `X-Forwarded-For`,
+    /// per-listener `TrustedProxies` (handles `X-Forwarded-For`,
     /// `CF-Connecting-IP`, `True-Client-IP`). Backed by `IpSet` (radix
     /// trie, O(W) where W = address bit-width).
     Ip,

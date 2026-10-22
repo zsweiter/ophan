@@ -88,11 +88,19 @@ path "/api/*" {
 
 ## Response Headers
 
-The limiter exposes remaining quota via response headers (set in `prepare_response`):
+The limiter exposes remaining quota via response headers:
 
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset`
+| Header                  | Value                                                                                   |
+| ----------------------- | --------------------------------------------------------------------------------------- |
+| `X-RateLimit-Limit`     | Requests per window (`rate + burst` for the token bucket)                               |
+| `X-RateLimit-Remaining` | Requests left                                                                           |
+| `X-RateLimit-Reset`     | Seconds until the quota is fully restored; on a `429`, seconds until the next request is allowed |
+| `Retry-After`           | Sent with `429`, same value as `X-RateLimit-Reset`                                       |
+
+Counters are kept per policy: routes that reference the same named policy share them, and a
+reload keeps them unless the policy changes. Each gateway tracks up to about one million
+clients; beyond that, new clients share an overflow bucket until idle entries are evicted
+(every 10 seconds).
 
 ## Next Steps
 

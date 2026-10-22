@@ -22,7 +22,7 @@ httpdate = { workspace = true }
 bitflags = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "~0.31.1", default-features = false, features = ["zerocopy"] }
+nix = { version = "~0.31.1", default-features = false, features = ["fs", "zerocopy"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

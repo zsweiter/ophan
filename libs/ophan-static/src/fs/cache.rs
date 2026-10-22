@@ -10,7 +10,6 @@ use ophan_net::http::header;
 
 use crate::fs::file::DirObject;
 use crate::fs::file::FileObject;
-use crate::http::conditional;
 
 #[derive(Debug, Clone)]
 pub enum CacheObject {
@@ -20,11 +19,42 @@ pub enum CacheObject {
 
 #[allow(dead_code)]
 impl CacheObject {
+    fn load_blocking(path: PathBuf) -> io::Result<Self> {
+        let link_metadata = std::fs::symlink_metadata(&path)?;
+        let is_symlink = link_metadata.file_type().is_symlink();
+
+        let metadata = if is_symlink {
+            std::fs::metadata(&path)?
+        } else {
+            link_metadata
+        };
+        let real_path = std::fs::canonicalize(&path)?;
+
+        let object = if metadata.is_dir() {
+            CacheObject::Directory(Arc::new(DirObject::new(path, real_path, metadata, is_symlink)))
+        } else {
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| header::CONTENT_TYPE_OCTET_STREAM.clone());
+
+            CacheObject::File(Arc::new(FileObject::new(path, real_path, metadata, content_type, is_symlink)))
+        };
+
+        Ok(object)
+    }
+
     #[inline]
     pub fn is_symlink(&self) -> bool {
         match self {
             Self::File(file) => file.is_symlink,
             Self::Directory(dir) => dir.is_symlink,
+        }
+    }
+
+    #[inline]
+    pub fn real_path(&self) -> &Path {
+        match self {
+            Self::File(file) => &file.real_path,
+            Self::Directory(dir) => &dir.real_path,
         }
     }
 
@@ -73,14 +103,22 @@ impl CacheObject {
 
 pub struct Filesystem {
     cache: MemoryCache<PathBuf, CacheObject>,
+    misses: MemoryCache<PathBuf, ()>,
     default_ttl: Duration,
 }
+
+/// Upper bound for how long a failed probe is remembered.
+const MISS_TTL: Duration = Duration::from_secs(2);
 
 #[allow(dead_code)]
 impl Filesystem {
     #[inline]
     pub fn new(cache_size: usize, default_ttl: Duration) -> Self {
-        Self { cache: MemoryCache::new(cache_size), default_ttl }
+        Self {
+            cache: MemoryCache::new(cache_size),
+            misses: MemoryCache::new((cache_size / 4).max(16)),
+            default_ttl,
+        }
     }
 
     pub async fn fetch_or_load<P>(&self, target_path: P, ttl: Option<Duration>) -> io::Result<CacheObject>
@@ -93,34 +131,46 @@ impl Filesystem {
             return Ok(cached);
         }
 
-        let link_metadata = tokio::fs::symlink_metadata(path).await?;
-        let is_symlink = link_metadata.file_type().is_symlink();
-
-        let metadata = if is_symlink {
-            tokio::fs::metadata(path).await?
-        } else {
-            link_metadata
-        };
-
-        let cached_object = if metadata.is_dir() {
-            CacheObject::Directory(Arc::new(DirObject { path: path.to_path_buf(), metadata, is_symlink }))
-        } else {
-            let etag = conditional::create_etag(&metadata);
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
-            let content_type = HeaderValue::from_str(mime.as_ref()).unwrap_or_else(|_| header::CONTENT_TYPE_OCTET_STREAM.clone());
-
-            CacheObject::File(Arc::new(FileObject::new(
-                path.to_path_buf(),
-                metadata,
-                etag,
-                content_type,
-                is_symlink,
-            )))
-        };
+        let owned = path.to_path_buf();
+        let cached_object = tokio::task::spawn_blocking(move || CacheObject::load_blocking(owned))
+            .await
+            .map_err(io::Error::other)??;
 
         self.insert(path, cached_object.clone(), Some(ttl.unwrap_or(self.default_ttl)));
 
         Ok(cached_object)
+    }
+
+    /// Like [`Self::fetch_or_load`], but a missing path yields `Ok(None)` and is
+    /// remembered for a short while so repeated probes skip the filesystem.
+    pub async fn probe<P>(&self, target_path: P, ttl: Option<Duration>) -> io::Result<Option<CacheObject>>
+    where
+        P: AsRef<Path>,
+    {
+        let path = target_path.as_ref();
+
+        if self.misses.get(path).0.is_some() {
+            return Ok(None);
+        }
+
+        match self.fetch_or_load(path, ttl).await {
+            Ok(object) => Ok(Some(object)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let miss_ttl = ttl.unwrap_or(self.default_ttl).min(MISS_TTL);
+                self.misses.put(path, (), Some(miss_ttl));
+                Ok(None)
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Drop the cached entry for `target_path` and load it again from disk.
+    pub async fn reload<P>(&self, target_path: P, ttl: Option<Duration>) -> io::Result<CacheObject>
+    where
+        P: AsRef<Path>,
+    {
+        self.invalidate(target_path.as_ref());
+        self.fetch_or_load(target_path, ttl).await
     }
 
     #[inline]
@@ -128,7 +178,9 @@ impl Filesystem {
     where
         P: AsRef<Path>,
     {
-        self.cache.remove(&target_path.as_ref().to_path_buf());
+        let path = target_path.as_ref();
+        self.cache.remove(path);
+        self.misses.remove(path);
     }
 
     #[inline]
@@ -144,7 +196,7 @@ impl Filesystem {
     where
         P: AsRef<Path>,
     {
-        self.cache.put(&path.as_ref().to_path_buf(), object, ttl);
+        self.cache.put(path.as_ref(), object, ttl);
     }
 
     #[inline]
@@ -244,6 +296,37 @@ mod tests {
         let result = fs.fetch_or_load(&link, None).await.unwrap();
 
         assert!(result.is_symlink());
+        assert_eq!(result.real_path(), fs::canonicalize(&target).unwrap());
+    }
+
+    #[tokio::test]
+    async fn probe_remembers_missing_paths() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("late.html");
+
+        let fs = Filesystem::new(100, Duration::from_secs(60));
+        assert!(fs.probe(&file_path, None).await.unwrap().is_none());
+
+        std::fs::write(&file_path, b"data").unwrap();
+        assert!(fs.probe(&file_path, None).await.unwrap().is_none());
+
+        fs.invalidate(&file_path);
+        assert!(fs.probe(&file_path, None).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn reload_refreshes_metadata() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("grow.txt");
+        fs::write(&file_path, b"abc").unwrap();
+
+        let fs = Filesystem::new(100, Duration::from_secs(60));
+        let first = fs.fetch_or_load(&file_path, None).await.unwrap().into_file().unwrap();
+        assert_eq!(first.metadata.len(), 3);
+
+        std::fs::write(&file_path, b"abcdef").unwrap();
+        let second = fs.reload(&file_path, None).await.unwrap().into_file().unwrap();
+        assert_eq!(second.metadata.len(), 6);
     }
 
     #[test]
@@ -255,8 +338,8 @@ mod tests {
 
         let obj = CacheObject::File(Arc::new(FileObject::new(
             file_path.clone(),
+            file_path.clone(),
             meta,
-            HeaderValue::from_static("\"test\""),
             HeaderValue::from_static("text/plain"),
             false,
         )));
@@ -269,7 +352,12 @@ mod tests {
         let dir = temp_dir();
         let meta = fs::metadata(&dir).unwrap();
 
-        let obj = CacheObject::Directory(Arc::new(DirObject::new(dir.path().to_path_buf(), meta, false)));
+        let obj = CacheObject::Directory(Arc::new(DirObject::new(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            meta,
+            false,
+        )));
 
         assert!(obj.into_directory().is_some());
     }
@@ -282,9 +370,9 @@ mod tests {
         let meta = fs::metadata(&file_path).unwrap();
 
         let obj = CacheObject::File(Arc::new(FileObject::new(
+            file_path.clone(),
             file_path,
             meta,
-            HeaderValue::from_static("\"test\""),
             HeaderValue::from_static("text/plain"),
             false,
         )));

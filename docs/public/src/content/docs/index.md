@@ -101,66 +101,54 @@ Ophan is engineered for high-throughput, low-latency API proxying through four c
 
 - **Zero-Copy Pipeline** — Minimal memory allocations along the critical path.
 - **Lock-Free Hot Path** — Concurrent processing without thread contention.
-- **Kernel-Level Dropping** — XDP/eBPF discards malicious traffic directly at the NIC.
+- **Kernel-Level Dropping** — XDP/eBPF discards malicious traffic directly at the NIC (in development; the software firewall is used meanwhile).
 - **Atomic Hot-Reload** — Zero-downtime updates without dropping active connections.
 
-### ⚔️ Direct Passthrough: Ophan vs NGINX
+### Reverse proxy: Ophan vs NGINX vs Pingora
 
-Tested under high concurrency (**300 active connections, 8 threads, 30s**) proxying directly to a single Go HTTP echo backend in raw passthrough mode.
+One route proxying to a Go HTTP backend that answers 3 bytes, on the same machine, with
+64 keep-alive client connections. Each proxy is pinned to the same 4 CPU threads (2 physical
+cores of an Intel i5-12500H laptop), the backend and the load generator ([`hey`](https://github.com/rakyll/hey))
+to other cores. "CPU / request" is the proxy's own CPU time divided by the requests it served,
+which does not depend on how fast the load generator is.
 
-| Metric              | NGINX (Passthrough) | Ophan (Passthrough) | Delta                |
-| ------------------- | ------------------- | ------------------- | -------------------- |
-| **Throughput**      | 15,509 req/s        | **20,029 req/s**    | 🚀 **+29.1% higher** |
-| **Average Latency** | 19.30 ms            | **15.18 ms**        | ⚡ **-21.3% lower**  |
-| **P50 Latency**     | 17.93 ms            | **13.86 ms**        | **-22.7%**           |
-| **P75 Latency**     | 23.34 ms            | **18.83 ms**        | **-19.3%**           |
-| **P90 Latency**     | 30.46 ms            | **24.67 ms**        | **-19.0%**           |
-| **P99 Latency**     | 49.09 ms            | **44.04 ms**        | **-10.2%**           |
-| **Total Processed** | 466,445 reqs        | **602,610 reqs**    | **+136,165 reqs**    |
+| Proxy                                                      | Requests/s | p50     | p99     | CPU / request | RSS      |
+| ---------------------------------------------------------- | ---------- | ------- | ------- | ------------- | -------- |
+| NGINX, upstream `keepalive`                                | 47,504     | 1.00 ms | 5.30 ms | 54 µs         | 24.5 MiB |
+| NGINX, default `proxy_pass`                                | 23,828     | 2.50 ms | 6.00 ms | 153 µs        | 24.1 MiB |
+| Pingora, minimal proxy                                     | 34,708     | 1.70 ms | 4.75 ms | 96 µs         | 25.1 MiB |
+| **Ophan** (rate limit, rewrite, metrics, security headers) | 27,710     | 2.15 ms | 5.45 ms | 134 µs        | 28.8 MiB |
 
-#### Ophan Benchmark Log
+What the numbers say:
 
-```bash
-wrk -t8 -c300 -d30s --latency http://api.example.me:8080/echo
-Running 30s test @ http://api.example.me:8080/echo
-  8 threads and 300 connections
-  Thread Stats    Avg      Stdev      Max     +/- Stdev
-    Latency     15.18ms    8.43ms  119.81ms    77.54%
-    Req/Sec      2.52k   380.19      4.90k     80.43%
+- With its default configuration, NGINX opens a new connection to the backend for every
+  request; Ophan reuses upstream connections out of the box and is faster than that setup.
+- NGINX configured with an upstream `keepalive` pool is the most efficient proxy for this
+  minimal workload.
+- Most of Ophan's cost is Pingora's own per-request cost; Ophan's routing, policies, metrics
+  and headers add about 37 µs per request on top of it. Rate limiting and URL rewriting are
+  below the measurement noise.
 
-  Latency Distribution
-     50%   13.86ms
-     75%   18.83ms
-     90%   24.67ms
-     99%   44.04ms
+NGINX configuration used:
 
-  602,610 requests in 30.09s, 315.51MB read
-Requests/sec:  20,029.34
-Transfer/sec:     10.49MB
+```nginx
+upstream api { server 127.0.0.1:18081; keepalive 128; }   # omitted in the default run
 
+server {
+    listen 127.0.0.1:18080;
+    location /api/ {
+        proxy_pass http://api/;          # http://127.0.0.1:18081/ in the default run
+        proxy_http_version 1.1;          # omitted in the default run
+        proxy_set_header Connection "";  # omitted in the default run
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
 ```
 
-#### NGINX Benchmark Log
-
-```bash
-wrk -t8 -c300 -d30s --latency http://api.example.me/echo
-Running 30s test @ http://api.example.me/echo
-  8 threads and 300 connections
-  Thread Stats    Avg      Stdev      Max     +/- Stdev
-    Latency     19.30ms    8.97ms  108.64ms    74.67%
-    Req/Sec      1.95k   151.10      2.58k     69.48%
-
-  Latency Distribution
-     50%   17.93ms
-     75%   23.34ms
-     90%   30.46ms
-     99%   49.09ms
-
-  466,445 requests in 30.08s, 136.12MB read
-Requests/sec:  15,509.02
-Transfer/sec:      4.53MB
-
-```
+These are loopback numbers with tiny responses, where per-request overhead dominates. With
+real backends that take milliseconds, TLS to the upstream, or many upstreams, the proxy is a
+much smaller share of the total.
 
 ---
 

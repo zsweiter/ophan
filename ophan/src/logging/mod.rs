@@ -1,3 +1,7 @@
+mod logger;
+
+pub use logger::Logger;
+
 use bytes::Bytes;
 use http::HeaderValue;
 use std::fmt;
@@ -52,6 +56,17 @@ impl<T> TracingId<T> {
         let _ = cell.set(value);
 
         Self { inner: cell, _marker: PhantomData }
+    }
+
+    /// Accepts a client supplied identifier: at most 128 visible ASCII characters.
+    #[inline]
+    pub fn from_client(value: &HeaderValue) -> Option<Self> {
+        const MAX_LEN: usize = 128;
+
+        let bytes = value.as_bytes();
+        let valid = !bytes.is_empty() && bytes.len() <= MAX_LEN && bytes.iter().all(|b| b.is_ascii_graphic());
+
+        valid.then(|| Self::from_header_value(value.clone()))
     }
 
     /// Creates a tracing identifier from raw header bytes.

@@ -10,16 +10,15 @@ use crate::{
     middlewares::{
         auth::{AuthContext, AuthMiddleware},
         cors::{CorsContext, CorsMiddleware},
-        helmet::Helmet,
-        limiter::{LimiterIdentifier, RateLimitContext, RateLimitMiddleware},
+        helmet::{Helmet, HelmetConfig},
+        limiter::{LimiterIdentifier, MemoryRateLimiter, RateLimitContext, RateLimitMiddleware},
         waf::{WafContext, WafEngineMiddleware},
     },
     state::HttpRoute,
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, StatusCode};
-use ophan_net::http::header;
+use http::StatusCode;
 use ophan_net::http::vary::VarySet;
 use ophan_net::proxy::{RequestParts, ResponseParts};
 
@@ -68,10 +67,21 @@ impl Pipeline {
         }
     }
 
+    pub fn rate_limiter_store(&self) -> std::sync::Arc<MemoryRateLimiter> {
+        self.rate_limit_middleware.store()
+    }
+
     /// Pre-request processing pipeline.
     /// This function is called before the request is forwarded to the backend.
     pub async fn on_request(&self, req: &RequestParts, route: &HttpRoute, ctx: &mut OphanCtx) -> FilterAction {
         if let Some(cors) = route.cors_policy.as_ref() {
+            // The router admits OPTIONS on CORS routes for preflights only.
+            let not_preflight =
+                req.method == http::Method::OPTIONS && !req.headers.contains_key(http::header::ACCESS_CONTROL_REQUEST_METHOD);
+            if not_preflight && !route.methods.is_empty() && !route.methods.contains_method(&req.method) {
+                return FilterAction::Reject(StatusCode::METHOD_NOT_ALLOWED);
+            }
+
             run_policy_filter!(self.cors_middleware, cors, req, ctx);
         }
 
@@ -91,7 +101,8 @@ impl Pipeline {
         }
 
         if let Some(auth) = route.auth_policy.as_ref() {
-            match self.auth_middleware.on_request(req, auth, ctx).await {
+            let scheme = ctx.scheme;
+            match self.auth_middleware.on_request_with_scheme(req, scheme, auth, ctx).await {
                 FilterAction::Continue => { /* continue */ },
                 action => return action,
             }
@@ -141,22 +152,21 @@ impl Pipeline {
     ) -> Result<(), pingora::BError> {
         upstream_request.remove_header("x-user-claims");
 
-        if let Some(claims) = ctx.auth.as_ref().map(|a| &a.claims) {
-            let encoded_claims = claims
-                .encode_bytes()
-                .map_err(|e| pingora::Error::because(pingora::ErrorType::InternalError, "failed to encode user claims", e))?;
+        if let Some(auth) = ctx.auth.as_ref() {
+            let header_value = auth
+                .claims_header()
+                .ok_or_else(|| pingora::Error::explain(pingora::ErrorType::InternalError, "failed to encode user claims"))?;
 
-            let header_value = HeaderValue::from_maybe_shared(encoded_claims)
-                .map_err(|e| pingora::Error::because(pingora::ErrorType::InternalError, "failed to create claims header", e))?;
-
-            upstream_request.insert_header("x-user-claims", header_value)?;
+            upstream_request.insert_header("x-user-claims", header_value.clone())?;
         }
 
         Ok(())
     }
 
     pub fn prepare_response(&self, response: &mut ResponseParts, route: Option<&HttpRoute>, ctx: &PolicyContext, vary: VarySet) {
-        if let Some(helmet_cfg) = route.and_then(|r| r.helmet_policy) {
+        // Responses that matched no route (our own error pages) use the default policy.
+        let helmet_cfg = route.map_or(Some(HelmetConfig::default()), |r| r.helmet_policy);
+        if let Some(helmet_cfg) = helmet_cfg {
             self.helmet.prepare_response(helmet_cfg, response);
         }
 
@@ -176,8 +186,6 @@ impl Pipeline {
             self.auth_middleware.prepare_response(response, auth_config, auth);
         }
 
-        if let Some(value) = Option::<HeaderValue>::from(vary) {
-            let _ = response.insert_header(header::VARY, value);
-        }
+        vary.merge_into(response);
     }
 }

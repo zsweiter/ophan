@@ -9,5 +9,8 @@ pub use token_bucket::TokenBucket;
 pub struct RateLimitResult {
     pub allowed: bool,
     pub remaining: u64,
+    /// Seconds until the next request would be allowed (`0` when allowed).
     pub retry_after: u64,
+    /// Seconds until the client's quota is fully restored.
+    pub reset_after: u64,
 }

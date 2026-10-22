@@ -13,7 +13,10 @@ ophan-router = { workspace = true }
 flatkit = { workspace = true }
 cli = { workspace = true }
 
-pingora = { workspace = true, features = ["proxy", "s2n", "connection_filter"] }
+pingora = { workspace = true, features = ["proxy", "s2n"] }
+prometheus = { workspace = true }
+mimalloc = { workspace = true }
+libmimalloc-sys = { workspace = true }
 futures = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true, features = ["time"] }
@@ -41,6 +44,7 @@ tracing = { workspace = true, features = [
     "release_max_level_warn",
 ] }
 tracing-log = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]

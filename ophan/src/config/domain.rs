@@ -10,7 +10,8 @@ use flatkit::str::ImmerStr;
 use http::{HeaderName, HeaderValue};
 use ophan_net::http::HttpMethodSet;
 use ophan_net::tls::{ALPN, TlsVersion};
-use ophan_sec::NetPolicy;
+use ophan_sec::TrustedProxies;
+use ophan_sec::l4::ListenerFirewall;
 use ophan_sec::l7::WafConfig;
 
 use crate::balancer::BalanceStrategy;
@@ -42,6 +43,14 @@ pub struct MasterConfig {
     pub pid: String,
     pub error_log: String,
     pub includes: Box<[String]>,
+    pub metrics: Option<MetricsConfig>,
+}
+
+/// Prometheus metrics endpoint exposed by the master process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetricsConfig {
+    pub listen: ListenerAddress,
+    pub path: String,
 }
 
 /// Configuration for a single gateway instance with its listeners, upstreams, routes and trusted proxies.
@@ -51,7 +60,6 @@ pub struct GatewayConfig {
     pub listeners: Box<[Arc<ListenerConfig>]>,
     pub upstreams: Box<[Arc<UpstreamConfig>]>,
     pub routes: Box<[Arc<RoutesConfig>]>,
-    pub net_policy: Option<Arc<NetPolicy>>,
 }
 
 // ============================================================================
@@ -87,6 +95,8 @@ impl From<SecurityConfig> for Option<pingora::listeners::tls::TlsSettings> {
                     tls_settings.set_ca(pingora::protocols::tls::CaType::new(ca));
                 }
 
+                tls_settings.set_client_auth_required(certs.client_auth_required);
+
                 Some(tls_settings)
             },
         }
@@ -97,6 +107,7 @@ pub struct TlsCerts {
     pub cert: String,
     pub key: String,
     pub client_ca: Option<Vec<u8>>, // CLIENT PEM bytes
+    pub client_auth_required: bool,
 }
 
 // ============================================================================
@@ -127,6 +138,11 @@ pub enum NetworkTransport {
     Uds(String),
 }
 
+#[cfg(target_os = "linux")]
+const UDS_PATH_MAX: usize = 108;
+#[cfg(not(target_os = "linux"))]
+const UDS_PATH_MAX: usize = 104;
+
 impl FromStr for NetworkTransport {
     type Err = String;
 
@@ -139,6 +155,14 @@ impl FromStr for NetworkTransport {
         if let Some(path) = value.strip_prefix("unix:") {
             if path.is_empty() {
                 return Err("invalid unix domain socket path, expected unix:/path/to/socket".to_string());
+            }
+
+            // `sockaddr_un.sun_path` holds 108 bytes on Linux (104 on BSD/macOS), including the NUL.
+            if path.len() >= UDS_PATH_MAX {
+                return Err(format!(
+                    "unix domain socket path is {} bytes, it must be shorter than {UDS_PATH_MAX}: {path}",
+                    path.len()
+                ));
             }
 
             #[cfg(unix)]
@@ -360,7 +384,12 @@ pub struct ListenerConfig {
     pub protocols: Box<[NetworkProtocol]>,
     pub security: SecurityConfig,
     pub connection: ConnectionConfig,
-    pub policy: Option<Arc<NetPolicy>>,
+    /// Connection access control, evaluated against the socket address.
+    pub firewall: Option<Arc<ListenerFirewall>>,
+    /// Original client address behind edge proxies.
+    pub trusted_proxies: Option<Arc<TrustedProxies>>,
+    /// File mode of a unix socket listener.
+    pub permissions: Option<u32>,
 }
 
 impl ListenerConfig {
@@ -371,7 +400,9 @@ impl ListenerConfig {
             protocols: vec![NetworkProtocol::default()].into_boxed_slice(),
             security: SecurityConfig::default(),
             connection: ConnectionConfig::default(),
-            policy: None,
+            firewall: None,
+            trusted_proxies: None,
+            permissions: None,
         }
     }
 }
@@ -458,7 +489,8 @@ pub struct UpstreamTlsConfig {
 /// Health check configuration for upstream servers (path, interval, thresholds).
 #[derive(Debug, Clone)]
 pub struct HealthCheckConfig {
-    pub path: String,
+    /// HTTP path probed with `GET`; `None` means a TCP connect check.
+    pub path: Option<String>,
     pub interval: Duration,
     pub timeout: Duration,
     pub unhealthy_threshold: u32,
@@ -574,6 +606,64 @@ pub struct HeaderMutations {
     pub outbound: OutboundHeaderMutations,
 }
 
+impl HeaderMutations {
+    /// `inbound_headers.set/remove`: applied to the request as received, before the policies.
+    pub fn apply_to_client_request(&self, request: &mut pingora::http::RequestHeader) {
+        for name in self.inbound.client_remove.iter() {
+            request.remove_header(name);
+        }
+        for (name, value) in self.inbound.client_set.iter() {
+            let _ = request.insert_header(name.clone(), value.clone());
+        }
+    }
+
+    /// `inbound_headers.to_upstream`: applied to the request sent to the upstream.
+    pub fn apply_to_upstream_request(&self, request: &mut pingora::http::RequestHeader) -> pingora::Result<()> {
+        for name in self.inbound.to_upstream_remove.iter() {
+            request.remove_header(name);
+        }
+        for (name, value) in self.inbound.to_upstream_set.iter() {
+            request.insert_header(name.clone(), value.clone())?;
+        }
+        Ok(())
+    }
+
+    /// `outbound_headers.from_upstream`: applied to the upstream response only.
+    pub fn apply_to_upstream_response(&self, response: &mut pingora::http::ResponseHeader) -> pingora::Result<()> {
+        for name in self.outbound.from_upstream_remove.iter() {
+            response.remove_header(name);
+        }
+        for (name, value) in self.outbound.from_upstream_set.iter() {
+            response.insert_header(name.clone(), value.clone())?;
+        }
+        Ok(())
+    }
+
+    /// `outbound_headers.set/remove`: applied to every response sent to the client.
+    pub fn apply_to_client_response(&self, response: &mut pingora::http::ResponseHeader) {
+        for name in self.outbound.client_remove.iter() {
+            response.remove_header(name);
+        }
+        for (name, value) in self.outbound.client_set.iter() {
+            let _ = response.insert_header(name.clone(), value.clone());
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        let i = &self.inbound;
+        let o = &self.outbound;
+
+        i.client_set.is_empty()
+            && i.client_remove.is_empty()
+            && i.to_upstream_set.is_empty()
+            && i.to_upstream_remove.is_empty()
+            && o.from_upstream_set.is_empty()
+            && o.from_upstream_remove.is_empty()
+            && o.client_set.is_empty()
+            && o.client_remove.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InboundHeaderMutations {
     pub client_set: AHashMap<HeaderName, HeaderValue>,
@@ -667,6 +757,9 @@ mod tests {
 
     #[test]
     fn test_transport_empty_uds_path() {
+        let long = format!("unix:/{}", "a".repeat(UDS_PATH_MAX));
+        assert!(NetworkTransport::try_from(long.as_str()).unwrap_err().contains("shorter than"));
+
         let err = NetworkTransport::try_from("unix:").unwrap_err();
         assert!(err.contains("invalid unix domain socket path"));
     }

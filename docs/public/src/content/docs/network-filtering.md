@@ -13,10 +13,10 @@ Ophan filters traffic at **Layer 4** (before TLS termination and HTTP parsing) t
 
 ## Two Execution Modes
 
-| Mode            | Where it runs | When to use                                |
-| --------------- | ------------- | ------------------------------------------ |
-| **XDP / eBPF**  | In the kernel | Dedicated NICs, bare metal, privileged containers |
-| **Software Mode** | User space | Shared hosting, restricted containers, legacy kernels, unsupported NICs |
+| Mode              | Where it runs | When to use                                                             |
+| ----------------- | ------------- | ----------------------------------------------------------------------- |
+| **XDP / eBPF**    | In the kernel | Dedicated NICs, bare metal, privileged containers                       |
+| **Software Mode** | User space    | Shared hosting, restricted containers, legacy kernels, unsupported NICs |
 
 ### XDP / eBPF
 
@@ -54,13 +54,13 @@ Packet
 
 ### Ethernet Frame Handling
 
-| EtherType | Action |
-| --------- | ------ |
-| `ARP`     | Always passed (required for L2 resolution) |
-| `IPv4`    | Passed/dropped by `evaluate_ingress_v4` |
-| `IPv6`    | Passed/dropped by `evaluate_ingress_v6` |
+| EtherType       | Action                                                           |
+| --------------- | ---------------------------------------------------------------- |
+| `ARP`           | Always passed (required for L2 resolution)                       |
+| `IPv4`          | Passed/dropped by `evaluate_ingress_v4`                          |
+| `IPv6`          | Passed/dropped by `evaluate_ingress_v6`                          |
 | `VLAN` / `QinQ` | Unwrapped (up to 2 nested tags) to find the real inner EtherType |
-| Anything else | Passed through unmodified |
+| Anything else   | Passed through unmodified                                        |
 
 ### Parse Safety
 
@@ -73,37 +73,118 @@ Packet
 
 ## Configuration
 
-Filtering is configured per listener via `network_policy`:
+Each listener has two independent blocks:
+
+| Block             | Layer | Question it answers                        | Used by                       |
+| ----------------- | ----- | ------------------------------------------ | ----------------------------- |
+| `firewall`        | L4    | Who may open a connection to this listener | Connection acceptance         |
+| `trusted_proxies` | L7    | Who the client is once connected           | Rate limiting, logs, upstream |
 
 ```hcl
-listener "ingress-https" {
-    address   = "0.0.0.0:443"
-    protocols = ["http1", "http2"]
+listener "public" {
+    address = "0.0.0.0:443"
 
-    network_policy {
-        allowed_ip_ranges = ["10.0.0.0/8"]
-        blocked_ip_ranges = ["192.168.1.5/32"]
+    # Connection access control
+    firewall {
+        allow = []                     # empty = everyone
+        deny  = ["203.0.113.0/24"]
+    }
+
+    # Original client address
+    trusted_proxies {
+        allowed_ips    = ["173.245.48.0/20", "103.21.244.0/22", "2400:cb00::/32"]
+        real_ip_header = "CF-Connecting-IP"
+        on_untrusted   = "degrade"     # degrade | reject
     }
 }
 ```
 
-### Trusting Proxy Headers
+### `firewall`
 
-When the gateway sits behind a CDN or L4 load balancer (Cloudflare, Fastly, ALB), the network address seen at L4 belongs to the proxy, not the real client. Configure the trusted proxy ranges so Ophan can safely resolve the real client IP:
+Evaluated against the socket address, never against a header:
+
+1. an address in `deny` is rejected;
+2. if `allow` is not empty, only its networks get in;
+3. everyone else gets in.
+
+### `trusted_proxies`
+
+`real_ip_header` is read **only** from peers in `allowed_ips`. Multi-hop headers
+(`X-Forwarded-For`, `Forwarded`) are read from the right: trusted hops are skipped and the
+first untrusted address is the client. Entries a client adds on the left are ignored.
+
+| `on_untrusted`      | Peer in `allowed_ips`         | Any other peer                                  |
+| ------------------- | ----------------------------- | ----------------------------------------------- |
+| `degrade` (default) | Address from `real_ip_header` | Its socket address; the header is ignored       |
+| `reject`            | Address from `real_ip_header` | Connection rejected, with or without the header |
+
+Use `degrade` when the listener is reachable from the internet as well as through the edge;
+use `reject` when only the edge (Cloudflare, a load balancer) should reach it.
+
+### Unix socket listeners
+
+A Unix socket has no peer address. Access is restricted with the socket file mode, and the
+client address always comes from the header:
 
 ```hcl
-network_policy {
-    # Both rules are required when behind a proxy
-    real_ip_header = "X-Forwarded-For"
-    proxy_allowed_ips = [
-        "173.245.48.0/20",
-        "104.16.0.0/13",
-        # ... your CDN's IP ranges
-    ]
+listener "tunnel" {
+    address     = "unix:/run/ophan/edge.sock"
+    permissions = "0660"
+
+    trusted_proxies {
+        real_ip_header = "CF-Connecting-IP"   # required
+    }
 }
 ```
 
-> **Security rule:** never add `0.0.0.0/0` to `proxy_allowed_ips`. Anyone could then forge `X-Forwarded-For` and bypass IP-based controls.
+A request without a valid `real_ip_header` gets `400`.
+
+### Validation
+
+These configurations are rejected when the configuration is loaded:
+
+- `real_ip_header` without `allowed_ips` on a TCP listener (the header would never be read);
+- `on_untrusted = "reject"` without `allowed_ips` (every connection would be rejected);
+- `0.0.0.0/0` or `::/0` in `allowed_ips` (anyone could forge the client address);
+- a Unix socket listener without `real_ip_header`, or with `firewall` or `allowed_ips`;
+- `permissions` on a TCP listener;
+- two listeners with the same `address`.
+
+### Where the rules are enforced
+
+| Listener     | `firewall` and `on_untrusted = "reject"`                           |
+| ------------ | ------------------------------------------------------------------ |
+| TCP with TLS | After accept, before the TLS handshake (the connection is dropped) |
+| Plain TCP    | When each request arrives (`403`)                                  |
+| Unix socket  | Not applicable; use `permissions`                                  |
+
+A listener is identified by its full `address`. A connection is matched to the listener bound
+to its local address, or to the `0.0.0.0` / `[::]` listener on the same port. Rules follow
+hot reloads.
+
+### Headers sent to the upstream
+
+| Header              | Value                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------- |
+| `X-Forwarded-For`   | The peer address, appended to the received value only when the peer is a trusted proxy |
+| `X-Real-IP`         | The resolved client address                                                            |
+| `X-Forwarded-Proto` | `https` or `http` (kept from a trusted proxy)                                          |
+| `X-Forwarded-Host`  | The original `Host` (kept from a trusted proxy)                                        |
+| `X-Request-Id`      | The request id (see [Observability](/observability))                                   |
+
+### Deprecated `network_policy`
+
+The previous `network_policy` block is still accepted with a warning and maps to the new blocks:
+
+| `network_policy`                          | New                                    |
+| ----------------------------------------- | -------------------------------------- |
+| `allowed_ip_ranges` / `blocked_ip_ranges` | `firewall.allow` / `firewall.deny`     |
+| `proxy_allowed_ips`                       | `trusted_proxies.allowed_ips`          |
+| `real_ip_header`                          | `trusted_proxies.real_ip_header`       |
+| `policy = "degrade" \| "deny"`            | `on_untrusted = "degrade" \| "reject"` |
+
+It cannot be combined with `firewall` or `trusted_proxies` in the same listener, and it is
+not accepted at gateway level.
 
 ---
 

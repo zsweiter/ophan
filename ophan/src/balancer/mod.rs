@@ -6,10 +6,10 @@ mod upstream;
 use arc_swap::ArcSwap;
 use std::{net::IpAddr, str::FromStr, sync::Arc};
 
-pub use backend::{Backend, BackendAddr};
+pub use backend::{Backend, BackendAddr, PeerTemplate};
 pub use erros::BalancerError;
-pub use healthcheck::HealthScheduler;
-pub use upstream::{HealthConfig, Upstream, UpstreamId};
+pub use healthcheck::HealthChecker;
+pub use upstream::{Upstream, UpstreamId};
 
 /// Load balancing strategy for upstream server selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Copy)]
@@ -74,18 +74,17 @@ impl LoadBalancer {
         self.upstreams.store(Arc::new(new_upstreams));
     }
 
+    pub fn upstreams(&self) -> arc_swap::Guard<Arc<Vec<Upstream>>> {
+        self.upstreams.load()
+    }
+
     #[inline]
     pub fn select_backend(&self, upstream_id: usize, client_ip: IpAddr) -> Result<Arc<Backend>, BalancerError> {
         let snapshot = self.upstreams.load();
 
-        debug_assert!(
-            upstream_id < snapshot.len(),
-            "upstream_id {} is out of bounds for upstreams list of length {}",
-            upstream_id,
-            snapshot.len()
-        );
-
-        let upstream = &snapshot[upstream_id];
+        let Some(upstream) = snapshot.get(upstream_id) else {
+            return Err(BalancerError::UpstreamNotFound);
+        };
         let backends = upstream.servers.load();
 
         // Short circuit when backends is empty

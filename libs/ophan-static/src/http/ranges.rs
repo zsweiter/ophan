@@ -150,7 +150,7 @@ impl HttpRange {
     #[allow(unused)]
     #[inline]
     pub fn as_std_range(&self) -> Range<u64> {
-        self.start..self.length
+        self.start..self.start + self.length
     }
 }
 

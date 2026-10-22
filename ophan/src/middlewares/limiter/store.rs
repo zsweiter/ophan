@@ -1,16 +1,13 @@
 use std::{
-    hash::{Hash, Hasher},
+    hash::Hash,
     net::{IpAddr, Ipv6Addr},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock},
     time::Instant,
 };
 
 use dashmap::DashMap;
-
-use crate::state::Reloadable;
+use dashmap::mapref::entry::Entry;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::algorithm::{RateLimitResult, SlidingWindow, TokenBucket};
 use super::config::{LimiterConfig, RateLimitAlgorithm};
@@ -21,6 +18,20 @@ use super::config::{LimiterConfig, RateLimitAlgorithm};
 /// IPv6 address would allow a single client to bypass the limit by rotating addresses.
 const IPV6_PREFIX_MASK: u128 = u128::MAX << 64;
 
+/// Upper bound of tracked clients per store. Beyond it, new clients of a policy share
+/// one overflow bucket until idle entries are evicted, so memory stays bounded.
+const MAX_TRACKED_CLIENTS: usize = 1 << 20;
+const OVERFLOW_KEY: u64 = u64::MAX;
+
+/// Per-process random seed so clients cannot craft colliding identifiers.
+static KEY_HASHER: LazyLock<ahash::RandomState> = LazyLock::new(ahash::RandomState::new);
+
+/// Hashes a client identifier (header value, token claim) with the process seed.
+#[inline]
+pub fn hash_identifier(bytes: &[u8]) -> u64 {
+    KEY_HASHER.hash_one(bytes)
+}
+
 /// Internal rate limit state: either a sliding window or token bucket.
 pub enum LimiterState {
     Sliding(SlidingWindow),
@@ -30,12 +41,12 @@ pub enum LimiterState {
 /// Composite key for rate limit state lookup.
 ///
 /// The `key_hash` identifies the client (IP, header value, or token claim).
-/// The `epoch` ensures that hot-reloaded configurations create fresh states
-/// rather than reusing stale ones from a previous configuration.
+/// The `scope` identifies the limiter policy instance, so routes with different
+/// policies and configurations loaded by a hot reload never share state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct LimiterKey {
     pub key_hash: u64,
-    pub epoch: u64,
+    pub scope: u64,
 }
 
 impl LimiterKey {
@@ -44,20 +55,18 @@ impl LimiterKey {
     /// IPv4-mapped IPv6 addresses are normalized to IPv4, and IPv6 addresses
     /// are truncated to their `/64` prefix.
     #[inline(always)]
-    pub fn from_ip(ip: IpAddr, epoch: u64) -> Self {
+    pub fn from_ip(ip: IpAddr, scope: u64) -> Self {
         let ip = match ip.to_canonical() {
             IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from(u128::from(v6) & IPV6_PREFIX_MASK)),
             v4 => v4,
         };
 
-        let mut hasher = ahash::AHasher::default();
-        ip.hash(&mut hasher);
-        Self { key_hash: hasher.finish(), epoch }
+        Self { key_hash: KEY_HASHER.hash_one(ip), scope }
     }
 
     #[inline(always)]
-    pub fn from_raw_hash(hash: u64, epoch: u64) -> Self {
-        Self { key_hash: hash, epoch }
+    pub fn from_raw_hash(hash: u64, scope: u64) -> Self {
+        Self { key_hash: hash, scope }
     }
 }
 
@@ -68,6 +77,23 @@ impl LimiterState {
             RateLimitAlgorithm::TokenBucket => Self::Bucket(TokenBucket::new(config)),
         }
     }
+
+    #[inline]
+    fn check(&self, now_ms: u64) -> RateLimitResult {
+        match self {
+            Self::Sliding(w) => w.check(now_ms),
+            Self::Bucket(b) => b.check(now_ms),
+        }
+    }
+
+    /// Returns `true` when the state is indistinguishable from a fresh one.
+    #[inline]
+    fn is_idle(&self, now_ms: u64) -> bool {
+        match self {
+            Self::Sliding(w) => w.is_idle(now_ms),
+            Self::Bucket(b) => b.is_idle(now_ms),
+        }
+    }
 }
 
 /// In-memory rate limiter backed by a concurrent hash map.
@@ -76,12 +102,13 @@ impl LimiterState {
 /// which is immune to NTP adjustments, wall-clock skew, and leap seconds.
 /// See [std::time::Instant](https://doc.rust-lang.org/std/time/struct.Instant.html).
 ///
-/// States are keyed by `(key_hash, epoch)`. When the epoch changes (hot reload),
-/// all existing clients get fresh rate limit states.
+/// Idle states are removed by [`MemoryRateLimiter::evict_idle`], which keeps memory
+/// bounded by the number of active clients.
 pub struct MemoryRateLimiter {
-    states: DashMap<LimiterKey, Arc<LimiterState>>,
+    states: DashMap<LimiterKey, LimiterState, ahash::RandomState>,
+    tracked: AtomicUsize,
+    max_tracked: usize,
     start_time: Instant,
-    epoch: AtomicU64,
 }
 
 impl Default for MemoryRateLimiter {
@@ -97,9 +124,10 @@ impl MemoryRateLimiter {
 
     pub fn with_capacity(size: usize) -> Self {
         Self {
-            states: DashMap::with_capacity(size),
+            states: DashMap::with_capacity_and_hasher(size, ahash::RandomState::new()),
+            tracked: AtomicUsize::new(0),
+            max_tracked: MAX_TRACKED_CLIENTS,
             start_time: Instant::now(),
-            epoch: AtomicU64::new(0),
         }
     }
 
@@ -108,32 +136,44 @@ impl MemoryRateLimiter {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    #[allow(unused)]
-    #[inline]
-    pub fn current_epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
-    }
-
-    /// Advances the epoch and removes all entries from previous epochs.
-    pub fn advance_epoch(&self) {
-        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-        self.states.retain(|key, _| key.epoch >= epoch);
-    }
-
     pub fn consume(&self, key: LimiterKey, cfg: &LimiterConfig) -> RateLimitResult {
         let now_ms = self.now_ms();
-        let limiter = self.states.entry(key).or_insert_with(|| Arc::new(LimiterState::new(cfg)));
 
-        match limiter.value().as_ref() {
-            LimiterState::Sliding(w) => w.check(now_ms),
-            LimiterState::Bucket(b) => b.check(now_ms),
+        if let Some(state) = self.states.get(&key) {
+            return state.check(now_ms);
+        }
+
+        let key = if self.tracked.load(Ordering::Relaxed) >= self.max_tracked {
+            LimiterKey { key_hash: OVERFLOW_KEY, ..key }
+        } else {
+            key
+        };
+
+        match self.states.entry(key) {
+            Entry::Occupied(state) => state.get().check(now_ms),
+            Entry::Vacant(slot) => {
+                self.tracked.fetch_add(1, Ordering::Relaxed);
+                slot.insert(LimiterState::new(cfg)).check(now_ms)
+            },
         }
     }
-}
 
-impl Reloadable for MemoryRateLimiter {
-    async fn hot_reload(&self) {
-        self.advance_epoch();
+    /// Removes states whose window has fully elapsed. Returns the number of entries left.
+    pub fn evict_idle(&self) -> usize {
+        let now_ms = self.now_ms();
+        self.states.retain(|_, state| !state.is_idle(now_ms));
+
+        let len = self.states.len();
+        self.tracked.store(len, Ordering::Relaxed);
+        len
+    }
+
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
     }
 }
 
@@ -149,13 +189,11 @@ impl LimiterBackend {
 
 pub struct RateLimiter {
     backend: LimiterBackend,
-    #[allow(unused)]
-    epoch: AtomicU64,
 }
 
 impl RateLimiter {
     pub fn new(backend: LimiterBackend) -> Self {
-        Self { backend, epoch: AtomicU64::new(0) }
+        Self { backend }
     }
 
     pub fn consume(&self, key: LimiterKey, cfg: &LimiterConfig) -> RateLimitResult {
@@ -164,15 +202,8 @@ impl RateLimiter {
         }
     }
 
-    #[inline]
-    pub fn current_epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
-    }
-
-    #[allow(unused)]
-    #[inline]
-    pub fn update_epoch(&self) {
-        self.epoch.fetch_add(1, Ordering::SeqCst);
+    pub fn backend(&self) -> &LimiterBackend {
+        &self.backend
     }
 }
 
@@ -189,6 +220,7 @@ mod tests {
             algorithm: super::super::config::RateLimitAlgorithm::SlidingWindow,
             identifier: super::super::config::LimiterIdentifier::Ip,
             skip_patterns: None,
+            scope: 0,
         }
     }
 
@@ -199,6 +231,7 @@ mod tests {
             algorithm: super::super::config::RateLimitAlgorithm::TokenBucket,
             identifier: super::super::config::LimiterIdentifier::Ip,
             skip_patterns: None,
+            scope: 0,
         }
     }
 
@@ -223,7 +256,7 @@ mod tests {
     }
 
     #[test]
-    fn key_from_ip_different_epochs_differ() {
+    fn key_from_ip_different_scopes_differ() {
         let k1 = LimiterKey::from_ip(ip(1), 0);
         let k2 = LimiterKey::from_ip(ip(1), 1);
         assert_ne!(k1, k2);
@@ -233,7 +266,7 @@ mod tests {
     fn key_from_raw_hash_preserves_value() {
         let k = LimiterKey::from_raw_hash(0xDEAD_BEEF, 42);
         assert_eq!(k.key_hash, 0xDEAD_BEEF);
-        assert_eq!(k.epoch, 42);
+        assert_eq!(k.scope, 42);
     }
 
     // ── MemoryRateLimiter ─────────────────────────────────────────────────
@@ -299,61 +332,63 @@ mod tests {
         assert!(r.remaining > 0);
     }
 
-    // ── Epoch / Hot Reload ────────────────────────────────────────────────
+    // ── Scopes / Eviction ─────────────────────────────────────────────────
 
-    /// When the epoch changes, keys with the old epoch should create fresh
-    /// states. This simulates a hot reload: existing clients get a clean slate.
+    /// Each policy instance has its own scope, so exhausting one route's limit
+    /// never affects another route (or a reloaded configuration).
     #[test]
-    fn epoch_change_creates_fresh_state() {
+    fn different_scopes_have_independent_state() {
         let limiter = MemoryRateLimiter::new();
         let cfg = make_config(2, 60);
-        let key_v0 = LimiterKey::from_ip(ip(1), 0);
-        let key_v1 = LimiterKey::from_ip(ip(1), 1);
+        let key_a = LimiterKey::from_ip(ip(1), 1);
+        let key_b = LimiterKey::from_ip(ip(1), 2);
 
-        // Exhaust v0
-        limiter.consume(key_v0, &cfg);
-        limiter.consume(key_v0, &cfg);
-        let r = limiter.consume(key_v0, &cfg);
-        assert!(!r.allowed, "v0 should be exhausted");
+        limiter.consume(key_a, &cfg);
+        limiter.consume(key_a, &cfg);
+        assert!(!limiter.consume(key_a, &cfg).allowed, "scope a should be exhausted");
 
-        // v1 (new epoch) should start fresh
-        let r = limiter.consume(key_v1, &cfg);
-        assert!(r.allowed, "v1 should be allowed after epoch change");
+        assert!(limiter.consume(key_b, &cfg).allowed, "scope b must start fresh");
     }
 
     #[test]
-    fn epoch_change_does_not_affect_other_keys() {
-        let limiter = MemoryRateLimiter::new();
+    fn new_clients_share_overflow_bucket_when_full() {
+        let mut limiter = MemoryRateLimiter::new();
+        limiter.max_tracked = 2;
         let cfg = make_config(1, 60);
 
-        // Exhaust key A at epoch 0
-        let key_a0 = LimiterKey::from_ip(ip(1), 0);
-        limiter.consume(key_a0, &cfg);
-        let r = limiter.consume(key_a0, &cfg);
-        assert!(!r.allowed);
+        assert!(limiter.consume(LimiterKey::from_ip(ip(1), 0), &cfg).allowed);
+        assert!(limiter.consume(LimiterKey::from_ip(ip(2), 0), &cfg).allowed);
 
-        // Key B at epoch 0 should still work (different IP)
-        let key_b0 = LimiterKey::from_ip(ip(2), 0);
-        let r = limiter.consume(key_b0, &cfg);
-        assert!(r.allowed);
+        // The table is full: both newcomers land in the overflow bucket.
+        assert!(limiter.consume(LimiterKey::from_ip(ip(3), 0), &cfg).allowed);
+        assert!(!limiter.consume(LimiterKey::from_ip(ip(4), 0), &cfg).allowed);
+        assert_eq!(limiter.len(), 3);
+    }
+
+    #[test]
+    fn evict_idle_keeps_active_states() {
+        let limiter = MemoryRateLimiter::new();
+        let cfg = make_config(5, 60);
+
+        limiter.consume(LimiterKey::from_ip(ip(1), 0), &cfg);
+        limiter.consume(LimiterKey::from_ip(ip(2), 0), &cfg);
+
+        assert_eq!(limiter.evict_idle(), 2);
+    }
+
+    #[test]
+    fn evict_idle_removes_full_buckets() {
+        let limiter = MemoryRateLimiter::new();
+        // Zero-burst bucket of 1000 req/s refills a token every millisecond.
+        let cfg = make_bucket_config(1000, 1, 0);
+
+        limiter.consume(LimiterKey::from_ip(ip(1), 0), &cfg);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        assert_eq!(limiter.evict_idle(), 0);
     }
 
     // ── RateLimiter wrapper ───────────────────────────────────────────────
-
-    #[test]
-    fn rate_limiter_epoch_starts_at_zero() {
-        let limiter = RateLimiter::new(LimiterBackend::new_memory(1024));
-        assert_eq!(limiter.current_epoch(), 0);
-    }
-
-    #[test]
-    fn rate_limiter_update_epoch_increments() {
-        let limiter = RateLimiter::new(LimiterBackend::new_memory(1024));
-        limiter.update_epoch();
-        assert_eq!(limiter.current_epoch(), 1);
-        limiter.update_epoch();
-        assert_eq!(limiter.current_epoch(), 2);
-    }
 
     #[test]
     fn rate_limiter_consume_delegates_to_backend() {
@@ -365,22 +400,6 @@ mod tests {
         assert!(limiter.consume(key, &cfg).allowed);
         assert!(limiter.consume(key, &cfg).allowed);
         assert!(!limiter.consume(key, &cfg).allowed);
-    }
-
-    // ── Hot Reloadable trait ──────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn hot_reload_increments_epoch() {
-        use crate::state::Reloadable;
-
-        let limiter = MemoryRateLimiter::new();
-        assert_eq!(limiter.epoch.load(Ordering::SeqCst), 0);
-
-        limiter.hot_reload().await;
-        assert_eq!(limiter.epoch.load(Ordering::SeqCst), 1);
-
-        limiter.hot_reload().await;
-        assert_eq!(limiter.epoch.load(Ordering::SeqCst), 2);
     }
 
     // ── Clock / Timing ────────────────────────────────────────────────────

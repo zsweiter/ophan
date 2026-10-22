@@ -755,7 +755,7 @@ impl<T> Node<T> {
         let mut node = self;
         let mut backtracking = false;
         let mut params = Params::new();
-        let mut skipped: Vec<Skipped<'_, '_, T>> = Vec::new();
+        let mut skipped: smallvec::SmallVec<[Skipped<'_, '_, T>; 4]> = smallvec::SmallVec::new();
 
         'backtrack: loop {
             'walk: loop {

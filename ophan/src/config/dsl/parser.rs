@@ -35,6 +35,7 @@ pub fn parse_raw_master<'a>(input: &'a str) -> Result<RawMaster<'a>, ConfigError
     let mut error_log = "C:\\ophan-gateway\\logs\\error.log";
 
     let mut includes = Vec::new();
+    let mut metrics = None;
 
     for entry in inner {
         match entry.as_rule() {
@@ -65,12 +66,33 @@ pub fn parse_raw_master<'a>(input: &'a str) -> Result<RawMaster<'a>, ConfigError
             Rule::master_includes => {
                 includes.push(extract_str(entry.into_inner().next().unwrap()));
             },
+            Rule::metrics_block => {
+                if metrics.is_some() {
+                    return Err(entry.error("duplicate 'metrics' block in master block"));
+                }
+                metrics = Some(parse_raw_metrics(entry)?);
+            },
             Rule::EOI => {},
             _ => return Err(entry.error(format!("unexpected field '{}' in master block", entry.as_str()))),
         }
     }
 
-    Ok(RawMaster { name, user, workers, pid, error_log, includes })
+    Ok(RawMaster { name, user, workers, pid, error_log, includes, metrics })
+}
+
+fn parse_raw_metrics(pair: pest::iterators::Pair<Rule>) -> Result<RawMetrics, ConfigError> {
+    let mut listen = None;
+    let mut path = None;
+
+    for entry in pair.into_inner() {
+        match entry.as_rule() {
+            Rule::metrics_listen => listen = Some(extract_str(entry.into_inner().next().unwrap())),
+            Rule::metrics_path => path = Some(extract_str(entry.into_inner().next().unwrap())),
+            _ => return Err(entry.error(format!("unexpected field '{}' in metrics block", entry.as_str()))),
+        }
+    }
+
+    Ok(RawMetrics { listen, path })
 }
 
 pub fn parse_raw_gateway<'a>(input: &'a str) -> Result<RawGateway<'a>, ConfigError> {
@@ -100,6 +122,11 @@ pub fn parse_raw_gateway<'a>(input: &'a str) -> Result<RawGateway<'a>, ConfigErr
             Rule::policy_block => {
                 policies.push(parse_raw_policy(pair)?);
             },
+            Rule::network_policy_block => {
+                return Err(pair.error(
+                    "network_policy is configured per listener: use `firewall` and `trusted_proxies` inside each listener",
+                ));
+            },
             Rule::EOI => {},
             _ => return Err(pair.error(format!("unexpected block '{}' in gateway", pair.as_str()))),
         }
@@ -122,6 +149,9 @@ fn parse_raw_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RawListe
             let mut address = "";
             let mut protocols = Vec::new();
             let mut ssl = None;
+            let mut permissions = None;
+            let mut firewall = None;
+            let mut trusted_proxies = None;
             let mut network_policy = None;
             let mut limits = None;
             let mut timeouts = None;
@@ -137,6 +167,15 @@ fn parse_raw_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RawListe
                     },
                     Rule::ssl_block => {
                         ssl = Some(parse_raw_ssl(body)?);
+                    },
+                    Rule::listener_permissions => {
+                        permissions = Some(extract_str(body.into_inner().next().unwrap()));
+                    },
+                    Rule::firewall_block => {
+                        firewall = Some(parse_raw_firewall(body)?);
+                    },
+                    Rule::trusted_proxies_block => {
+                        trusted_proxies = Some(parse_raw_trusted_proxies(body)?);
                     },
                     Rule::network_policy_block => {
                         network_policy = Some(parse_raw_net_policy(body)?);
@@ -157,6 +196,9 @@ fn parse_raw_listeners(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RawListe
                 address,
                 protocols,
                 tls: ssl,
+                permissions,
+                firewall,
+                trusted_proxies,
                 network_policy,
                 limits,
                 timeouts,
@@ -248,12 +290,41 @@ fn parse_raw_listener_timeouts(pair: pest::iterators::Pair<Rule>) -> RawListener
     RawListenerTimeouts { idle, keepalive }
 }
 
+fn parse_raw_firewall(pair: pest::iterators::Pair<Rule>) -> Result<RawFirewall, ConfigError> {
+    let mut firewall = RawFirewall::default();
+
+    for entry in pair.into_inner() {
+        match entry.as_rule() {
+            Rule::firewall_allow => firewall.allow = extract_raw_array(entry.into_inner().next().unwrap()),
+            Rule::firewall_deny => firewall.deny = extract_raw_array(entry.into_inner().next().unwrap()),
+            _ => return Err(entry.error(format!("unexpected field '{}' in firewall", entry.as_str()))),
+        }
+    }
+
+    Ok(firewall)
+}
+
+fn parse_raw_trusted_proxies(pair: pest::iterators::Pair<Rule>) -> Result<RawTrustedProxies, ConfigError> {
+    let mut trusted = RawTrustedProxies::default();
+
+    for entry in pair.into_inner() {
+        match entry.as_rule() {
+            Rule::trusted_allowed_ips => trusted.allowed_ips = extract_raw_array(entry.into_inner().next().unwrap()),
+            Rule::real_ip_header => trusted.real_ip_header = Some(extract_str(entry.into_inner().next().unwrap())),
+            Rule::trusted_on_untrusted => trusted.on_untrusted = Some(extract_str(entry.into_inner().next().unwrap())),
+            _ => return Err(entry.error(format!("unexpected field '{}' in trusted_proxies", entry.as_str()))),
+        }
+    }
+
+    Ok(trusted)
+}
+
 fn parse_raw_net_policy(pair: pest::iterators::Pair<Rule>) -> Result<RawNetworkPolicy, ConfigError> {
     let mut allowed_ip_ranges = Vec::new();
     let mut blocked_ip_ranges = Vec::new();
     let mut real_ip_header = None;
     let mut proxy_allowed_ips = None;
-    // let mut policy = None;
+    let mut policy = None;
 
     for entry in pair.into_inner() {
         match entry.as_rule() {
@@ -273,7 +344,7 @@ fn parse_raw_net_policy(pair: pest::iterators::Pair<Rule>) -> Result<RawNetworkP
                 proxy_allowed_ips = Some(extract_raw_array(val));
             },
             Rule::tp_policy => {
-                // policy = Some(extract_str(entry.into_inner().next().unwrap()));
+                policy = Some(extract_str(entry.into_inner().next().unwrap()));
             },
             Rule::EOI => {},
             _ => return Err(entry.error(format!("unexpected field '{}' in network_policy", entry.as_str()))),
@@ -285,6 +356,7 @@ fn parse_raw_net_policy(pair: pest::iterators::Pair<Rule>) -> Result<RawNetworkP
         blocked_ip_ranges,
         real_ip_header,
         proxy_allowed_ips,
+        policy,
     })
 }
 
@@ -1525,6 +1597,33 @@ master "test" {
 "#;
         let m = parse_raw_master(input).unwrap();
         assert!(matches!(m.workers, RawWorkers::Count(4)));
+    }
+
+    #[test]
+    fn test_parse_master_metrics_block() {
+        let input = r#"
+master "test" {
+    metrics {
+        listen = "unix:/run/ophan/metrics.sock"
+        path = "/internal/metrics"
+    }
+}
+"#;
+        let m = parse_raw_master(input).unwrap();
+        let metrics = m.metrics.expect("metrics block");
+        assert_eq!(metrics.listen, Some("unix:/run/ophan/metrics.sock"));
+        assert_eq!(metrics.path, Some("/internal/metrics"));
+    }
+
+    #[test]
+    fn test_parse_master_duplicate_metrics_block() {
+        let input = r#"
+master "test" {
+    metrics { listen = "127.0.0.1:9100" }
+    metrics { listen = "127.0.0.1:9101" }
+}
+"#;
+        assert!(parse_raw_master(input).is_err());
     }
 
     #[test]

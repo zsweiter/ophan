@@ -57,8 +57,21 @@ impl IpSet {
         self.v4.is_empty() && self.v6.is_empty()
     }
 
+    /// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) also match the IPv4 ranges.
     #[inline]
     pub fn contains(&self, client_ip: IpAddr) -> bool {
+        if let IpAddr::V6(v6) = client_ip
+            && let Some(v4) = v6.to_ipv4_mapped()
+            && self.contains_exact(IpAddr::V4(v4))
+        {
+            return true;
+        }
+
+        self.contains_exact(client_ip)
+    }
+
+    #[inline]
+    fn contains_exact(&self, client_ip: IpAddr) -> bool {
         match client_ip {
             IpAddr::V4(ip) => self
                 .v4

@@ -35,6 +35,12 @@ impl SlidingWindow {
         }
     }
 
+    /// Both tracked windows are in the past, so the effective count is zero.
+    pub fn is_idle(&self, now_ms: u64) -> bool {
+        let window = now_ms / (self.window_secs * 1000);
+        self.current_window.load(Ordering::Acquire).saturating_add(1) < window
+    }
+
     pub fn check(&self, now_ms: u64) -> RateLimitResult {
         let window_size_ms = self.window_secs * 1000;
         let window = now_ms / window_size_ms;
@@ -57,16 +63,30 @@ impl SlidingWindow {
             0
         };
 
-        let current_count = self.current_count.load(Ordering::Acquire);
-        let effective = (previous_count as f64 * weight) + current_count as f64;
+        let weighted_previous = previous_count as f64 * weight;
+        let reset_after = (window_size_ms - elapsed).div_ceil(1000);
+        let mut current_count = self.current_count.load(Ordering::Acquire);
 
-        let allowed = (effective + 1.0) <= self.max_requests as f64;
+        loop {
+            let effective = weighted_previous + current_count as f64;
 
-        if allowed {
-            self.current_count.fetch_add(1, Ordering::SeqCst);
-            let remaining = self.max_requests.saturating_sub((effective + 1.0) as u64);
-            RateLimitResult { allowed: true, remaining, retry_after: 0 }
-        } else {
+            if effective + 1.0 > self.max_requests as f64 {
+                break;
+            }
+
+            match self
+                .current_count
+                .compare_exchange_weak(current_count, current_count + 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    let remaining = self.max_requests.saturating_sub((effective + 1.0) as u64);
+                    return RateLimitResult { allowed: true, remaining, retry_after: 0, reset_after };
+                },
+                Err(actual) => current_count = actual,
+            }
+        }
+
+        {
             let retry_after_ms = if previous_count > 0 {
                 let needed_weight = (self.max_requests as f64 - current_count as f64) / previous_count as f64;
                 if needed_weight < weight {
@@ -83,6 +103,7 @@ impl SlidingWindow {
                 allowed: false,
                 remaining: 0,
                 retry_after: retry_after_ms.div_ceil(1000),
+                reset_after,
             }
         }
     }
@@ -101,6 +122,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::SlidingWindow,
             identifier: LimiterIdentifier::Ip,
             skip_patterns: None,
+            scope: 0,
         }
     }
 

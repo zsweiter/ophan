@@ -52,16 +52,15 @@ listeners {
             ]
         }
 
-        # Optional
-        network_policy {
-            # ACL
-            allowed_ip_ranges = ["10.0.0.0/8"]
-            blocked_ip_ranges = ["10.0.0.0/8"]
+        # Optional: connection access control (socket address)
+        firewall {
+            allow = []
+            deny  = ["203.0.113.0/24"]
+        }
 
-            # When your server is behind of proxy like fastly, cloudflare
-            # Both rules is required
-            real_ip_header = "X-Forwarded-For"
-            proxy_allowed_ips = [
+        # Optional: original client address behind an edge proxy (Cloudflare, ALB, ...)
+        trusted_proxies {
+            allowed_ips = [
                 "173.245.48.0/20",
                 "103.21.244.0/22",
                 "103.22.200.0/22",
@@ -78,6 +77,8 @@ listeners {
                 "172.64.0.0/13",
                 "131.0.72.0/22"
             ]
+            real_ip_header = "CF-Connecting-IP"
+            on_untrusted   = "degrade"   # degrade | reject
         }
 
         # Optional (planed)

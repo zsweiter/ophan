@@ -1,11 +1,11 @@
-use ophan_net::http::{HttpMethod, HttpMethodSet};
+use ophan_net::http::HttpMethodSet;
 
 use super::{
     error::{InsertError, MatchError},
     params::Params,
     pattern::normalize_pattern,
     sni::SniTableRouter,
-    vhost::VirtualHost,
+    vhost::{RouteEntry, VirtualHost},
 };
 
 /// Multi-stage API Gateway Router path matching.
@@ -17,11 +17,11 @@ use super::{
 ///    - Supports exact (`api.domain.com`) and wildcard (`*.domain.com`) hosts.
 ///    - Falls through to the default vhost if no match.
 ///
-/// 2. **HTTP method filtering**
-///    - Per-vhost bitmask check with bitwise OR merging on duplicate hosts.
-///
-/// 3. **Path routing**
+/// 2. **Path routing**
 ///    - Radix tree lookup (static → param → wildcard → catch-all).
+///
+/// 3. **HTTP method filtering**
+///    - Each route keeps its own method set; a path match with another method is `MethodNotAllowed`.
 pub struct Router<T> {
     hosts_table: SniTableRouter,
     routes_bucket: Vec<VirtualHost<T>>,
@@ -32,7 +32,7 @@ impl<T> Default for Router<T> {
     fn default() -> Self {
         Self {
             hosts_table: SniTableRouter::new(),
-            routes_bucket: vec![VirtualHost::new("__default__", HttpMethodSet::all())],
+            routes_bucket: vec![VirtualHost::new("__default__")],
             default_id: 0,
         }
     }
@@ -49,7 +49,7 @@ impl<T> Router<T> {
     ///  This capacity only applied to routes
     pub fn with_capacity(capacity: usize) -> Self {
         let mut routes = Vec::with_capacity(capacity + 1);
-        routes.push(VirtualHost::new("__default__", HttpMethodSet::all()));
+        routes.push(VirtualHost::new("__default__"));
 
         Self {
             hosts_table: SniTableRouter::new(),
@@ -63,37 +63,69 @@ impl<T> Router<T> {
     /// - `host`: if `Some`, routes to the matching vhost (creates it if needed);
     ///   if `None`, uses the default vhost.
     /// - `path`: Ophan path syntax (`/users/:id`, `/api/files/*`, etc.)
-    /// - `methods`: HTTP methods allowed for this route (merged via OR with existing).
+    /// - `methods`: HTTP methods allowed for this route; empty means every method.
     /// - `value`: stored value returned on match.
     pub fn add_route(&mut self, path: &str, methods: HttpMethodSet, hosts: Vec<&str>, value: T) -> Result<(), InsertError>
     where
         T: Clone,
     {
-        let vhost_id = if hosts.is_empty() {
-            Self::merge_methods(&mut self.routes_bucket[self.default_id as usize].methods, &methods);
-            self.default_id
-        } else {
-            let mut vhost_id = self.default_id;
-            for host in hosts {
-                if let Some(id) = self.hosts_table.route(host) {
-                    Self::merge_methods(&mut self.routes_bucket[id as usize].methods, &methods);
-                    vhost_id = id;
-                } else {
-                    vhost_id = self.add_vhost_inner(host, methods.clone());
-                }
-            }
-            vhost_id
-        };
+        // A route without explicit methods accepts every method.
+        let methods = if methods.is_empty() { HttpMethodSet::all() } else { methods };
 
+        let mut vhost_ids = Vec::with_capacity(hosts.len().max(1));
+        if hosts.is_empty() {
+            vhost_ids.push(self.default_id);
+        }
+
+        for host in hosts {
+            let id = match self.hosts_table.route(host) {
+                Some(id) if self.routes_bucket[id as usize].name.eq_ignore_ascii_case(host) => id,
+                _ => self.add_vhost_inner(host),
+            };
+
+            if !vhost_ids.contains(&id) {
+                vhost_ids.push(id);
+            }
+        }
+
+        let entry = RouteEntry { methods, value };
+        for id in vhost_ids {
+            self.insert_into(id, path, entry.clone())?;
+        }
+
+        Ok(())
+    }
+
+    fn insert_into(&mut self, vhost_id: u32, path: &str, value: RouteEntry<T>) -> Result<(), InsertError>
+    where
+        T: Clone,
+    {
         let vhost = &mut self.routes_bucket[vhost_id as usize];
 
+        // Requests are matched without a trailing slash, so patterns are stored the same way.
+        let path = if path.len() > 1 && !path.ends_with("/*") {
+            path.trim_end_matches('/')
+        } else {
+            path
+        };
+        let path = if path.is_empty() { "/" } else { path };
         let normalized = normalize_pattern(path);
 
-        // catch-all `/*` is a special case: we insert it into the tree as `/{*_}` but also insert `/` to match the root path.
-        if path == "/*" {
+        // `/x/*` also answers `/x` (and `/x/`, which is matched as `/x`), unless `/x` has its own route.
+        if let Some(base) = path.strip_suffix("/*") {
             vhost.tree.insert(normalized, value.clone())?;
-            let _ = vhost.tree.insert("/".to_string(), value);
+
+            let base = normalize_pattern(if base.is_empty() { "/" } else { base });
+            if vhost.tree.insert(base.clone(), value).is_ok() {
+                vhost.implicit.push(base);
+            }
+
             return Ok(());
+        }
+
+        if let Some(pos) = vhost.implicit.iter().position(|p| *p == normalized) {
+            vhost.implicit.swap_remove(pos);
+            vhost.tree.remove(normalized.clone());
         }
 
         vhost.tree.insert(normalized, value)
@@ -113,16 +145,15 @@ impl<T> Router<T> {
         let vhost_id = self.resolve_vhost(host);
         let bucket = &self.routes_bucket[vhost_id as usize];
 
-        if !bucket.methods.contains_method(method) {
+        let normalized_path = normalize_trailing_slash(path);
+        let (entry, params) = bucket.tree.at(normalized_path.as_bytes())?;
+        let entry = unsafe { &*entry.get() };
+
+        if !entry.allows(method) {
             return Err(MatchError::MethodNotAllowed);
         }
 
-        let normalized_path = normalize_trailing_slash(path);
-
-        match bucket.tree.at(normalized_path.as_bytes()) {
-            Ok((value, params)) => Ok(Match { value: unsafe { &*value.get() }, params }),
-            Err(e) => Err(e),
-        }
+        Ok(Match { value: &entry.value, params })
     }
 
     /// Mutable variant of `find_route`.
@@ -136,66 +167,47 @@ impl<T> Router<T> {
         let vhost_id = self.resolve_vhost(host);
         let bucket = &self.routes_bucket[vhost_id as usize];
 
-        if !bucket.methods.contains_method(method) {
+        let normalized_path = normalize_trailing_slash(path);
+        let (entry, params) = bucket.tree.at(normalized_path.as_bytes())?;
+        let entry = unsafe { &mut *entry.get() };
+
+        if !entry.allows(method) {
             return Err(MatchError::MethodNotAllowed);
         }
 
-        let normalized_path = normalize_trailing_slash(path);
-
-        match self.routes_bucket[vhost_id as usize].tree.at(normalized_path.as_bytes()) {
-            Ok((value, params)) => Ok(Match { value: unsafe { &mut *value.get() }, params }),
-            Err(e) => Err(e),
-        }
+        Ok(Match { value: &mut entry.value, params })
     }
 
     /// Remove a route from the default virtual host's tree.
     pub fn remove(&mut self, path: impl Into<String>) -> Option<T> {
         let normalized = normalize_pattern(&path.into());
-        self.routes_bucket[self.default_id as usize].tree.remove(normalized)
+        self.routes_bucket[self.default_id as usize].tree.remove(normalized).map(|entry| entry.value)
     }
 
     /// Remove a route from a specific virtual host's tree.
     pub fn remove_from_vhost(&mut self, vhost_id: u32, path: impl Into<String>) -> Option<T> {
         let normalized = normalize_pattern(&path.into());
-        self.routes_bucket[vhost_id as usize].tree.remove(normalized)
+        self.routes_bucket[vhost_id as usize].tree.remove(normalized).map(|entry| entry.value)
     }
 
-    fn add_vhost_inner(&mut self, host: &str, methods: HttpMethodSet) -> u32 {
-        // If no methods were specified, default to ALL to avoid MethodNotAllowed
-        // for every request on a route that didn't set explicit methods.
-        let bits = methods.standard().bits();
-        let methods = if bits == 0 { HttpMethodSet::all() } else { methods };
+    fn add_vhost_inner(&mut self, host: &str) -> u32 {
         let id = self.routes_bucket.len() as u32;
-        self.routes_bucket.push(VirtualHost::new(host, methods));
+        self.routes_bucket.push(VirtualHost::new(host));
         self.hosts_table.add_route(host, id);
         id
     }
 
     fn resolve_vhost(&self, host: Option<&str>) -> u32 {
         match host {
-            Some(h) => {
-                let clean = h.split(':').next().unwrap_or(h);
-                self.hosts_table.route(clean).unwrap_or(self.default_id)
-            },
+            Some(h) => self.hosts_table.route(ophan_net::http::utils::strip_port(h)).unwrap_or(self.default_id),
             None => self.default_id,
         }
-    }
-
-    fn merge_methods(existing: &mut HttpMethodSet, new: &HttpMethodSet) {
-        let merged = HttpMethod::from_bits(existing.standard().bits() | new.standard().bits());
-        let mut result = HttpMethodSet::new(merged);
-        for m in existing.custom() {
-            result.add_custom(m);
-        }
-        for m in new.custom() {
-            result.add_custom(m);
-        }
-        *existing = result;
     }
 }
 
 fn normalize_trailing_slash(path: &str) -> &str {
-    if path == "/" { path } else { path.trim_end_matches('/') }
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() { "/" } else { trimmed }
 }
 
 /// A successful match consisting of the registered value

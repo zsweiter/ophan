@@ -48,9 +48,19 @@ impl TokenBucket {
         }
     }
 
+    /// The bucket has refilled completely.
+    pub fn is_idle(&self, now_ms: u64) -> bool {
+        self.tat_ns.load(Ordering::Acquire) <= now_ms.saturating_mul(NANOS_PER_MS)
+    }
+
     pub fn check(&self, now_ms: u64) -> RateLimitResult {
         if self.emission_ns == 0 {
-            return RateLimitResult { allowed: false, remaining: 0, retry_after: self.window_secs };
+            return RateLimitResult {
+                allowed: false,
+                remaining: 0,
+                retry_after: self.window_secs,
+                reset_after: self.window_secs,
+            };
         }
 
         let now = now_ms.saturating_mul(NANOS_PER_MS);
@@ -67,6 +77,7 @@ impl TokenBucket {
                     allowed: false,
                     remaining: 0,
                     retry_after: wait_ns.div_ceil(NANOS_PER_SEC),
+                    reset_after: (tat.max(now) - now).div_ceil(NANOS_PER_SEC),
                 };
             }
 
@@ -76,6 +87,7 @@ impl TokenBucket {
                         allowed: true,
                         remaining: (limit_at - new_tat) / self.emission_ns,
                         retry_after: 0,
+                        reset_after: (new_tat - now).div_ceil(NANOS_PER_SEC),
                     };
                 },
                 // Another thread updated the state, retry
@@ -98,6 +110,7 @@ mod tests {
             algorithm: RateLimitAlgorithm::TokenBucket,
             identifier: LimiterIdentifier::Ip,
             skip_patterns: None,
+            scope: 0,
         }
     }
 

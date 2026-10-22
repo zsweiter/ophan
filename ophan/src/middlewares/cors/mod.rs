@@ -53,7 +53,9 @@ impl CorsMiddleware {
 
         let mut cors_context = CorsContext { is_preflight, ..Default::default() };
 
-        if config.allow_origins.matches(origin_value.as_bytes()) {
+        if config.allow_origins.is_allow_all() {
+            cors_context.allow_origin = Some(HeaderValue::from_static("*"));
+        } else if config.allow_origins.matches(origin_value.as_bytes()) {
             cors_context.allow_origin = Some(origin_value.clone());
 
             //  Wildcard origins cannot be combined with credentials.
@@ -76,7 +78,9 @@ impl CorsMiddleware {
 
         // Pre-flight request
 
-        if let Some(req_hdrs) = request.headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS) {
+        if config.allow_headers.is_none()
+            && let Some(req_hdrs) = request.headers.get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+        {
             cors_context.allow_headers = Some(req_hdrs.clone());
         }
 
@@ -115,11 +119,9 @@ impl CorsMiddleware {
 
             if let Some(ref allow_hdrs) = config.allow_headers {
                 let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, allow_hdrs.clone());
+            } else if let Some(req_hdrs) = cors.allow_headers.as_ref() {
+                let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, req_hdrs.clone());
             }
-
-            // else if let Some(req_hdrs) = cors.allow_headers.as_ref() {
-            //     let _ = response.insert_header(header::ACCESS_CONTROL_ALLOW_HEADERS, req_hdrs.clone());
-            // }
 
             if let Some(ref max_age) = config.allow_max_age {
                 let _ = response.insert_header(header::ACCESS_CONTROL_MAX_AGE, max_age.clone());

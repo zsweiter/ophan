@@ -1,6 +1,7 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use flatkit::str::ImmerStr;
+use jsonwebtoken::{AlgorithmFamily, Validation};
 
 use crate::{
     crypto::{Algorithm, HmacAlg},
@@ -103,6 +104,10 @@ pub struct AuthConfig {
     pub oauth_client: Option<OAuthClientConfig>,
     pub auth_mode: AuthMode,
     pub dpop_policy: DpopPolicy,
+    /// How long fetched signing keys and OIDC discovery documents are
+    /// cached. Overrides the provider's `Cache-Control` when set; always
+    /// clamped to a sane range.
+    pub key_cache_ttl: Option<Duration>,
 }
 
 impl AuthConfig {
@@ -112,7 +117,13 @@ impl AuthConfig {
             oauth_client: None,
             auth_mode,
             dpop_policy: DpopPolicy::default(),
+            key_cache_ttl: None,
         }
+    }
+
+    pub fn with_key_cache_ttl(mut self, ttl: Option<Duration>) -> Self {
+        self.key_cache_ttl = ttl;
+        self
     }
 
     pub fn with_oauth_client(mut self, oauth_client: OAuthClientConfig) -> Self {
@@ -128,11 +139,7 @@ impl AuthConfig {
     #[cfg(test)]
     pub fn mock() -> Self {
         Self {
-            validator: JwtValidatorConfig {
-                issuer: Box::default(),
-                audience: Box::default(),
-                leeway_seconds: 60,
-            },
+            validator: JwtValidatorConfig::new("https://example.com"),
             oauth_client: Some(OAuthClientConfig {
                 client_id: "mock-client-id".to_string(),
                 client_secret: Some("mock-client-secret".to_string()),
@@ -141,24 +148,120 @@ impl AuthConfig {
             }),
             auth_mode: AuthMode::Oidc { discovery_url: "https://example.com".to_string() },
             dpop_policy: DpopPolicy::default(),
+            key_cache_ttl: None,
         }
     }
 }
 
+/// Default clock skew leeway applied to `exp` and `nbf`.
+const DEFAULT_LEEWAY_SECS: u64 = 60;
+
+/// Default maximum distance of `iat` into the future.
+const DEFAULT_MAX_IAT_FUTURE_SKEW_SECS: u64 = 300;
+
+/// Claim validation rules for access tokens.
+///
+/// The `jsonwebtoken` validation rules are compiled once on construction
+/// and on every change, so validating a token never rebuilds them.
+///
+/// `exp` is always required. `iss` and `aud` are required, and must match
+/// one of the configured values, whenever at least one is configured; a
+/// token carrying `aud` is rejected when no audience is configured.
 #[derive(Debug, Clone)]
 pub struct JwtValidatorConfig {
-    pub issuer: Box<[ImmerStr]>,
-    pub audience: Box<[ImmerStr]>,
-    pub leeway_seconds: u64,
+    issuer: Box<[ImmerStr]>,
+    audience: Box<[ImmerStr]>,
+    leeway_seconds: u64,
+    validate_nbf: bool,
+    max_iat_future_skew_secs: Option<u64>,
+    compiled: Arc<CompiledValidation>,
+}
+
+/// One [`Validation`] per algorithm family, since `jsonwebtoken` requires
+/// every allowed algorithm of a validation to share the key's family. The
+/// exact algorithm allowlist is enforced before decoding.
+#[derive(Debug)]
+struct CompiledValidation {
+    hmac: Validation,
+    rsa: Validation,
+    ec: Validation,
+    ed: Validation,
+}
+
+impl CompiledValidation {
+    fn new(issuer: &[ImmerStr], audience: &[ImmerStr], leeway_seconds: u64, validate_nbf: bool) -> Self {
+        let issuers = issuer.iter().map(ImmerStr::as_str).collect::<Vec<_>>();
+        let audiences = audience.iter().map(ImmerStr::as_str).collect::<Vec<_>>();
+
+        let mut required = vec!["exp"];
+        if !issuers.is_empty() {
+            required.push("iss");
+        }
+        if !audiences.is_empty() {
+            required.push("aud");
+        }
+
+        let for_family = |family: AlgorithmFamily| {
+            let mut validation = Validation::new_for_family(family);
+            validation.leeway = leeway_seconds;
+            validation.validate_exp = true;
+            validation.validate_nbf = validate_nbf;
+            validation.validate_aud = true;
+            validation.set_required_spec_claims(&required);
+            if !issuers.is_empty() {
+                validation.set_issuer(&issuers);
+            }
+            if !audiences.is_empty() {
+                validation.set_audience(&audiences);
+            }
+            validation
+        };
+
+        Self {
+            hmac: for_family(AlgorithmFamily::Hmac),
+            rsa: for_family(AlgorithmFamily::Rsa),
+            ec: for_family(AlgorithmFamily::Ec),
+            ed: for_family(AlgorithmFamily::Ed),
+        }
+    }
 }
 
 impl JwtValidatorConfig {
     pub fn new(issuer: impl Into<ImmerStr>) -> Self {
+        Self::build(
+            Box::new([issuer.into()]),
+            Box::new([]),
+            DEFAULT_LEEWAY_SECS,
+            true,
+            Some(DEFAULT_MAX_IAT_FUTURE_SKEW_SECS),
+        )
+    }
+
+    fn build(
+        issuer: Box<[ImmerStr]>,
+        audience: Box<[ImmerStr]>,
+        leeway_seconds: u64,
+        validate_nbf: bool,
+        max_iat_future_skew_secs: Option<u64>,
+    ) -> Self {
+        let compiled = Arc::new(CompiledValidation::new(&issuer, &audience, leeway_seconds, validate_nbf));
         Self {
-            issuer: Box::new([issuer.into()]),
-            audience: Box::new([]),
-            leeway_seconds: 60, // 1 minute of leeway is a safe and standard default
+            issuer,
+            audience,
+            leeway_seconds,
+            validate_nbf,
+            max_iat_future_skew_secs,
+            compiled,
         }
+    }
+
+    fn compile(&mut self) {
+        self.compiled = Arc::new(CompiledValidation::new(
+            &self.issuer,
+            &self.audience,
+            self.leeway_seconds,
+            self.validate_nbf,
+        ));
     }
 
     /// Sets the allowed token issuers.
@@ -167,7 +270,7 @@ impl JwtValidatorConfig {
     where
         I: Into<Box<[ImmerStr]>>,
     {
-        self.issuer = issuers.into();
+        self.set_issuers(issuers);
         self
     }
 
@@ -177,14 +280,77 @@ impl JwtValidatorConfig {
     where
         A: Into<Box<[ImmerStr]>>,
     {
-        self.audience = audiences.into();
+        self.set_audiences(audiences);
         self
     }
 
-    /// Configures the clock skew leeway in seconds.
-    pub const fn with_leeway(mut self, leeway_seconds: u64) -> Self {
+    /// Replaces the allowed token issuers.
+    pub fn set_issuers<I>(&mut self, issuers: I)
+    where
+        I: Into<Box<[ImmerStr]>>,
+    {
+        self.issuer = issuers.into();
+        self.compile();
+    }
+
+    /// Replaces the allowed token audiences.
+    pub fn set_audiences<A>(&mut self, audiences: A)
+    where
+        A: Into<Box<[ImmerStr]>>,
+    {
+        self.audience = audiences.into();
+        self.compile();
+    }
+
+    /// Configures the clock skew leeway in seconds applied to `exp` and `nbf`.
+    pub fn with_leeway(mut self, leeway_seconds: u64) -> Self {
         self.leeway_seconds = leeway_seconds;
+        self.compile();
         self
+    }
+
+    /// Enables or disables `nbf` validation (enabled by default).
+    pub fn with_nbf_validation(mut self, enabled: bool) -> Self {
+        self.validate_nbf = enabled;
+        self.compile();
+        self
+    }
+
+    /// Rejects tokens whose `iat` lies more than `max_skew_secs` seconds in
+    /// the future (default: 300). `None` disables the check.
+    pub fn with_max_iat_future_skew(mut self, max_skew_secs: Option<u64>) -> Self {
+        self.max_iat_future_skew_secs = max_skew_secs;
+        self
+    }
+
+    /// The allowed token issuers.
+    pub fn issuers(&self) -> &[ImmerStr] {
+        &self.issuer
+    }
+
+    /// The allowed token audiences.
+    pub fn audiences(&self) -> &[ImmerStr] {
+        &self.audience
+    }
+
+    /// The clock skew leeway in seconds.
+    pub const fn leeway_seconds(&self) -> u64 {
+        self.leeway_seconds
+    }
+
+    /// The maximum distance of `iat` into the future, if checked.
+    pub const fn max_iat_future_skew_secs(&self) -> Option<u64> {
+        self.max_iat_future_skew_secs
+    }
+
+    /// The compiled validation rules for tokens signed with `algorithm`.
+    pub(crate) fn validation(&self, algorithm: jsonwebtoken::Algorithm) -> &Validation {
+        match algorithm.family() {
+            AlgorithmFamily::Hmac => &self.compiled.hmac,
+            AlgorithmFamily::Rsa => &self.compiled.rsa,
+            AlgorithmFamily::Ec => &self.compiled.ec,
+            AlgorithmFamily::Ed => &self.compiled.ed,
+        }
     }
 
     /// Checks whether the provided issuer is allowed by this configuration.
@@ -319,7 +485,7 @@ mod tests {
         assert!(!config.is_valid_issuer("https://other.com"));
         assert!(config.is_valid_audience("https://aud.example.com"));
         assert!(!config.is_valid_audience("https://other.com"));
-        assert_eq!(config.leeway_seconds, 30);
+        assert_eq!(config.leeway_seconds(), 30);
     }
 
     #[test]

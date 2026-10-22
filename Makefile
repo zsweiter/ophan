@@ -58,7 +58,7 @@ PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 	package-docker \
 	checksum \
 	install uninstall \
-	git-tag release compress
+	git-tag release
 
 all: fmt lint test build
 
@@ -70,9 +70,6 @@ build-debug:
 
 run:
 	$(CARGO) run
-
-compress:
-	upx --best $(TARGET) 2>/dev/null || true
 
 clean:
 	rm -rf $(DIST_DIR)
@@ -98,7 +95,7 @@ fix:
 ci: fmt lint test package
 
 # ── Platform package (auto-detect) ───────────────────────────
-package: build compress
+package: build
 	@echo "=== Packaging for $(OS)-$(ARCH) ==="
 	$(MAKE) _package-common
 ifeq ($(OS),linux)
@@ -117,7 +114,6 @@ package-linux: PACKAGE_TAR := $(PACKAGE_FILE).tar.gz
 package-linux: PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 package-linux:
 	$(CARGO) build --release --target $(LINUX_TARGET)
-	upx --best target/$(LINUX_TARGET)/release/$(APP_NAME) 2>/dev/null || true
 	$(MAKE) _package-common TARGET=target/$(LINUX_TARGET)/release/$(APP_NAME)
 	cp $(STUB_DIR)/systemd.service $(PACKAGE_DIR)/stubs/ophan.service
 	cd $(DIST_DIR) && tar -czf $(PACKAGE_TAR) $(PACKAGE_FILE)
@@ -131,7 +127,6 @@ package-macos: PACKAGE_TAR := $(PACKAGE_FILE).tar.gz
 package-macos: PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 package-macos:
 	$(CARGO) build --release
-	upx --best target/release/$(APP_NAME) 2>/dev/null || true
 	$(MAKE) _package-common
 	cp $(STUB_DIR)/io.ophan.ophan.plist $(PACKAGE_DIR)/stubs/
 	cd $(DIST_DIR) && tar -czf $(PACKAGE_TAR) $(PACKAGE_FILE)

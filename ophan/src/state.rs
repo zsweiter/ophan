@@ -1,17 +1,20 @@
 use ahash::AHashMap;
 use arc_swap::ArcSwap;
 use flatkit::str::ImmerStr;
-use ophan_net::http::HttpMethodSet;
+use ophan_net::http::{HttpMethod, HttpMethodSet};
 use ophan_router::Router;
-use ophan_sec::NetPolicy;
-use ophan_sec::l4::{IngressFilter, PacketAction};
 use ophan_sec::l7::WafConfig;
-use pingora::listeners::ConnectionFilter;
-use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::balancer::{Backend, BackendAddr, LoadBalancer, Upstream};
+use crate::gateway::listener::ListenerTable;
+use crate::metrics::{CONFIG_RELOADS, RouteMetrics};
+
 use crate::config::{
-    BackendTarget, GatewayConfig, ListenerAddress, ListenerConfig, OphanConfig, RouteStreaming, RouteTimeouts, load_config,
+    BackendTarget, GatewayConfig, HeaderMutations, ListenerConfig, OphanConfig, RouteStreaming, RouteTimeouts, UpstreamAddress,
+    load_config,
 };
 
 use crate::middlewares::auth::AuthConfig;
@@ -43,51 +46,22 @@ pub struct HttpRoute {
 
     pub timeouts: Option<RouteTimeouts>,
     pub streaming: Option<RouteStreaming>,
-}
+    pub headers: Option<HeaderMutations>,
 
-#[derive(Debug)]
-pub struct ConnectionFilters {
-    ingress_filter: IngressFilter,
-    port: Option<u16>,
-}
-
-impl ConnectionFilters {
-    pub fn filter(&self, ip: std::net::IpAddr, port: Option<u16>) -> PacketAction {
-        self.ingress_filter.filter(ip, port)
-    }
-
-    pub fn has_rules(&self) -> bool {
-        true
-    }
-}
-
-#[async_trait::async_trait]
-impl ConnectionFilter for ConnectionFilters {
-    async fn should_accept(&self, addr: Option<&SocketAddr>) -> bool {
-        let Some(socket) = addr else {
-            return true;
-        };
-
-        match self.ingress_filter.filter(socket.ip(), self.port) {
-            PacketAction::DROP => false,
-            PacketAction::PASS => true,
-        }
-    }
-}
-
-pub trait Reloadable {
-    fn hot_reload(&self) -> impl Future<Output = ()> + Send + Sync;
+    pub metrics: RouteMetrics,
 }
 
 pub struct AppContext {
     pub router: Router<Arc<HttpRoute>>,
-    pub net_policy: Option<Arc<NetPolicy>>,
-    pub net_policies: AHashMap<u16, Arc<NetPolicy>>,
-    pub net_filter: Option<Arc<ConnectionFilters>>,
+    /// Rebuilt with the rest of the context, so upstream ids always match the routes.
+    pub load_balancer: LoadBalancer,
+    pub listeners: ListenerTable,
 }
 
 impl AppContext {
-    pub fn build(config: &GatewayConfig) -> Result<Self, String> {
+    /// `previous` is the context being replaced on a reload; unchanged backends are
+    /// carried over so their health and in-flight counters survive.
+    pub fn build(config: &GatewayConfig, previous: Option<&AppContext>) -> Result<Self, String> {
         let mut router = Router::with_capacity(config.routes.len());
 
         for route in &config.routes {
@@ -117,47 +91,78 @@ impl AppContext {
                 helmet_policy: Some(HelmetConfig::default()),
                 timeouts: route.timeouts.clone(),
                 streaming: route.streaming,
+                headers: route.headers.clone(),
+                metrics: RouteMetrics::new(&config.name, &route.path),
             });
 
             let hosts = route.hosts.iter().map(|h| h.as_str()).collect::<Vec<_>>();
 
-            router.add_route(&route.path, route.methods.clone(), hosts, compiled).map_err(|e| e.to_string())?;
-        }
-
-        let mut net_policies = AHashMap::new();
-        let mut ingress_builder = IngressFilter::builder();
-        let mut has_ingress_rules = false;
-
-        for listener in config.listeners.iter() {
-            if let Some(policy) = listener.policy.as_ref() {
-                if let ListenerAddress::Tcp(addr) = &listener.address {
-                    net_policies.insert(addr.port(), Arc::clone(policy));
-
-                    ingress_builder = ingress_builder.port(addr.port());
-                    has_ingress_rules = true;
-                }
-
-                for ip_net in policy.allowed_ip_ranges.iter() {
-                    ingress_builder = ingress_builder.allow(ip_net.to_owned());
-                }
+            // CORS preflights use OPTIONS; the CORS policy answers them and rejects other OPTIONS.
+            let mut methods = route.methods.clone();
+            if route.cors.is_some() && !methods.is_empty() {
+                methods.add_standard(HttpMethod::OPTIONS);
             }
-        }
 
-        let net_filter = if has_ingress_rules {
-            Some(Arc::new(ConnectionFilters {
-                ingress_filter: ingress_builder.build()?,
-                port: None,
-            }))
-        } else {
-            None
-        };
+            router.add_route(&route.path, methods, hosts, compiled).map_err(|e| e.to_string())?;
+        }
 
         Ok(Self {
             router,
-            net_policy: config.net_policy.clone(),
-            net_policies,
-            net_filter,
+            load_balancer: Self::build_load_balancer(config, previous.map(|p| &p.load_balancer)),
+            listeners: ListenerTable::from_config(&config.listeners),
         })
+    }
+
+    /// Builds the balancer of a gateway. `previous` is the balancer being replaced on a reload;
+    /// unchanged backends are carried over so their health and in-flight counters survive.
+    fn build_load_balancer(config: &GatewayConfig, previous: Option<&LoadBalancer>) -> LoadBalancer {
+        let previous = previous.map(|lb| lb.upstreams());
+
+        let upstreams = config
+            .upstreams
+            .iter()
+            .map(|up| {
+                let old_backends = previous
+                    .as_ref()
+                    .and_then(|ups| ups.iter().find(|old| old.name == up.name))
+                    .map(|old| old.servers.load_full());
+
+                let backends = up
+                    .servers
+                    .iter()
+                    .map(|server| {
+                        let addr = BackendAddr::from(&server.address);
+
+                        let reused = old_backends
+                            .as_ref()
+                            .and_then(|olds| olds.iter().find(|b| b.addr == addr && b.protocol == server.protocol));
+
+                        if let Some(backend) = reused {
+                            backend.set_weight(server.weight);
+                            return Arc::clone(backend);
+                        }
+
+                        let mut backend = match server.address {
+                            UpstreamAddress::Tcp(addr) => Backend::from_tcp(addr, server.weight),
+                            UpstreamAddress::Host(ref addr) => Backend::from_host(addr, server.weight),
+
+                            #[cfg(unix)]
+                            UpstreamAddress::Uds(ref addr) => Backend::from_uds(PathBuf::from(addr), server.weight),
+                        };
+
+                        backend.set_protocol(server.protocol.clone());
+
+                        Arc::new(backend)
+                    })
+                    .collect::<Vec<Arc<Backend>>>();
+
+                let mut upstream = Upstream::new(up.id.0, up.name.clone(), backends, up.balance_strategy);
+                upstream.update_health_config(up.health_check.clone());
+                upstream
+            })
+            .collect::<Vec<Upstream>>();
+
+        LoadBalancer::new(upstreams)
     }
 }
 
@@ -181,6 +186,19 @@ impl AppState {
     /// the new config is swapped in atomically. Listener changes require
     /// a full upgrade because pingora does not support hot-removing listeners.
     pub fn reload(&self) -> ReloadOutcome {
+        let outcome = self.reload_inner();
+
+        let label = match outcome {
+            ReloadOutcome::NoChange => "unchanged",
+            ReloadOutcome::Swapped => "swapped",
+            ReloadOutcome::NeedsUpgrade => "upgrade",
+        };
+        CONFIG_RELOADS.with_label_values(&[label]).inc();
+
+        outcome
+    }
+
+    fn reload_inner(&self) -> ReloadOutcome {
         let current = self.config.load();
 
         if !self.any_file_changed(&current) {
@@ -208,10 +226,15 @@ impl AppState {
             return ReloadOutcome::NeedsUpgrade;
         }
 
+        if current.master.metrics != new_config.master.metrics {
+            return ReloadOutcome::NeedsUpgrade;
+        }
+
         // Build all new contexts first (all-or-nothing: if any fails, swap nothing)
         let mut new_contexts = AHashMap::with_capacity(new_config.gateways.len());
         for (name, gw_config) in &new_config.gateways {
-            match AppContext::build(gw_config) {
+            let previous = self.gateways.get(name).map(|swap| swap.load_full());
+            match AppContext::build(gw_config, previous.as_deref()) {
                 Ok(ctx) => {
                     new_contexts.insert(name.clone(), Arc::new(ctx));
                 },
