@@ -55,7 +55,7 @@ PACKAGE_DIR := $(DIST_DIR)/$(PACKAGE_FILE)
 	ci \
 	package \
 	package-linux package-macos package-all \
-	package-docker \
+	package-docker package-deb \
 	checksum \
 	install uninstall \
 	git-tag release
@@ -145,6 +145,17 @@ package-docker:
 		.
 	@echo "✅ Docker image: $(APP_NAME):$(VERSION)"
 
+# ── Debian package (static musl binary; needs cargo-zigbuild and cargo-deb) ──
+DEB_TARGET := $(subst gnu,musl,$(LINUX_TARGET))
+
+package-deb:
+	sed "s|@SBINDIR@|/usr/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)|g" \
+		$(STUB_DIR)/systemd.service > packaging/deb/$(APP_NAME).service
+	$(CARGO) zigbuild --release --target $(DEB_TARGET) -p $(APP_NAME)
+	mkdir -p $(DIST_DIR)
+	$(CARGO) deb -p $(APP_NAME) --no-build --target $(DEB_TARGET) --output $(DIST_DIR)/
+	@echo "✅ Debian package in $(DIST_DIR)/"
+
 # ── Checksums ─────────────────────────────────────────────────
 checksum:
 	@echo "=== Generating checksums ==="
@@ -192,7 +203,7 @@ install:
 	sudo cp -r .config/* /etc/$(APP_NAME)/
 
 	# 4. Systemd service (replace @SBINDIR@, @CONFIGDIR@)
-	sed "s|@SBINDIR@|/usr/local/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)/master.conf|g" \
+	sed "s|@SBINDIR@|/usr/local/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)|g" \
 		$(STUB_DIR)/systemd.service > /tmp/$(APP_NAME).service
 	sudo install -Dm644 /tmp/$(APP_NAME).service /etc/systemd/system/$(APP_NAME).service
 

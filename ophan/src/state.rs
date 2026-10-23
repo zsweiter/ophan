@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
 use flatkit::str::ImmerStr;
 use ophan_net::http::{HttpMethod, HttpMethodSet};
@@ -13,8 +13,8 @@ use crate::gateway::listener::ListenerTable;
 use crate::metrics::{CONFIG_RELOADS, RouteMetrics};
 
 use crate::config::{
-    BackendTarget, GatewayConfig, HeaderMutations, ListenerConfig, OphanConfig, RouteStreaming, RouteTimeouts, UpstreamAddress,
-    load_config,
+    BackendTarget, GatewayConfig, HeaderMutations, ListenerConfig, OphanConfig, RouteStreaming, RouteTimeouts, RoutesConfig,
+    UpstreamAddress, load_config,
 };
 
 use crate::middlewares::auth::AuthConfig;
@@ -64,6 +64,15 @@ impl AppContext {
     pub fn build(config: &GatewayConfig, previous: Option<&AppContext>) -> Result<Self, String> {
         let mut router = Router::with_capacity(config.routes.len());
 
+        // Paths whose OPTIONS requests already go to a route: one listing OPTIONS, or the first
+        // route with CORS. Routes of one path that differ by method share a single preflight route.
+        let mut options_routed: AHashSet<(String, String)> = config
+            .routes
+            .iter()
+            .filter(|route| route.methods.contains_http(HttpMethod::OPTIONS))
+            .flat_map(Self::route_keys)
+            .collect();
+
         for route in &config.routes {
             let rewrite_rules = route.rewrite.as_ref().map(|rules| {
                 RewriteEngine::new(
@@ -100,7 +109,11 @@ impl AppContext {
             // CORS preflights use OPTIONS; the CORS policy answers them and rejects other OPTIONS.
             let mut methods = route.methods.clone();
             if route.cors.is_some() && !methods.is_empty() {
-                methods.add_standard(HttpMethod::OPTIONS);
+                let keys = Self::route_keys(route);
+                if keys.iter().all(|key| !options_routed.contains(key)) {
+                    methods.add_standard(HttpMethod::OPTIONS);
+                    options_routed.extend(keys);
+                }
             }
 
             router.add_route(&route.path, methods, hosts, compiled).map_err(|e| e.to_string())?;
@@ -111,6 +124,17 @@ impl AppContext {
             load_balancer: Self::build_load_balancer(config, previous.map(|p| &p.load_balancer)),
             listeners: ListenerTable::from_config(&config.listeners),
         })
+    }
+
+    /// `(host, path)` pairs a route serves; routes without hosts serve the default host.
+    fn route_keys(route: &Arc<RoutesConfig>) -> Vec<(String, String)> {
+        let path = route.path.trim_end_matches('/').to_string();
+
+        if route.hosts.is_empty() {
+            return vec![(String::new(), path)];
+        }
+
+        route.hosts.iter().map(|host| (host.to_ascii_lowercase(), path.clone())).collect()
     }
 
     /// Builds the balancer of a gateway. `previous` is the balancer being replaced on a reload;

@@ -70,6 +70,40 @@ curl -fsSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install
 curl -sSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.sh | sudo bash -s -- --version v0.1.0
 ```
 
+### Debian / Ubuntu — .deb
+
+Static packages for `amd64` and `arm64`, attached to every release; they run on any Debian or
+Ubuntu release.
+
+```bash
+VERSION=0.1.32
+ARCH=$(dpkg --print-architecture)      # amd64 or arm64
+curl -fLO "https://github.com/zsweiter/ophan/releases/download/v${VERSION}/ophan_${VERSION}_${ARCH}.deb"
+sudo apt install "./ophan_${VERSION}_${ARCH}.deb"
+
+# The service is enabled but not started, so it does not take port 80 by surprise
+sudo systemctl start ophan
+```
+
+The configuration lives in `/etc/ophan` and is kept on upgrades. Installing a newer `.deb` the
+same way upgrades without downtime: the running gateway hands its listeners over to the new
+binary.
+
+### Upgrade
+
+Binaries installed from the tarball or the install script update themselves:
+
+```bash
+sudo ophan --upgrade             # latest release
+sudo ophan --upgrade 0.1.32      # a given version
+```
+
+It downloads the release for this platform, verifies its SHA-256, checks that the new binary
+accepts the current configuration and replaces the binary atomically (the previous one stays as
+`ophan.old`). Then it reloads the running instance, which hands its listeners over to the new
+binary without dropping connections. `latest` never installs an older version. Installations
+managed by dpkg, Homebrew or a container image are left to those tools.
+
 ### Linux / macOS — Manual
 
 ```bash
@@ -120,57 +154,52 @@ Images are built by CI and published to **GitHub Packages** (GHCR) for `linux/am
 # Pull
 docker pull ghcr.io/zsweiter/ophan:latest
 
-# Run with the baked-in default config (ports 80/443)
+# Run with the default config: HTTP on port 80 and a unix socket in the /run/ophan volume
 docker run -d --name ophan -p 8080:80 ghcr.io/zsweiter/ophan:latest
 
 # Run with your own config directory
-docker run -d --name ophan -p 8080:80 -p 8443:443 \
+docker run -d --name ophan -p 8080:80 \
   -v /path/to/config:/etc/ophan \
   ghcr.io/zsweiter/ophan:latest
 ```
 
-The `entrypoint.sh` prepares the container before the gateway starts:
+The image is built on `gcr.io/distroless/static-debian12:nonroot`: the static binary, CA
+certificates and the default configuration, with no shell or package manager. It runs as the
+`nonroot` user (uid/gid `65532`) and binds ports below 1024 through the `cap_net_bind_service`
+file capability.
 
-1. creates the config / web / log / run directories,
-2. checks that the unix socket directory (`OPHAN_SOCKET_PATH`) exists and is writable,
-3. seeds the default config if the mounted `/etc/ophan` is empty,
-4. runs `ophan -t` to validate the configuration,
-5. execs `ophan -c <config>` (or whatever arguments you pass).
+Like the nginx image, only port 80 is exposed. The default gateway serves `/var/www` on port 80
+and on the unix socket `/run/ophan/ophan_gateway.sock`; add a TLS listener in your own config and
+publish 443 when the gateway terminates TLS itself.
 
-| Variable                 | Default                       | Purpose                                           |
-| ------------------------ | ----------------------------- | ------------------------------------------------- |
-| `CONFIG_PATH`            | `/etc/ophan/master.conf`      | Config file passed to `ophan -c`                  |
-| `OPHAN_CONFIG_DIR`       | `/etc/ophan`                  | Config directory (also the seed target)           |
-| `OPHAN_SKIP_CONFIG_TEST` | `0`                           | Set `1` to skip the pre-start `ophan -t` check    |
-| `OPHAN_PID_FILE`         | `/var/run/ophan/ophan.pid`    | PID file (musl builds honor it)                   |
-| `OPHAN_SOCKET_PATH`      | `/var/run/ophan_gateway.sock` | Unix socket the entrypoint checks for writability |
-| `OPHAN_WWW_DIR`          | `/var/www`                    | Static content directory                          |
+When `/etc/ophan` is mounted empty, the gateway copies the default configuration into it before
+starting. Arguments are passed to the binary:
 
 ```bash
-# Skip the config test (e.g. while iterating on a config)
-docker run -e OPHAN_SKIP_CONFIG_TEST=1 ...
-
-# Run an interactive shell inside the container
-docker run --rm -it --entrypoint sh ghcr.io/zsweiter/ophan:latest
-
-# Custom entrypoint arguments are forwarded to the binary
-docker run --rm ghcr.io/zsweiter/ophan:latest -t -c /etc/ophan/master.conf
+# Validate a configuration
+docker run --rm -v ./config:/etc/ophan ghcr.io/zsweiter/ophan:latest -t -c /etc/ophan/master.conf
 ```
+
+| Variable                | Default                   | Purpose                                         |
+| ----------------------- | ------------------------- | ----------------------------------------------- |
+| `CONFIG_PATH`           | `/etc/ophan/master.conf`  | Configuration file                              |
+| `OPHAN_CONFIG_SEED_DIR` | `/usr/share/ophan/config` | Defaults copied when the configuration is missing |
+| `OPHAN_PID_FILE`        | `/tmp/ophan/ophan.pid`    | PID file                                        |
 
 #### Volumes
 
-| Container path   | Why                                                                                                                                    |
-| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `/etc/ophan`     | `master.conf` + `gateways/*.conf`. Seeded from the image when mounted empty.                                                           |
-| `/var/www`       | Static content served by `backend = static(...)`.                                                                                      |
-| `/var/log/ophan` | Log files, if the config writes there.                                                                                                 |
-| `/var/run/ophan` | Runtime dir: PID file **and** optional unix socket(s). Mount it (same path, or a named volume on both services) only when something outside the container must dial the socket. |
+| Container path   | Why                                                                          |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `/etc/ophan`     | `master.conf` + `gateways/*.conf`. Seeded from the image when mounted empty. |
+| `/var/www`       | Static content served by `backend = static(...)`.                            |
+| `/var/log/ophan` | Log files, if the config writes there.                                       |
+| `/run/ophan`     | Unix sockets shared with a proxy in another container or on the host.        |
 
-> The image chowns `/run` (=`/var/run`, including `/var/run/ophan`) to the
-> `ophan` user. A **named volume** initialized from the image keeps that
-> ownership; a **host bind mount** keeps the host's ownership instead — create
-> it with `install -d -o <uid> -g <gid>` (see below) or start the container with
-> `--user root`.
+The PID file and the upgrade socket live in `/tmp/ophan`, so `/run/ophan` only holds the
+listener sockets; a socket left by a previous container is replaced when the gateway starts.
+
+> Named volumes take the image's ownership (`65532`). For host bind mounts, give the directory
+> to that uid first: `sudo install -d -o 65532 -g 65532 ./logs`.
 
 #### Networking
 
@@ -211,7 +240,7 @@ docker run -d --name ophan \
 Ophan can listen on a unix socket instead of TCP — useful for traffic that must
 never be reachable over the network (internal service mesh hop, sidecar proxy,
 or a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
-origin). Add a listener to `gateways/*.conf`:
+origin). The image's default gateway already has one:
 
 ```conf
 listeners {
@@ -221,29 +250,34 @@ listeners {
     }
 
     # same path inside the container and on the host (bind-mounted dir)
-    listener "uds-internal" {
-        address   = "unix:/var/run/ophan/ophan_gateway.sock"
-        protocols = ["http1", "http2"]   # TLS is not supported on UDS
+    listener "uds" {
+        address     = "unix:/run/ophan/ophan_gateway.sock"
+        protocols   = ["http1", "http2"]   # TLS is not supported on UDS
+        permissions = "0666"               # any process that can reach the socket file may connect
+
+        # A unix socket has no peer address: the proxy in front must send the client address.
+        trusted_proxies {
+            real_ip_header = "X-Forwarded-For"   # "CF-Connecting-IP" for cloudflared only
+        }
     }
 }
 ```
+
+Requests on the socket without a valid client address header get `400`.
 
 **cloudflared on bare metal** — nothing is exposed on TCP except the tunnel
 itself. The socket must land on the *host* filesystem, so mount a dedicated
 host directory into the container:
 
 ```bash
-# 1. host directory owned by the image's ophan user
-docker run --rm --entrypoint id ghcr.io/zsweiter/ophan:latest
-#   uid=100(ophan) gid=101(ophan)  → use your actual output
-sudo install -d -o 100 -g 101 -m 755 /var/run/ophan
+# 1. host directory owned by the image's nonroot user
+sudo install -d -o 65532 -g 65532 -m 755 /run/ophan
 
 # 2. run the gateway (bridge network is enough — the socket travels through
 #    the bind mount, not through the network)
 docker run -d --name ophan \
   -v ./config:/etc/ophan \
-  -v /var/run/ophan:/var/run/ophan \
-  -e OPHAN_SOCKET_PATH=/var/run/ophan/ophan_gateway.sock \
+  -v /run/ophan:/run/ophan \
   ghcr.io/zsweiter/ophan:latest
 ```
 
@@ -254,7 +288,7 @@ credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
 
 ingress:
   - hostname: api.example.com
-    service: unix:/var/run/ophan/ophan_gateway.sock   # HTTP over the host-visible socket
+    service: unix:/run/ophan/ophan_gateway.sock   # HTTP over the host-visible socket
   - service: http_status:404                          # required catch-all
 ```
 
@@ -264,22 +298,19 @@ Notes:
   ophan's config and cloudflared's `service` use the identical string. If the
   paths differ, use the *container* path in ophan's config and the *host* path
   in cloudflared — they point at the same inode.
-- **Permissions to connect** — pingora does not set socket permissions yet
-  (`ServerAddress::Uds(addr, None)`, ophan/src/lib.rs:177), so the file is
-  created with the umask (usually `0755`, owner `ophan`). The default
-  cloudflared systemd unit runs as **root**, which can always connect; if you
-  run cloudflared as a non-root user, run ophan with `--user root` (or the same
-  uid) so the socket is writable for it.
+- **Permissions to connect** — `permissions` sets the socket mode. The default
+  `0666` lets any process that can reach the file connect, whatever its uid
+  (nginx runs as `101`, cloudflared as `65532`); restrict it to `0660` when the
+  proxy shares uid or gid `65532`.
 - **Bridge vs host network** — not needed for the socket. Use `--network host`
   only if you want XDP/eBPF filtering or TCP listeners bound directly on the
   host without publishing ports.
-- If the mounted directory is not writable by the container user, the
-  entrypoint warns before start (`OPHAN_SOCKET_PATH` is only a preflight hint —
-  the listener in the config always decides where the socket is created).
+- If the mounted directory is not writable by uid `65532`, the listener fails to
+  bind and the gateway logs the error at start.
 
 > If the proxy were a container instead, share the directory with a named
-> volume (`-v ophan-run:/var/run/ophan` on **both** services) and point
-> cloudflared at `unix:/var/run/ophan/ophan_gateway.sock`.
+> volume (`-v ophan-run:/run/ophan` on **both** services) and point
+> cloudflared at `unix:/run/ophan/ophan_gateway.sock`.
 
 #### Building the image locally
 
@@ -317,7 +348,8 @@ sudo rm -f /etc/systemd/system/ophan.service
 sudo rm -f /usr/local/bin/ophan
 sudo rm -rf /etc/ophan
 sudo rm -rf /var/log/ophan
-sudo rm -f /run/ophan.pid
+sudo rm -rf /run/ophan
+sudo userdel ophan
 # Remove the web assets only if no other site is using /var/www/html
 sudo rm -f /var/www/html/index.html /var/www/html/favicon.svg
 sudo systemctl daemon-reload
@@ -329,7 +361,7 @@ sudo systemctl daemon-reload
 sudo launchctl bootout system /Library/LaunchDaemons/io.ophan.ophan.plist
 sudo rm -f /Library/LaunchDaemons/io.ophan.ophan.plist
 sudo rm -f /usr/local/bin/ophan
-sudo rm -rf /etc/ophan /var/log/ophan /var/run/ophan.pid
+sudo rm -rf /etc/ophan /var/log/ophan /var/run/ophan
 ```
 
 ### Windows
@@ -400,6 +432,20 @@ make ci          # fmt → lint → test → package (auto-detect OS)
 make package-all # Build + package for Linux, macOS, Windows
 make package-docker  # Build Docker image (musl)
 make checksum    # Generate SHA256 checksums
+```
+
+### Benchmarking
+
+`scripts/benchperf.sh` measures ophan head-to-head against an equally
+configured nginx on the same port (never concurrently): static 1 KiB / 100 KiB
+files, a reverse-proxy pass-through and a pure route-matched path. It reports
+RPS, latency p50/p90/p99 (hey) plus CPU% and RSS of the whole process tree.
+
+```bash
+apt install hey                   # load generator (or: go install github.com/rakyll/hey@latest)
+make build
+scripts/benchperf.sh              # 10 s per scenario, keep-alive
+scripts/benchperf.sh --rate 20000 --duration 10 --scenarios static_1k,proxy --no-nginx
 ```
 
 ### GitHub workflows

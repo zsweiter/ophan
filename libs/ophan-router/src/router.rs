@@ -5,7 +5,8 @@ use super::{
     params::Params,
     pattern::normalize_pattern,
     sni::SniTableRouter,
-    vhost::{RouteEntry, VirtualHost},
+    tree::Node,
+    vhost::{RouteEntry, RouteSlot, VirtualHost},
 };
 
 /// Multi-stage API Gateway Router path matching.
@@ -88,7 +89,7 @@ impl<T> Router<T> {
             }
         }
 
-        let entry = RouteEntry { methods, value };
+        let entry = RouteEntry { methods, value, implicit: false };
         for id in vhost_ids {
             self.insert_into(id, path, entry.clone())?;
         }
@@ -96,7 +97,7 @@ impl<T> Router<T> {
         Ok(())
     }
 
-    fn insert_into(&mut self, vhost_id: u32, path: &str, value: RouteEntry<T>) -> Result<(), InsertError>
+    fn insert_into(&mut self, vhost_id: u32, path: &str, entry: RouteEntry<T>) -> Result<(), InsertError>
     where
         T: Clone,
     {
@@ -111,24 +112,29 @@ impl<T> Router<T> {
         let path = if path.is_empty() { "/" } else { path };
         let normalized = normalize_pattern(path);
 
-        // `/x/*` also answers `/x` (and `/x/`, which is matched as `/x`), unless `/x` has its own route.
+        // `/x/*` also answers `/x` (and `/x/`, which is matched as `/x`) for the methods `/x`
+        // does not route itself.
         if let Some(base) = path.strip_suffix("/*") {
-            vhost.tree.insert(normalized, value.clone())?;
+            Self::insert_entry(&mut vhost.tree, normalized, entry.clone(), path)?;
 
             let base = normalize_pattern(if base.is_empty() { "/" } else { base });
-            if vhost.tree.insert(base.clone(), value).is_ok() {
-                vhost.implicit.push(base);
-            }
-
-            return Ok(());
+            let implicit = RouteEntry { implicit: true, ..entry };
+            return Self::insert_entry(&mut vhost.tree, base, implicit, path).or(Ok(()));
         }
 
-        if let Some(pos) = vhost.implicit.iter().position(|p| *p == normalized) {
-            vhost.implicit.swap_remove(pos);
-            vhost.tree.remove(normalized.clone());
-        }
+        Self::insert_entry(&mut vhost.tree, normalized, entry, path)
+    }
 
-        vhost.tree.insert(normalized, value)
+    /// Adds `entry` to the slot of `pattern`, creating it when the pattern is new. Routes
+    /// of the same pattern must not share a method.
+    fn insert_entry(tree: &mut Node<RouteSlot<T>>, pattern: String, entry: RouteEntry<T>, path: &str) -> Result<(), InsertError> {
+        let Some(mut slot) = tree.remove(pattern.clone()) else {
+            return tree.insert(pattern, RouteSlot::new(entry));
+        };
+
+        let pushed = slot.push(entry).map_err(|_| InsertError::MethodConflict { path: path.to_string() });
+        tree.insert(pattern, slot)?;
+        pushed
     }
 
     /// Resolve a request through multi-stage routing:
@@ -146,12 +152,12 @@ impl<T> Router<T> {
         let bucket = &self.routes_bucket[vhost_id as usize];
 
         let normalized_path = normalize_trailing_slash(path);
-        let (entry, params) = bucket.tree.at(normalized_path.as_bytes())?;
-        let entry = unsafe { &*entry.get() };
+        let (slot, params) = bucket.tree.at(normalized_path.as_bytes())?;
+        let slot = unsafe { &*slot.get() };
 
-        if !entry.allows(method) {
+        let Some(entry) = slot.find(method) else {
             return Err(MatchError::MethodNotAllowed);
-        }
+        };
 
         Ok(Match { value: &entry.value, params })
     }
@@ -168,12 +174,12 @@ impl<T> Router<T> {
         let bucket = &self.routes_bucket[vhost_id as usize];
 
         let normalized_path = normalize_trailing_slash(path);
-        let (entry, params) = bucket.tree.at(normalized_path.as_bytes())?;
-        let entry = unsafe { &mut *entry.get() };
+        let (slot, params) = bucket.tree.at(normalized_path.as_bytes())?;
+        let slot = unsafe { &mut *slot.get() };
 
-        if !entry.allows(method) {
+        let Some(entry) = slot.find_mut(method) else {
             return Err(MatchError::MethodNotAllowed);
-        }
+        };
 
         Ok(Match { value: &mut entry.value, params })
     }
@@ -181,13 +187,13 @@ impl<T> Router<T> {
     /// Remove a route from the default virtual host's tree.
     pub fn remove(&mut self, path: impl Into<String>) -> Option<T> {
         let normalized = normalize_pattern(&path.into());
-        self.routes_bucket[self.default_id as usize].tree.remove(normalized).map(|entry| entry.value)
+        self.routes_bucket[self.default_id as usize].tree.remove(normalized).map(RouteSlot::into_first)
     }
 
     /// Remove a route from a specific virtual host's tree.
     pub fn remove_from_vhost(&mut self, vhost_id: u32, path: impl Into<String>) -> Option<T> {
         let normalized = normalize_pattern(&path.into());
-        self.routes_bucket[vhost_id as usize].tree.remove(normalized).map(|entry| entry.value)
+        self.routes_bucket[vhost_id as usize].tree.remove(normalized).map(RouteSlot::into_first)
     }
 
     fn add_vhost_inner(&mut self, host: &str) -> u32 {

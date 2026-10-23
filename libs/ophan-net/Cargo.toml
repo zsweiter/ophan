@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 url = { workspace = true }
 memchr = { workspace = true }
+parking_lot = { workspace = true }
 
 serde_urlencoded = "0.7"
 pingora = { workspace = true, features = ["proxy"] }

@@ -106,9 +106,9 @@ Three supported formats:
 
 ```hcl
 master "ophan-01" {
-    user      = "www-data"
+    user      = "ophan"
     workers   = "auto"          # or a number
-    pid       = "/run/ophan.pid"
+    pid       = "/var/run/ophan/ophan.pid"
     error_log = "/var/log/ophan/error.log"
     includes  = "/etc/ophan/gateways/*.conf"
 
@@ -121,7 +121,7 @@ master "ophan-01" {
 
 | Property    | Type     | Description                                              |
 | ----------- | -------- | -------------------------------------------------------- |
-| `user`      | `String` | Drop privileges to this user                             |
+| `user`      | `String` | User of daemon mode; the systemd unit runs as `ophan`    |
 | `workers`   | `String` | `"auto"` or an explicit count                            |
 | `pid`       | `String` | PID file path                                            |
 | `error_log` | `String` | Error log path                                           |
@@ -419,9 +419,9 @@ policy helmet "web-strict" {
 name = "edge-gateway-prod"
 
 master "ophan-01" {
-    user      = "www-data"
+    user      = "ophan"
     workers   = "auto"
-    pid       = "/run/ophan.pid"
+    pid       = "/var/run/ophan/ophan.pid"
     error_log = "/var/log/ophan/error.log"
     includes  = "/etc/ophan/gateways/*.conf"
 }

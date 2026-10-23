@@ -59,7 +59,10 @@ pub mod matchers;
 pub mod owasp;
 pub mod rules;
 
-pub use body::{BodyAction, StreamingBodyMatcher, default_rewindable_mimes, is_rewindable, is_rewindable_bytes};
+pub use body::{
+    BodyAction, BodyMatchInfo, BodySession, CompiledBodyPhase, StreamingBodyMatcher, default_rewindable_mimes, is_rewindable,
+    is_rewindable_bytes,
+};
 pub use expr::{Expr, Field, Operator, Phase, Predicate, RuleAction, RuleMeta, Value};
 pub use rules::{CompiledBodyRule, CompiledRule, CompiledWafRules, IpCompiledRules, MatchedField};
 
@@ -171,18 +174,27 @@ pub enum ChallengeKind {
 ///
 /// `Pass` is the fast path and is returned without allocation. `Log` and
 /// `Block` carry the match provenance for metrics/logging.
+///
+/// The result borrows the rule provenance (`&str` ids, `&'static str`
+/// categories) out of the *compiled* ruleset behind the engine — matched
+/// provenance is never cloned per request. The lifetime `'a` is the
+/// lifetime of the engine/config the session was created from.
 #[derive(Debug, Clone, PartialEq)]
-pub enum WafResult {
+pub enum WafResult<'a> {
     /// No rule fired; nothing to report.
     Pass,
     /// Rule(s) fired but no terminal action taken (detection mode, or score
     /// below threshold in blocking mode).
-    Log { score_delta: u32, matched: Vec<WafMatch> },
+    Log { score_delta: u32, matched: Vec<WafMatch<'a>> },
     /// Terminal decision: reject / challenge / redirect.
-    Block { score_delta: u32, matched: Vec<WafMatch>, action: WafAction },
+    Block {
+        score_delta: u32,
+        matched: Vec<WafMatch<'a>>,
+        action: WafAction,
+    },
 }
 
-impl WafResult {
+impl WafResult<'_> {
     pub fn score_delta(&self) -> u32 {
         match self {
             Self::Pass => 0,
@@ -193,12 +205,16 @@ impl WafResult {
 }
 
 /// A single rule match, recorded for metrics/logging.
+///
+/// Allocation-free: `rule_id` borrows the compiled rule's `Box<str>` and
+/// `category` borrows the OWASP category's `&'static str`, both living as
+/// long as the compiled config (`'a`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct WafMatch {
+pub struct WafMatch<'a> {
     pub phase: Phase,
-    pub rule_id: String,
+    pub rule_id: &'a str,
     pub field: Field,
-    pub category: Option<String>,
+    pub category: Option<&'static str>,
 }
 
 // =============================================================================
@@ -289,12 +305,14 @@ impl std::fmt::Debug for WafSession<'_> {
 enum SessionState {
     /// Awaiting the first hook (`on_request_headers`).
     Initial,
-    /// Request body inspection in progress.
-    RequestBody(StreamingBodyMatcher),
+    /// Request body inspection in progress (runtime state for the compiled
+    /// [`CompiledBodyPhase`] — automata live in the config, only the cheap
+    /// per-body session here).
+    RequestBody(BodySession),
     /// Response headers delivered; body inspection pending.
     ResponseHeaders,
     /// Response body inspection in progress.
-    ResponseBody(StreamingBodyMatcher),
+    ResponseBody(BodySession),
     /// Terminal — a block/allow decision was already emitted.
     Done,
 }
@@ -335,19 +353,21 @@ impl<'e> WafSession<'e> {
     ///
     /// Returns [`WafResult::Block`] immediately (fail-fast) when a blocking
     /// rule fires, so the proxy can reject before touching the body.
-    pub fn on_request_headers(&mut self, host: Option<&str>, req: &RequestParts, client_ip: Option<IpAddr>) -> WafResult {
+    pub fn on_request_headers(&mut self, host: Option<&str>, req: &RequestParts, client_ip: Option<IpAddr>) -> WafResult<'e> {
+        let engine: &'e WafEngine = self.engine;
         if self.is_done() {
             return WafResult::Pass;
         }
         if let Some(ip) = client_ip {
             self.client_ip = Some(ip);
         }
+        let client_ip = self.client_ip;
 
         self.state = SessionState::ResponseHeaders;
 
-        let rules = &self.engine.config.compiled.request_headers;
+        let rules = &engine.config.compiled.request_headers;
         for rule in rules {
-            if let Some(meta) = rule.evaluate_request(self.client_ip.as_ref(), host, req) {
+            if let Some(meta) = rule.evaluate_request(client_ip.as_ref(), host, req) {
                 return self.apply_match(Phase::InboundHeaders, meta, Field::Host);
             }
         }
@@ -368,11 +388,14 @@ impl<'e> WafSession<'e> {
     ///   result.
     ///
     /// Returns [`WafResult::Block`] on the first match (fail-fast).
-    pub fn on_request_body_chunk(&mut self, chunk: &[u8], end_body: bool) -> WafResult {
+    pub fn on_request_body_chunk(&mut self, chunk: &[u8], end_body: bool) -> WafResult<'e> {
+        let engine: &'e WafEngine = self.engine;
+        let phase = &engine.config.compiled.request_body_phase;
+
         match &mut self.state {
             SessionState::Done => return WafResult::Pass,
             SessionState::Initial | SessionState::ResponseHeaders => {
-                self.state = SessionState::RequestBody(Self::new_body_matcher(&self.engine.config, true));
+                self.state = SessionState::RequestBody(phase.session());
             },
             SessionState::RequestBody(_) => {},
             SessionState::ResponseBody(_) => return WafResult::Pass,
@@ -383,13 +406,12 @@ impl<'e> WafSession<'e> {
             _ => unreachable!(),
         };
 
-        match matcher.on_chunk(chunk, end_body) {
+        match matcher.feed(chunk, end_body) {
             BodyAction::Block => {
-                let meta = matcher.last_meta().cloned();
-                if let Some(meta) = meta {
-                    self.apply_match(Phase::InboundBody, &meta, Field::Body)
-                } else {
-                    WafResult::Pass
+                let hit = matcher.last_hit();
+                match phase.meta_of(hit) {
+                    Some(meta) => self.apply_match(Phase::InboundBody, meta, Field::Body),
+                    None => WafResult::Pass,
                 }
             },
             BodyAction::Continue => WafResult::Pass,
@@ -405,13 +427,14 @@ impl<'e> WafSession<'e> {
     // ========================================================================
 
     /// WHO-IS.md phase 6 — inspect response status + headers.
-    pub fn on_response_headers(&mut self, status_code: http::StatusCode, headers: &http::HeaderMap) -> WafResult {
+    pub fn on_response_headers(&mut self, status_code: http::StatusCode, headers: &http::HeaderMap) -> WafResult<'e> {
+        let engine: &'e WafEngine = self.engine;
         if self.is_done() {
             return WafResult::Pass;
         }
         self.state = SessionState::ResponseHeaders;
 
-        let rules = &self.engine.config.compiled.response_headers;
+        let rules = &engine.config.compiled.response_headers;
         for rule in rules {
             if let Some(meta) = rule.evaluate_response(status_code, headers) {
                 return self.apply_match(Phase::OutboundHeaders, meta, Field::StatusCode);
@@ -426,11 +449,14 @@ impl<'e> WafSession<'e> {
 
     /// WHO-IS.md phase 7 — inspect one response-body chunk. Same streaming
     /// contract as [`Self::on_request_body_chunk`].
-    pub fn on_response_body_chunk(&mut self, chunk: &[u8], end_body: bool) -> WafResult {
+    pub fn on_response_body_chunk(&mut self, chunk: &[u8], end_body: bool) -> WafResult<'e> {
+        let engine: &'e WafEngine = self.engine;
+        let phase = &engine.config.compiled.response_body_phase;
+
         match &mut self.state {
             SessionState::Done => return WafResult::Pass,
             SessionState::ResponseHeaders | SessionState::Initial => {
-                self.state = SessionState::ResponseBody(Self::new_body_matcher(&self.engine.config, false));
+                self.state = SessionState::ResponseBody(phase.session());
             },
             SessionState::ResponseBody(_) => {},
             SessionState::RequestBody(_) => return WafResult::Pass,
@@ -441,13 +467,12 @@ impl<'e> WafSession<'e> {
             _ => unreachable!(),
         };
 
-        match matcher.on_chunk(chunk, end_body) {
+        match matcher.feed(chunk, end_body) {
             BodyAction::Block => {
-                let meta = matcher.last_meta().cloned();
-                if let Some(meta) = meta {
-                    self.apply_match(Phase::OutboundBody, &meta, Field::Body)
-                } else {
-                    WafResult::Pass
+                let hit = matcher.last_hit();
+                match phase.meta_of(hit) {
+                    Some(meta) => self.apply_match(Phase::OutboundBody, meta, Field::Body),
+                    None => WafResult::Pass,
                 }
             },
             BodyAction::Continue => WafResult::Pass,
@@ -468,7 +493,11 @@ impl<'e> WafSession<'e> {
 
     /// Apply a single rule match: reconcile the rule action with the engine
     /// mode and the anomaly threshold.
-    fn apply_match(&mut self, phase: Phase, meta: &RuleMeta, field: Field) -> WafResult {
+    ///
+    /// `meta` borrows the *compiled* ruleset (`'e`), so the returned
+    /// [`WafResult`] carries allocation-free provenance (`&'e str` ids,
+    /// `&'static str` categories).
+    fn apply_match(&mut self, phase: Phase, meta: &'e RuleMeta, field: Field) -> WafResult<'e> {
         let mode = self.engine.config.mode;
 
         // Explicit allowlist rule: pass regardless of other matches.
@@ -482,9 +511,9 @@ impl<'e> WafSession<'e> {
 
         let matched = vec![WafMatch {
             phase,
-            rule_id: meta.id.to_string(),
+            rule_id: &meta.id,
             field,
-            category: Some(meta.category.code().to_string()),
+            category: Some(meta.category.code()),
         }];
 
         match mode {
@@ -523,15 +552,5 @@ impl<'e> WafSession<'e> {
                 RuleAction::Allow => unreachable!("handled above"),
             },
         }
-    }
-
-    /// Lazily build the streaming body matcher for a phase.
-    fn new_body_matcher(config: &WafConfig, request: bool) -> StreamingBodyMatcher {
-        let rules: &[CompiledBodyRule] = if request {
-            &config.compiled.request_body
-        } else {
-            &config.compiled.response_body
-        };
-        StreamingBodyMatcher::from_rules(rules, true)
     }
 }

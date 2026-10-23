@@ -2,7 +2,7 @@ use ophan_net::http::{HttpMethod, HttpMethodSet};
 
 use crate::Router;
 
-use super::error::MatchError;
+use super::error::{InsertError, MatchError};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -768,4 +768,153 @@ fn edge_case_partial_prefix() {
         r.match_route(None, &http::Method::GET, "/api/v2/extra").unwrap_err(),
         MatchError::NotFound
     );
+}
+
+// ---------------------------------------------------------------------------
+// Several routes on one path, chosen by method
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_path_routes_are_chosen_by_method() {
+    let mut r = Router::new();
+    r.add_route("/users", HttpMethodSet::new(HttpMethod::GET), vec!["api.test"], 1).unwrap();
+    r.add_route(
+        "/users",
+        HttpMethodSet::new(HttpMethod::POST | HttpMethod::PUT),
+        vec!["api.test"],
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::GET, "/users").unwrap().value,
+        1
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::POST, "/users").unwrap().value,
+        2
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::PUT, "/users").unwrap().value,
+        2
+    );
+    assert_eq!(
+        r.match_route(Some("api.test"), &http::Method::DELETE, "/users").unwrap_err(),
+        MatchError::MethodNotAllowed
+    );
+}
+
+#[test]
+fn same_path_routes_sharing_a_method_conflict() {
+    let mut r = Router::new();
+    r.add_route(
+        "/users",
+        HttpMethodSet::new(HttpMethod::GET | HttpMethod::POST),
+        vec!["api.test"],
+        1,
+    )
+    .unwrap();
+
+    let err = r.add_route("/users", HttpMethodSet::new(HttpMethod::POST), vec!["api.test"], 2).unwrap_err();
+    assert!(matches!(err, InsertError::MethodConflict { .. }), "{err}");
+
+    // A route without methods accepts all of them, so it overlaps any other route.
+    let err = r.add_route("/users", HttpMethodSet::new(HttpMethod::NONE), vec!["api.test"], 3).unwrap_err();
+    assert!(matches!(err, InsertError::MethodConflict { .. }), "{err}");
+
+    // The failed insertions left the first route in place.
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::POST, "/users").unwrap().value,
+        1
+    );
+}
+
+#[test]
+fn same_path_on_other_hosts_does_not_conflict() {
+    let mut r = Router::new();
+    r.add_route("/users", HttpMethodSet::new(HttpMethod::GET), vec!["a.test"], 1).unwrap();
+    r.add_route("/users", HttpMethodSet::new(HttpMethod::GET), vec!["b.test"], 2).unwrap();
+
+    assert_eq!(*r.match_route(Some("a.test"), &http::Method::GET, "/users").unwrap().value, 1);
+    assert_eq!(*r.match_route(Some("b.test"), &http::Method::GET, "/users").unwrap().value, 2);
+}
+
+#[test]
+fn catch_all_routes_by_method_share_the_implicit_base() {
+    let mut r = Router::new();
+    r.add_route("/files/*", HttpMethodSet::new(HttpMethod::GET), vec!["api.test"], 1).unwrap();
+    r.add_route("/files/*", HttpMethodSet::new(HttpMethod::POST), vec!["api.test"], 2).unwrap();
+
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::GET, "/files/a.txt").unwrap().value,
+        1
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::POST, "/files/a.txt").unwrap().value,
+        2
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::GET, "/files").unwrap().value,
+        1
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::POST, "/files").unwrap().value,
+        2
+    );
+}
+
+#[test]
+fn explicit_base_route_only_replaces_its_methods_of_the_catch_all() {
+    let mut r = Router::new();
+    r.add_route("/users/*", HttpMethodSet::new(HttpMethod::GET), vec!["api.test"], 1).unwrap();
+    r.add_route("/users", HttpMethodSet::new(HttpMethod::POST), vec!["api.test"], 2).unwrap();
+
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::GET, "/users").unwrap().value,
+        1
+    );
+    assert_eq!(
+        *r.match_route(Some("api.test"), &http::Method::POST, "/users").unwrap().value,
+        2
+    );
+}
+
+#[test]
+fn explicit_base_route_wins_over_the_catch_all_in_any_order() {
+    let mut first_explicit = Router::new();
+    first_explicit.add_route("/users", HttpMethodSet::new(HttpMethod::GET), vec![], 2).unwrap();
+    first_explicit.add_route("/users/*", HttpMethodSet::new(HttpMethod::GET), vec![], 1).unwrap();
+
+    let mut first_catch_all = Router::new();
+    first_catch_all.add_route("/users/*", HttpMethodSet::new(HttpMethod::GET), vec![], 1).unwrap();
+    first_catch_all.add_route("/users", HttpMethodSet::new(HttpMethod::GET), vec![], 2).unwrap();
+
+    for r in [first_explicit, first_catch_all] {
+        assert_eq!(*r.match_route(None, &http::Method::GET, "/users").unwrap().value, 2);
+        assert_eq!(*r.match_route(None, &http::Method::GET, "/users/42").unwrap().value, 1);
+    }
+}
+
+#[test]
+fn catch_all_keeps_the_base_methods_an_explicit_route_does_not_take() {
+    let mut r = Router::new();
+    r.add_route(
+        "/users/*",
+        HttpMethodSet::new(HttpMethod::GET | HttpMethod::OPTIONS),
+        vec![],
+        1,
+    )
+    .unwrap();
+    r.add_route(
+        "/users",
+        HttpMethodSet::new(HttpMethod::POST | HttpMethod::OPTIONS),
+        vec![],
+        2,
+    )
+    .unwrap();
+
+    assert_eq!(*r.match_route(None, &http::Method::GET, "/users").unwrap().value, 1);
+    assert_eq!(*r.match_route(None, &http::Method::POST, "/users").unwrap().value, 2);
+    assert_eq!(*r.match_route(None, &http::Method::OPTIONS, "/users").unwrap().value, 2);
+    assert_eq!(*r.match_route(None, &http::Method::OPTIONS, "/users/42").unwrap().value, 1);
 }

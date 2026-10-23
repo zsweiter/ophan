@@ -2,6 +2,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::sys::error::ExitCode;
@@ -50,10 +51,10 @@ impl Logger {
             .with_thread_names(true)
             .with_target(false);
 
-        let subscriber = tracing_subscriber::registry()
-            .with(EnvFilter::from_default_env())
-            .with(stderr_layer)
-            .with(file_layer);
+        // `RUST_LOG` overrides the default level.
+        let filter = EnvFilter::builder().with_default_directive(LevelFilter::WARN.into()).from_env_lossy();
+
+        let subscriber = tracing_subscriber::registry().with(filter).with(stderr_layer).with(file_layer);
 
         tracing::subscriber::set_global_default(subscriber).map_err(|e| {
             eprintln!("failed to initialize tracing subscriber: {e}");

@@ -36,6 +36,16 @@ fn main_entry() -> Result<(), ExitCode> {
             if let Some(ref cfg) = app.config {
                 apply_config_path(cfg)?;
             }
+
+            let config_path = config::get_config_path();
+            match config::ConfigSeed::apply(config_path) {
+                Ok(true) => eprintln!("No configuration at {}, copied the defaults", config_path.display()),
+                Ok(false) => {},
+                Err(e) => eprintln!(
+                    "Warning: cannot copy the default configuration to {}: {e}",
+                    config_path.display()
+                ),
+            }
             ophan::bootstrap(app.pid_file.clone())
         },
 
@@ -82,39 +92,40 @@ fn main_entry() -> Result<(), ExitCode> {
         },
 
         #[cfg(unix)]
-        Some(Command::Upgrade) => {
-            use nix::sys::signal::{Signal, kill};
-            use nix::unistd::Pid;
-            use ophan::sys::pid::read_pid;
+        Some(Command::Upgrade(ref target)) => {
+            use ophan::sys::release::{Release, ReleaseTarget};
 
-            let config_path = app.config.as_ref().map(std::path::PathBuf::from);
-            let (pid, _) = read_pid(app.pid_file.as_deref(), config_path.as_ref())?;
-
-            let mut args: Vec<std::ffi::OsString> = Vec::new();
-            if let Some(cfg) = app.config.as_ref() {
-                args.extend(["-c".into(), cfg.into()]);
+            if let Some(ref path) = app.config {
+                apply_config_path(path)?;
             }
-            if let Some(pid_file) = app.pid_file.as_ref() {
-                args.extend(["--pid-file".into(), pid_file.into()]);
-            }
+            let config_path = config::get_config_path();
 
-            let program = std::env::current_exe().map_err(|e| {
-                eprintln!("Error: cannot locate the ophan binary: {e}");
+            let release = Release::new(target.clone().unwrap_or(ReleaseTarget::Latest)).map_err(|e| {
+                eprintln!("Error: {e}");
                 ExitCode::OsErr
             })?;
 
-            let new_pid = ophan::sys::upgrade::Upgrade::spawn(&program, args).map_err(|e| {
-                eprintln!("Error: failed to start the new process: {e}");
-                ExitCode::OsErr
+            let installed = release.install(config_path).map_err(|e| {
+                eprintln!("Error: {e}");
+                ExitCode::Unavailable
             })?;
 
-            if let Err(e) = kill(Pid::from_raw(pid), Signal::SIGQUIT) {
-                eprintln!("Error: failed to send upgrade signal to PID {pid}: {e}");
-                let _ = kill(Pid::from_raw(new_pid as i32), Signal::SIGTERM);
-                return Err(ExitCode::OsErr);
+            let Some(version) = installed else {
+                println!("ophan {} is already installed", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            };
+
+            println!("Installed ophan {version} at {}", release.exe().display());
+
+            match Release::reload_running(app.pid_file.as_deref(), config_path) {
+                Ok(Some(pid)) => println!("PID {pid} is handing its listeners over to ophan {version}"),
+                Ok(None) => println!("No running instance found; start ophan to use the new version"),
+                Err(e) => {
+                    eprintln!("Error: the new binary is installed but the running instance was not reloaded: {e}");
+                    return Err(ExitCode::OsErr);
+                },
             }
 
-            println!("Upgrade started: PID {pid} hands its listeners over to PID {new_pid}");
             Ok(())
         },
 

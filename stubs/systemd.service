@@ -6,16 +6,30 @@ Wants=network-online.target
 ConditionFileIsExecutable=@SBINDIR@/ophan
 
 [Service]
-Type=simple
+# The gateway reports READY=1 when it serves, and a process that takes over the listeners
+# during a reload reports itself as the new main process (zero-downtime upgrade).
+Type=notify
+NotifyAccess=all
 EnvironmentFile=-/etc/default/ophan
 EnvironmentFile=-/etc/sysconfig/ophan
 Environment="CONFIG_PATH=@CONFIGDIR@/master.conf"
 ExecStart=@SBINDIR@/ophan -c @CONFIGDIR@/master.conf
+
+User=ophan
+Group=ophan
+# Ports below 1024 without running as root; nothing else is granted.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+# /run/ophan (PID file, upgrade socket) and /var/log/ophan, owned by the service user.
+RuntimeDirectory=ophan
+LogsDirectory=ophan
+# Reload swaps the configuration in place, or hands over to a new process when the binary
+# was replaced or the listeners changed.
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
 Restart=always
 SuccessExitStatus=143
-#Type=notify
 LimitNOFILE=65535
 
 # The following lines leverage SystemD's sandboxing options to provide

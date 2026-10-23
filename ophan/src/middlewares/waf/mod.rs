@@ -30,18 +30,4 @@ impl WafEngineMiddleware {
     ) -> FilterAction {
         FilterAction::Continue
     }
-
-    pub fn filter_response_headers(&self, _request: &RequestParts, _config: &WafConfig, _ctx: &mut OphanCtx) -> FilterAction {
-        FilterAction::Continue
-    }
-
-    pub fn filter_response_body(
-        &self,
-        _request: &RequestParts,
-        _body: &[u8],
-        _config: &WafConfig,
-        _ctx: &mut OphanCtx,
-    ) -> FilterAction {
-        FilterAction::Continue
-    }
 }

@@ -75,13 +75,17 @@ pub fn normalize_path(path: &str) -> Option<String> {
 
 /// Decodes `%XX` only when it encodes an unreserved character (RFC 3986 §2.3);
 /// other escapes, like `%2F`, keep their meaning and are left untouched.
+///
+/// Works on raw bytes so multi-byte UTF-8 characters survive unchanged; the
+/// input is a valid `str`, escapes only produce ASCII, and non-escape runs
+/// always end at an ASCII boundary, so the output stays valid UTF-8.
 fn decode_unreserved(path: &str) -> std::borrow::Cow<'_, str> {
     if memchr::memchr(b'%', path.as_bytes()).is_none() {
         return std::borrow::Cow::Borrowed(path);
     }
 
     let bytes = path.as_bytes();
-    let mut out = String::with_capacity(bytes.len());
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
 
     while i < bytes.len() {
@@ -89,23 +93,28 @@ fn decode_unreserved(path: &str) -> std::borrow::Cow<'_, str> {
             && i + 2 < bytes.len()
             && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
         {
-            let c = (hi << 4 | lo) as char;
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~') {
+            let c = hi << 4 | lo;
+            if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~') {
                 out.push(c);
             } else {
-                out.push('%');
-                out.push(bytes[i + 1].to_ascii_uppercase() as char);
-                out.push(bytes[i + 2].to_ascii_uppercase() as char);
+                // Non-unreserved escapes are canonically uppercased.
+                out.push(b'%');
+                out.push(bytes[i + 1].to_ascii_uppercase());
+                out.push(bytes[i + 2].to_ascii_uppercase());
             }
             i += 3;
             continue;
         }
 
-        out.push(bytes[i] as char);
-        i += 1;
+        let run_end = memchr::memchr(b'%', &bytes[i + 1..]).map_or(bytes.len(), |rel| i + 1 + rel);
+        out.extend_from_slice(&bytes[i..run_end]);
+        i = run_end;
     }
 
-    std::borrow::Cow::Owned(out)
+    match String::from_utf8(out) {
+        Ok(decoded) => std::borrow::Cow::Owned(decoded),
+        Err(_) => std::borrow::Cow::Borrowed(path),
+    }
 }
 
 #[inline]
@@ -208,5 +217,37 @@ mod path_tests {
         assert_eq!(normalize_path("//api///users").as_deref(), Some("/api/users"));
         assert_eq!(normalize_path("/%61pi/%7euser").as_deref(), Some("/api/~user"));
         assert_eq!(normalize_path("/a%2fb/%20x").as_deref(), Some("/a%2Fb/%20x"));
+    }
+
+    #[test]
+    fn multi_byte_utf8_survives_decoding() {
+        assert_eq!(decode_unreserved("/café%20x"), "/café%20x");
+        assert_eq!(decode_unreserved("/café%61"), "/caféa");
+        assert_eq!(decode_unreserved("/ñ/foo%2Fbar"), "/ñ/foo%2Fbar");
+        assert_eq!(decode_unreserved("/日本語?a=%41"), "/日本語?a=A");
+        assert_eq!(decode_unreserved("/中国%7e"), "/中国~");
+    }
+
+    #[test]
+    fn normalize_respects_multi_byte_paths() {
+        assert_eq!(normalize_path("/café%20x"), None);
+        assert_eq!(normalize_path("/ñ/foo%2Fbar"), None);
+        assert_eq!(normalize_path("/日本語?a=%41").as_deref(), Some("/日本語?a=A"));
+        assert_eq!(normalize_path("/café/%7euser").as_deref(), Some("/café/~user"));
+    }
+
+    #[test]
+    fn pure_ascii_paths_are_unchanged() {
+        assert_eq!(decode_unreserved("/api/users/42?q=1&r=2"), "/api/users/42?q=1&r=2");
+        assert_eq!(decode_unreserved("/%61pi/%7euser"), "/api/~user");
+    }
+
+    #[test]
+    fn invalid_escapes_stay_literal() {
+        assert_eq!(decode_unreserved("/a%zz"), "/a%zz");
+        assert_eq!(decode_unreserved("/ab%"), "/ab%");
+        assert_eq!(decode_unreserved("/a%4x"), "/a%4x");
+        assert_eq!(decode_unreserved("/a%20%zz"), "/a%20%zz");
+        assert_eq!(decode_unreserved("/日本%G1"), "/日本%G1");
     }
 }

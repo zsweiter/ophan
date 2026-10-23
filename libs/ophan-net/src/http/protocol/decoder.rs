@@ -46,86 +46,65 @@ impl Decoder {
         Self { max_header_size, max_body_size }
     }
 
+    /// Reads the final response of an exchange. Interim `1xx` responses (`100 Continue`,
+    /// `103 Early Hints`) are skipped; `101 Switching Protocols` is final.
     pub async fn parse<S: AsyncRead + Unpin>(&self, stream: &mut S, is_head: bool) -> Result<ParsedResponse> {
         let mut buf = Vec::with_capacity(HEADER_BUF_SIZE);
-        let header_end = self.read_headers(stream, &mut buf).await?;
-
-        let mut raw_headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-        let mut raw = httparse::Response::new(&mut raw_headers);
-
-        match raw.parse(&buf)? {
-            httparse::Status::Complete(_) => {},
-            httparse::Status::Partial => return Err(ErrorKind::Incomplete.into()),
-        };
-
-        let status =
-            StatusCode::from_u16(raw.code.ok_or(ErrorKind::InvalidStatusCode)?).map_err(|_| ErrorKind::InvalidStatusCode)?;
-
-        let version = match raw.version {
-            Some(0) => Version::HTTP_10,
-            Some(1) => Version::HTTP_11,
-            _ => Version::HTTP_11,
-        };
-
-        let mut headers = HeaderMap::with_capacity(raw.headers.len());
-        for h in raw.headers.iter() {
-            if !h.name.is_empty() {
-                let name = HeaderName::from_bytes(h.name.as_bytes())?;
-                let value = HeaderValue::from_bytes(h.value)?;
-                headers.append(name, value);
-            }
-        }
-
-        let body = if is_head || no_body_status(&status) {
-            Bytes::new()
-        } else {
-            let partial = if header_end < buf.len() {
-                Bytes::copy_from_slice(&buf[header_end..])
-            } else {
-                Bytes::new()
-            };
-            self.read_body(stream, &headers, partial).await?
-        };
-
-        Ok(ParsedResponse { status, version, headers, body })
-    }
-
-    pub async fn parse_status_only<S: AsyncRead + Unpin>(&self, stream: &mut S) -> Result<u16> {
-        let mut buf = Vec::with_capacity(1024);
-        let mut temp = [0u8; READ_BUF_SIZE];
 
         loop {
-            let n = stream.read(&mut temp).await?;
-            if n == 0 {
-                return Err(ErrorKind::ConnectionClosed.into());
-            }
-            buf.extend_from_slice(&temp[..n]);
+            let header_end = self.read_headers(stream, &mut buf).await?;
 
-            if find_header_end(&buf).is_some() {
-                let mut raw_headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-                let mut raw = httparse::Response::new(&mut raw_headers);
-                if let httparse::Status::Complete(_) = raw.parse(&buf)? {
-                    return raw.code.ok_or_else(|| ErrorKind::InvalidStatusCode.into());
+            let mut raw_headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
+            let mut raw = httparse::Response::new(&mut raw_headers);
+
+            match raw.parse(&buf)? {
+                httparse::Status::Complete(_) => {},
+                httparse::Status::Partial => return Err(ErrorKind::Incomplete.into()),
+            };
+
+            let status =
+                StatusCode::from_u16(raw.code.ok_or(ErrorKind::InvalidStatusCode)?).map_err(|_| ErrorKind::InvalidStatusCode)?;
+
+            if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
+                buf.drain(..header_end);
+                continue;
+            }
+
+            let version = match raw.version {
+                Some(0) => Version::HTTP_10,
+                Some(1) => Version::HTTP_11,
+                _ => Version::HTTP_11,
+            };
+
+            let mut headers = HeaderMap::with_capacity(raw.headers.len());
+            for h in raw.headers.iter() {
+                if !h.name.is_empty() {
+                    let name = HeaderName::from_bytes(h.name.as_bytes())?;
+                    let value = HeaderValue::from_bytes(h.value)?;
+                    headers.append(name, value);
                 }
-                return Err(ErrorKind::InvalidStatusCode.into());
             }
 
-            if buf.len() > self.max_header_size {
-                return Err(ErrorKind::HeadersTooLarge.into());
-            }
+            let body = if is_head || no_body_status(&status) {
+                Bytes::new()
+            } else {
+                let partial = if header_end < buf.len() {
+                    Bytes::copy_from_slice(&buf[header_end..])
+                } else {
+                    Bytes::new()
+                };
+                self.read_body(stream, &headers, partial).await?
+            };
+
+            return Ok(ParsedResponse { status, version, headers, body });
         }
     }
 
+    /// Reads until `buf` holds a complete header block; bytes already in `buf` count.
     async fn read_headers<S: AsyncRead + Unpin>(&self, stream: &mut S, buf: &mut Vec<u8>) -> Result<usize> {
         let mut temp = [0u8; READ_BUF_SIZE];
 
         loop {
-            let n = stream.read(&mut temp).await?;
-            if n == 0 {
-                return Err(ErrorKind::ConnectionClosed.into());
-            }
-            buf.extend_from_slice(&temp[..n]);
-
             if let Some(pos) = find_header_end(buf) {
                 return Ok(pos);
             }
@@ -133,6 +112,12 @@ impl Decoder {
             if buf.len() > self.max_header_size {
                 return Err(ErrorKind::HeadersTooLarge.into());
             }
+
+            let n = stream.read(&mut temp).await?;
+            if n == 0 {
+                return Err(ErrorKind::ConnectionClosed.into());
+            }
+            buf.extend_from_slice(&temp[..n]);
         }
     }
 
@@ -163,11 +148,12 @@ impl Decoder {
         while body.len() < len {
             let n = stream.read(&mut temp).await?;
             if n == 0 {
-                break;
+                return Err(ErrorKind::ConnectionClosed.into());
             }
             body.extend_from_slice(&temp[..n]);
         }
 
+        body.truncate(len);
         Ok(Bytes::from(body))
     }
 
@@ -202,7 +188,7 @@ impl Decoder {
                 let chunk_size = usize::from_str_radix(size_str.trim(), 16).map_err(|_| ErrorKind::InvalidChunkEncoding)?;
 
                 if chunk_size == 0 {
-                    break;
+                    return self.read_trailers(stream, buf, end + 2).await.map(|()| Bytes::from(body));
                 }
 
                 let start = end + 2;
@@ -215,6 +201,10 @@ impl Decoder {
                     }
                     buf.extend_from_slice(&temp[..n]);
                     continue;
+                }
+
+                if &buf[chunk_end..chunk_end + 2] != b"\r\n" {
+                    return Err(ErrorKind::InvalidChunkEncoding.into());
                 }
 
                 body.extend_from_slice(&buf[start..chunk_end]);
@@ -231,8 +221,29 @@ impl Decoder {
                 buf.extend_from_slice(&temp[..n]);
             }
         }
+    }
 
-        Ok(Bytes::from(body))
+    /// Consumes the trailer section after the last chunk, up to and including the empty
+    /// line that ends the message, so a recycled stream starts at the next response.
+    async fn read_trailers<S: AsyncRead + Unpin>(&self, stream: &mut S, mut buf: Vec<u8>, mut pos: usize) -> Result<()> {
+        let mut temp = [0u8; READ_BUF_SIZE];
+
+        loop {
+            match find_crlf(&buf[pos..]) {
+                Some(0) => return Ok(()),
+                Some(line) => pos += line + 2,
+                None => {
+                    if buf.len() - pos > self.max_header_size {
+                        return Err(ErrorKind::HeadersTooLarge.into());
+                    }
+                    let n = stream.read(&mut temp).await?;
+                    if n == 0 {
+                        return Err(ErrorKind::ConnectionClosed.into());
+                    }
+                    buf.extend_from_slice(&temp[..n]);
+                },
+            }
+        }
     }
 }
 
@@ -292,6 +303,65 @@ mod tests {
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.version, Version::HTTP_11);
         assert_eq!(resp.body, Bytes::from_static(b"hello"));
+    }
+
+    #[tokio::test]
+    async fn interim_responses_are_skipped() {
+        let raw = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </a.css>\r\n\r\n\
+HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        let resp = Decoder::default().parse(&mut cursor, false).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body, Bytes::from_static(b"ok"));
+    }
+
+    #[tokio::test]
+    async fn switching_protocols_is_final() {
+        let raw = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        let resp = Decoder::default().parse(&mut cursor, false).await.unwrap();
+        assert_eq!(resp.status, StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[tokio::test]
+    async fn truncated_fixed_body_is_an_error() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        assert!(Decoder::default().parse(&mut cursor, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chunked_body_without_final_crlf_is_an_error() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        assert!(Decoder::default().parse(&mut cursor, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn chunked_trailers_are_consumed() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let writer = tokio::spawn(async move {
+            server
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            server.write_all(b"X-Checksum: 1\r\n\r\n").await.unwrap();
+            server
+        });
+
+        let resp = Decoder::default().parse(&mut client, false).await.unwrap();
+        assert_eq!(resp.body, Bytes::from_static(b"ok"));
+        drop(writer.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn chunk_without_crlf_after_data_is_rejected() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nokXX0\r\n\r\n";
+        let mut cursor = std::io::Cursor::new(raw.to_vec());
+        assert!(Decoder::default().parse(&mut cursor, false).await.is_err());
     }
 
     #[tokio::test]

@@ -33,7 +33,7 @@ impl Drop for PidGuard {
 /// 1. Explicit `--pid-file` CLI argument.
 /// 2. `OPHAN_PID_FILE` environment variable (only honored in static/musl builds).
 /// 3. `pid` directive from the master configuration file.
-/// 4. Fallback `/run/ophan.pid`.
+/// 4. Fallback `/var/run/ophan/ophan.pid` (`/run/ophan` on Linux, where `/var/run` links to `/run`).
 pub fn effective_pid_path(cli_pid: Option<&str>, config_path: Option<&PathBuf>) -> PathBuf {
     if let Some(pid) = cli_pid {
         let pid = pid.trim();
@@ -59,7 +59,7 @@ pub fn effective_pid_path(cli_pid: Option<&str>, config_path: Option<&PathBuf>) 
     }
 
     if cfg!(unix) {
-        PathBuf::from("/run/ophan.pid")
+        PathBuf::from("/var/run/ophan/ophan.pid")
     } else {
         PathBuf::from(r"C:\ophan-gateway\ophan.pid")
     }
@@ -129,6 +129,6 @@ mod tests {
     #[test]
     fn fallback_when_no_config() {
         let result = effective_pid_path(None, None);
-        assert_eq!(result, PathBuf::from("/run/ophan.pid"));
+        assert_eq!(result, PathBuf::from("/var/run/ophan/ophan.pid"));
     }
 }

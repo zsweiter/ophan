@@ -9,7 +9,7 @@ use ahash::HashMapExt;
 use ahash::HashSetExt;
 use ahash::{HashMap, HashSet};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use flatkit::matchers::PathMatcherSet;
+use flatkit::matchers::{GlobPattern, PathMatcherSet};
 use flatkit::net::IpNet;
 use flatkit::str::ImmerStr;
 use http::HeaderName;
@@ -226,7 +226,8 @@ fn compile_gateway(raw: &RawGateway, errors: &mut Vec<CompileError>) -> Option<G
         upstreams: &upstream_map,
     };
 
-    let routes: Vec<Arc<RoutesConfig>> = raw.routes.iter().filter_map(|rr| compile_route(rr, &scope, errors)).collect();
+    let path_routes = expand_routes(&raw.routes, errors);
+    let routes: Vec<Arc<RoutesConfig>> = path_routes.iter().filter_map(|route| compile_route(route, &scope, errors)).collect();
 
     Some(GatewayConfig {
         name: name.into(),
@@ -541,18 +542,67 @@ fn compile_health_check(raw: &RawHealthCheck) -> Result<HealthCheckConfig, Strin
 // ROUTE
 // ============================================================================
 
-fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileError>) -> Option<Arc<RoutesConfig>> {
-    let route = match raw {
-        RawRoute::Path(p) => p,
-        RawRoute::Group(g) => {
-            errors.push(CompileError::new(format!(
-                "route group '{}': route groups are not supported yet",
-                g.name
-            )));
-            return None;
-        },
-    };
+/// Flattens `route` and `host` blocks into path routes, rejecting two routes of the same
+/// host and path that share a method, or that are declared by both a `route` and a `host`
+/// block.
+fn expand_routes<'a>(raw: &[RawRoute<'a>], errors: &mut Vec<CompileError>) -> Vec<RawPathRoute<'a>> {
+    let mut routes: Vec<(RawPathRoute<'a>, bool)> = Vec::with_capacity(raw.len());
 
+    for route in raw {
+        match route {
+            RawRoute::Path(path) => routes.push((path.clone(), false)),
+            RawRoute::Host(host) => match host.expand() {
+                Ok(expanded) => routes.extend(expanded.into_iter().map(|route| (route, true))),
+                Err(e) => errors.push(CompileError::new(format!("host {:?}: {e}", host.hosts))),
+            },
+        }
+    }
+
+    for (i, (a, a_from_host)) in routes.iter().enumerate() {
+        for (b, b_from_host) in &routes[i + 1..] {
+            if a.path.trim_end_matches('/') != b.path.trim_end_matches('/') {
+                continue;
+            }
+
+            let Some(host) = shared_host(&a.hosts, &b.hosts) else {
+                continue;
+            };
+
+            if a_from_host != b_from_host {
+                errors.push(CompileError::new(format!(
+                    "path '{}' on host '{host}' is declared by both a route block and a host block",
+                    a.path
+                )));
+            } else if route_methods(a).intersects(&route_methods(b)) {
+                errors.push(CompileError::new(format!(
+                    "path '{}' on host '{host}' is declared twice with a common method",
+                    a.path
+                )));
+            }
+        }
+    }
+
+    routes.into_iter().map(|(route, _)| route).collect()
+}
+
+/// A host both lists serve; routes without hosts belong to the default host.
+fn shared_host<'a>(a: &[&'a str], b: &[&str]) -> Option<&'a str> {
+    match (a.is_empty(), b.is_empty()) {
+        (true, true) => Some("*"),
+        (false, false) => a.iter().copied().find(|h| b.iter().any(|o| o.eq_ignore_ascii_case(h))),
+        _ => None,
+    }
+}
+
+/// Methods a route accepts; none listed means all of them.
+fn route_methods(route: &RawPathRoute) -> HttpMethodSet {
+    match route.methods.is_empty() {
+        true => HttpMethodSet::all(),
+        false => HttpMethodSet::from_str_iter(&route.methods),
+    }
+}
+
+fn compile_route(route: &RawPathRoute, scope: &GatewayScope, errors: &mut Vec<CompileError>) -> Option<Arc<RoutesConfig>> {
     let path = route.path.to_string();
     let hosts: Vec<String> = route.hosts.iter().map(|s| s.to_string()).collect();
     let methods = HttpMethodSet::from_str_iter(&route.methods);
@@ -579,13 +629,13 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
     let mut limiter: Option<Arc<LimiterConfig>> = None;
 
     if let Some(ref policies) = route.policies {
-        if let Some(ref action) = policies.auth {
+        if let Some(action) = policies.auth.as_ref().filter(|a| !a.is_off()) {
             match resolve_auth(action, scope) {
                 Ok(cfg) => auth = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
         }
-        if let Some(ref action) = policies.waf {
+        if let Some(action) = policies.waf.as_ref().filter(|a| !a.is_off()) {
             match resolve_waf(action, scope) {
                 Ok(cfg) => waf = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
@@ -595,14 +645,18 @@ fn compile_route(raw: &RawRoute, scope: &GatewayScope, errors: &mut Vec<CompileE
                 path
             )));
         }
-        if let Some(ref action) = policies.cors {
+        if let Some(action) = policies.cors.as_ref().filter(|a| !a.is_off()) {
             match resolve_cors(action, scope) {
                 Ok(cfg) => cors = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
         }
-        if let Some(ref action) = policies.limiter {
-            match resolve_limiter(action, scope, &path) {
+        if let Some(action) = policies.limiter.as_ref().filter(|a| !a.is_off()) {
+            let identity = match (route.hosts.is_empty(), route.methods.is_empty()) {
+                (true, true) => path.clone(),
+                _ => format!("{}|{}|{}", route.hosts.join(","), route.methods.join("|"), path),
+            };
+            match resolve_limiter(action, scope, &identity) {
                 Ok(cfg) => limiter = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
@@ -676,7 +730,13 @@ fn compile_route_backend(route: &RawPathRoute, scope: &GatewayScope, errors: &mu
                 f
             };
 
-            let blacklist = PathMatcherSet::try_from(sb.exclude_paths.to_owned()).ok();
+            let blacklist = match compile_exclude_patterns(&sb.exclude_paths, "static backend") {
+                Ok(set) => Some(set),
+                Err(e) => {
+                    errors.push(CompileError::new(format!("route '{}': {}", route.path, e)));
+                    None
+                },
+            };
             let static_config = ophan_static::ServeConfig {
                 root: PathBuf::from(root),
                 skip_patterns: blacklist,
@@ -773,6 +833,7 @@ fn resolve_auth(action: &RawRouteAction<RawAuthConfig>, scope: &GatewayScope) ->
             Ok(Arc::new(cfg))
         },
         RawRouteAction::Inline(config) => Ok(Arc::new(build_auth_from_raw(config)?)),
+        RawRouteAction::Off => Err("auth is off".into()),
     }
 }
 
@@ -782,10 +843,11 @@ fn resolve_waf(action: &RawRouteAction<RawWafConfig>, scope: &GatewayScope) -> R
         RawRouteAction::Extends { base, overrides } => {
             let base = scope.waf.get(*base).ok_or_else(|| format!("waf policy '{}' not found", base))?;
             let mut cfg = base.as_ref().clone();
-            merge_waf_override(&mut cfg, overrides);
+            merge_waf_override(&mut cfg, overrides)?;
             Ok(Arc::new(cfg))
         },
         RawRouteAction::Inline(config) => Ok(Arc::new(build_waf_from_raw(config)?)),
+        RawRouteAction::Off => Err("waf is off".into()),
     }
 }
 
@@ -799,6 +861,7 @@ fn resolve_cors(action: &RawRouteAction<RawCorsConfig>, scope: &GatewayScope) ->
             Ok(Arc::new(cfg))
         },
         RawRouteAction::Inline(config) => Ok(Arc::new(build_cors_from_raw(config)?)),
+        RawRouteAction::Off => Err("cors is off".into()),
     }
 }
 
@@ -825,7 +888,7 @@ fn resolve_limiter(
         RawRouteAction::Extends { base, overrides } => {
             let base = scope.limiter.get(*base).ok_or_else(|| format!("limiter policy '{}' not found", base))?;
             let mut cfg = base.as_ref().clone();
-            merge_limiter_override(&mut cfg, overrides);
+            merge_limiter_override(&mut cfg, overrides)?;
             cfg.scope = limiter_scope(&format!("route:{route}:extends"), &cfg);
             Ok(Arc::new(cfg))
         },
@@ -834,12 +897,23 @@ fn resolve_limiter(
             cfg.scope = limiter_scope(&format!("route:{route}"), &cfg);
             Ok(Arc::new(cfg))
         },
+        RawRouteAction::Off => Err("limiter is off".into()),
     }
 }
 
 // ============================================================================
 // POLICY BUILDERS (from RawPolicy fields)
 // ============================================================================
+
+/// Compiles `exclude_paths` glob patterns, naming the offending pattern on error.
+fn compile_exclude_patterns(patterns: &[&str], context: &str) -> Result<PathMatcherSet, String> {
+    let compiled = patterns
+        .iter()
+        .map(|p| GlobPattern::compile(*p).map_err(|e| format!("{context}: invalid exclude_paths pattern '{p}': {e}")))
+        .collect::<Result<Box<[GlobPattern]>, String>>()?;
+
+    Ok(PathMatcherSet::from_patterns(&compiled))
+}
 
 fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let issuer = raw.issuer.ok_or_else(|| "auth: issuer is required".to_string())?;
@@ -931,7 +1005,7 @@ fn build_auth_from_raw(raw: &RawAuthConfig) -> Result<AuthConfig, String> {
     let skip_patterns = if raw.exclude_paths.is_empty() {
         None
     } else {
-        Some(PathMatcherSet::try_from(raw.exclude_paths.to_owned()).map_err(|e| e.to_string())?)
+        Some(compile_exclude_patterns(&raw.exclude_paths, "auth")?)
     };
 
     let sources = match raw.sources.as_ref() {
@@ -970,7 +1044,7 @@ fn build_waf_from_raw(raw: &RawWafConfig) -> Result<WafConfig, String> {
         cfg.anomaly_threshold = threshold;
     }
     if !raw.exclude_paths.is_empty() {
-        cfg.skip_patterns = Some(PathMatcherSet::try_from(raw.exclude_paths.as_slice()).map_err(|a| a.to_string())?);
+        cfg.skip_patterns = Some(compile_exclude_patterns(&raw.exclude_paths, "waf")?);
     }
 
     cfg.compiled = compile_waf_rules(&raw.rules);
@@ -1044,7 +1118,7 @@ fn build_limiter_from_raw(raw: &RawLimiterConfig) -> Result<LimiterConfig, Strin
         cfg.identifier = LimiterIdentifier::from_str(id).map_err(|a| a.to_string())?;
     }
     if !raw.exclude_paths.is_empty() {
-        cfg.skip_patterns = Some(PathMatcherSet::try_from(raw.exclude_paths.clone()).map_err(|a| a.to_string())?);
+        cfg.skip_patterns = Some(compile_exclude_patterns(&raw.exclude_paths, "limiter")?);
     }
 
     Ok(cfg)
@@ -1102,7 +1176,7 @@ fn merge_auth_override(cfg: &mut AuthConfig, overrides: &RawAuthConfig) -> Resul
         }
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.skip_patterns = PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).ok();
+        cfg.skip_patterns = Some(compile_exclude_patterns(&overrides.exclude_paths, "auth override")?);
     }
 
     Ok(())
@@ -1169,7 +1243,7 @@ fn compile_waf_rules(_raw: &[RawWafRule]) -> Arc<CompiledWafRules> {
 // WAF merge (route-level overrides)
 // ============================================================================
 
-fn merge_waf_override(cfg: &mut WafConfig, overrides: &RawWafConfig) {
+fn merge_waf_override(cfg: &mut WafConfig, overrides: &RawWafConfig) -> Result<(), String> {
     if let Some(v) = overrides.mode {
         cfg.mode = match v {
             "detection_only" => WafMode::DetectionOnly,
@@ -1184,11 +1258,13 @@ fn merge_waf_override(cfg: &mut WafConfig, overrides: &RawWafConfig) {
         cfg.anomaly_threshold = v;
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.skip_patterns = PathMatcherSet::try_from(overrides.exclude_paths.as_slice()).ok();
+        cfg.skip_patterns = Some(compile_exclude_patterns(&overrides.exclude_paths, "waf override")?);
     }
     if !overrides.rules.is_empty() {
         cfg.compiled = compile_waf_rules(&overrides.rules);
     }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1227,7 +1303,7 @@ fn merge_cors_override(cfg: &mut CorsConfig, overrides: &RawCorsConfig) {
 // LIMITER merge (route-level overrides)
 // ============================================================================
 
-fn merge_limiter_override(cfg: &mut LimiterConfig, overrides: &RawLimiterConfig) {
+fn merge_limiter_override(cfg: &mut LimiterConfig, overrides: &RawLimiterConfig) -> Result<(), String> {
     if let Some(rate) = overrides.rate {
         cfg.rate = LimiterRate::from(rate);
     }
@@ -1244,8 +1320,10 @@ fn merge_limiter_override(cfg: &mut LimiterConfig, overrides: &RawLimiterConfig)
         };
     }
     if !overrides.exclude_paths.is_empty() {
-        cfg.skip_patterns = Some(PathMatcherSet::try_from(overrides.exclude_paths.to_owned()).unwrap());
+        cfg.skip_patterns = Some(compile_exclude_patterns(&overrides.exclude_paths, "limiter override")?);
     }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -1454,6 +1532,254 @@ mod tests {
 
     fn fatal(errors: &[CompileError]) -> Vec<&str> {
         errors.iter().filter(|e| !e.warning).map(|e| e.message.as_str()).collect()
+    }
+
+    fn gateway_from(routes: &str) -> (Option<GatewayConfig>, Vec<CompileError>) {
+        let source = format!(
+            r#"name = "gw"
+            listeners {{ listener "http" {{ address = "127.0.0.1:8080" }} }}
+            upstreams {{
+                upstream "api" {{ static_servers = ["127.0.0.1:3000"] }}
+                upstream "users" {{ static_servers = ["127.0.0.1:3001"] }}
+            }}
+            routes {{ {routes} }}
+            policy limiter "default" {{ rate = 10/s identifier = "ip" }}
+            policy cors "web" {{ allow_origins = ["app.example.com"] }}"#
+        );
+        let raw = crate::config::dsl::parser::parse_raw_gateway(&source).expect("valid syntax");
+        let mut errors = Vec::new();
+        let gateway = compile_gateway(&raw, &mut errors);
+        (gateway, errors)
+    }
+
+    fn upstream_of(route: &RoutesConfig) -> &str {
+        match &route.backend {
+            BackendTarget::Upstream(upstream) => &upstream.name,
+            BackendTarget::Static(_) => "static",
+        }
+    }
+
+    fn route<'a>(gateway: &'a GatewayConfig, path: &str) -> &'a RoutesConfig {
+        gateway.routes.iter().find(|r| r.path == path).unwrap_or_else(|| panic!("no route for {path}"))
+    }
+
+    #[test]
+    fn host_accepts_a_string_or_an_array() {
+        let (gateway, errors) = gateway_from(r#"host "example.com" { backend = upstream("api") }"#);
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        assert_eq!(&*route(&gateway.unwrap(), "/*").hosts, ["example.com".to_string()]);
+
+        for source in [r#"routes { host "" { } }"#, r#"routes { host [] { } }"#, r#"routes { host ["a.com", " "] { } }"#] {
+            assert!(crate::config::dsl::parser::parse_raw_gateway(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn host_without_matches_serves_every_path() {
+        let (gateway, errors) = gateway_from(r#"host ["example.com", "www.example.com"] { backend = upstream("api") }"#);
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+
+        let gateway = gateway.unwrap();
+        assert_eq!(gateway.routes.len(), 1);
+        let route = route(&gateway, "/*");
+        assert_eq!(&*route.hosts, ["example.com".to_string(), "www.example.com".to_string()]);
+        assert!(route.methods.is_empty(), "every method");
+        assert_eq!(upstream_of(route), "api");
+    }
+
+    #[test]
+    fn matches_inherit_and_override_the_host_settings() {
+        let (gateway, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                policies { limiter = "default" cors = "web" }
+
+                match "GET|POST /users" { backend = upstream("users") }
+                match "/health" { policies { limiter = off } }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        let gateway = gateway.unwrap();
+
+        let users = route(&gateway, "/users");
+        assert_eq!(upstream_of(users), "users");
+        assert!(users.methods.contains_str("GET") && users.methods.contains_str("POST"));
+        assert!(!users.methods.contains_str("DELETE"));
+        assert!(users.limiter.is_some() && users.cors.is_some(), "policies are inherited");
+        assert_eq!(&*users.hosts, ["example.com".to_string()]);
+
+        let health = route(&gateway, "/health");
+        assert_eq!(upstream_of(health), "api", "backend is inherited");
+        assert!(health.methods.is_empty(), "no methods means every method");
+        assert!(health.limiter.is_none(), "off removes the inherited limiter");
+        assert!(health.cors.is_some(), "other policies are still inherited");
+    }
+
+    #[test]
+    fn same_path_with_other_methods_is_allowed() {
+        let (gateway, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                match "GET /users" { }
+                match "POST|PUT /users" { backend = upstream("users") }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        assert_eq!(gateway.unwrap().routes.len(), 2);
+    }
+
+    #[test]
+    fn same_path_with_a_common_method_is_rejected() {
+        let (_, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                match "GET|POST /users" { }
+                match "POST /users" { }
+            }"#,
+        );
+        assert!(
+            fatal(&errors).iter().any(|e| e.contains("declared twice with a common method")),
+            "{:?}",
+            fatal(&errors)
+        );
+
+        let (_, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                match "/users" { }
+                match "DELETE /users" { }
+            }"#,
+        );
+        assert!(
+            fatal(&errors).iter().any(|e| e.contains("common method")),
+            "a match without methods takes them all"
+        );
+    }
+
+    #[test]
+    fn route_and_host_blocks_cannot_declare_the_same_path() {
+        let (_, errors) = gateway_from(
+            r#"route "/users" { hosts = ["example.com"] methods = ["GET"] backend = upstream("api") }
+            host ["EXAMPLE.com"] { backend = upstream("api") match "POST /users" { } }"#,
+        );
+        assert!(
+            fatal(&errors).iter().any(|e| e.contains("both a route block and a host block")),
+            "{:?}",
+            fatal(&errors)
+        );
+
+        let (_, errors) = gateway_from(
+            r#"route "/users" { hosts = ["other.com"] backend = upstream("api") }
+            host ["example.com"] { backend = upstream("api") match "/users" { } }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "other hosts do not conflict: {:?}", fatal(&errors));
+    }
+
+    #[test]
+    fn invalid_match_patterns_are_rejected() {
+        for pattern in ["users", "get /users", "GET|/users", "GET users"] {
+            let (_, errors) = gateway_from(&format!(
+                r#"host ["example.com"] {{ backend = upstream("api") match "{pattern}" {{ }} }}"#
+            ));
+            assert!(
+                fatal(&errors).iter().any(|e| e.contains("match")),
+                "{pattern}: {:?}",
+                fatal(&errors)
+            );
+        }
+    }
+
+    #[test]
+    fn headers_are_merged_by_name() {
+        let source = r#"routes { host ["example.com"] {
+            inbound_headers { set = { X-A = "host", X-B = "host" } remove = ["X-C", "X-D"] }
+            match "/users" { inbound_headers { set = { x-b = "match", X-C = "match" } } }
+        } }"#;
+        let raw = crate::config::dsl::parser::parse_raw_gateway(source).unwrap();
+        let RawRoute::Host(host) = &raw.routes[0] else {
+            panic!("expected a host block");
+        };
+
+        let routes = host.expand().unwrap();
+        let headers = &routes[0].inbound_headers.as_ref().unwrap().opts;
+        assert_eq!(headers.set, vec![("X-A", "host"), ("x-b", "match"), ("X-C", "match")]);
+        assert_eq!(headers.remove, vec!["X-D"], "a header the match sets is not removed");
+    }
+
+    #[test]
+    fn match_cannot_set_methods_or_hosts() {
+        let source = r#"routes { host ["example.com"] { match "/users" { methods = ["GET"] } } }"#;
+        assert!(crate::config::dsl::parser::parse_raw_gateway(source).is_err());
+
+        let source = r#"routes { host ["example.com"] { hosts = ["other.com"] } }"#;
+        assert!(crate::config::dsl::parser::parse_raw_gateway(source).is_err());
+    }
+
+    #[test]
+    fn static_config_follows_the_inherited_backend() {
+        let (gateway, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = static("/var/www")
+                static_config { listing = true }
+
+                match "/files/*" { }
+                match "/api/*" { backend = upstream("api") }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        let gateway = gateway.unwrap();
+
+        assert_eq!(upstream_of(route(&gateway, "/files/*")), "static");
+        assert_eq!(
+            upstream_of(route(&gateway, "/api/*")),
+            "api",
+            "an own backend drops the host static_config"
+        );
+    }
+
+    #[test]
+    fn catch_all_match_keeps_serving_its_base_path() {
+        let (gateway, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                policies { cors = "web" }
+                match "GET /users/*" { }
+                match "POST|PUT /users" { backend = upstream("users") }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+
+        let context = crate::state::AppContext::build(&gateway.unwrap(), None).unwrap();
+        let get = context.router.match_route(Some("example.com"), &http::Method::GET, "/users").unwrap();
+        let post = context.router.match_route(Some("example.com"), &http::Method::POST, "/users").unwrap();
+
+        assert!(matches!(&get.value.backend, BackendTarget::Upstream(u) if &*u.name == "api"));
+        assert!(matches!(&post.value.backend, BackendTarget::Upstream(u) if &*u.name == "users"));
+    }
+
+    #[test]
+    fn routes_of_one_path_are_chosen_by_method_at_runtime() {
+        let (gateway, errors) = gateway_from(
+            r#"host ["example.com"] {
+                backend = upstream("api")
+                policies { cors = "web" }
+                match "GET /users" { }
+                match "POST /users" { backend = upstream("users") }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+
+        let context = crate::state::AppContext::build(&gateway.unwrap(), None).expect("both routes register");
+        let router = &context.router;
+
+        let get = router.match_route(Some("example.com"), &http::Method::GET, "/users").unwrap();
+        let post = router.match_route(Some("example.com"), &http::Method::POST, "/users").unwrap();
+        let preflight = router.match_route(Some("example.com"), &http::Method::OPTIONS, "/users");
+
+        assert!(matches!(&get.value.backend, BackendTarget::Upstream(u) if &*u.name == "api"));
+        assert!(matches!(&post.value.backend, BackendTarget::Upstream(u) if &*u.name == "users"));
+        assert!(preflight.is_ok(), "one of the CORS routes answers preflights");
+        assert!(router.match_route(Some("example.com"), &http::Method::DELETE, "/users").is_err());
     }
 
     #[test]
@@ -1707,5 +2033,38 @@ mod tests {
 
         let err = build_auth_from_raw(&raw).unwrap_err();
         assert!(err.contains("OPHAN_TEST_UNSET_CLIENT_SECRET"), "{err}");
+    }
+
+    #[test]
+    fn invalid_exclude_pattern_is_a_clean_error() {
+        let raw = RawWafConfig { exclude_paths: vec!["/safe/*", "{a"], ..Default::default() };
+
+        let err = build_waf_from_raw(&raw).unwrap_err();
+        assert!(err.contains("{a"), "{err}");
+        assert!(err.contains("exclude_paths"), "{err}");
+    }
+
+    #[test]
+    fn merged_overrides_propagate_invalid_patterns() {
+        let waf_overrides = RawWafConfig { exclude_paths: vec!["/ok/**", "[z-a]"], ..Default::default() };
+        let mut waf = WafConfig::default();
+
+        let err = merge_waf_override(&mut waf, &waf_overrides).unwrap_err();
+        assert!(err.contains("[z-a]"), "{err}");
+
+        let limiter_overrides = RawLimiterConfig { exclude_paths: vec!["{a,{b}"], ..Default::default() };
+        let mut limiter = LimiterConfig::default();
+
+        let err = merge_limiter_override(&mut limiter, &limiter_overrides).unwrap_err();
+        assert!(err.contains("{a,{b}"), "{err}");
+
+        let auth_overrides = RawAuthConfig {
+            exclude_paths: vec!["**/**/**/**/**/**/**"],
+            ..Default::default()
+        };
+        let mut auth = build_auth_from_raw(&raw_auth()).unwrap();
+
+        let err = merge_auth_override(&mut auth, &auth_overrides).unwrap_err();
+        assert!(err.contains("wildcards") || err.contains("**"), "{err}");
     }
 }

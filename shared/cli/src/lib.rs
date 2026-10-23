@@ -198,8 +198,27 @@ pub fn derive_subcommand(input: TokenStream) -> TokenStream {
         });
 
         let is_tuple = matches!(variant.fields, Fields::Unnamed(_));
+        let optional_value = match &variant.fields {
+            Fields::Unnamed(fields) => fields.unnamed.first().is_some_and(|f| option_inner(&f.ty).is_some()),
+            _ => false,
+        };
 
-        let arm = if is_tuple {
+        let arm = if optional_value {
+            quote! {
+                #cfg_attr
+                #(#pats)|* => {
+                    let rest: Vec<String> = iter.cloned().collect();
+                    let (value, rest) = match rest.split_first() {
+                        Some((first, tail)) if !first.starts_with('-') => {
+                            let parsed = first.parse().map_err(|_| format!("Invalid value for '{}'", arg))?;
+                            (Some(parsed), tail.to_vec())
+                        },
+                        _ => (None, rest),
+                    };
+                    return Ok((Some(#enum_name::#var_ident(value)), rest));
+                }
+            }
+        } else if is_tuple {
             quote! {
                 #cfg_attr
                 #(#pats)|* => {

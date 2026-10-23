@@ -39,6 +39,8 @@ use pingora::listeners::TcpSocketOptions;
 use pingora::protocols::TcpKeepalive;
 
 pub fn bootstrap(pid_file: Option<String>) -> Result<(), ExitCode> {
+    Upgrade::record_binary();
+
     LogTracer::builder().with_max_level(tracing_log::log::LevelFilter::Warn).init().map_err(|e| {
         eprintln!("failed to initialize log tracer: {e}");
         ExitCode::Software
@@ -60,7 +62,16 @@ pub fn bootstrap(pid_file: Option<String>) -> Result<(), ExitCode> {
 const GRACE_PERIOD_SECS: u64 = 3;
 const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 
-const UPSTREAM_KEEPALIVE_POOL_SIZE: usize = 512;
+// Per-worker upstream connection budget times a safety factor. The pingora
+// upstream keepalive pool is global to the process, and with `work_stealing:
+// false` each worker owns its connections, so capacity must scale with the
+// worker count rather than stay fixed: 256 idle upstreams per worker absorbs a
+// typical keep-alive fan-out (8 workers -> 2048 upstreams), while the 512
+// floor keeps small/dev deployments (1-2 workers, many upstreams) from
+// starving the pool.
+fn upstream_keepalive_pool_size(workers: usize) -> usize {
+    usize::max(512, workers.saturating_mul(256))
+}
 const MAX_UPSTREAM_RETRIES: usize = 3;
 
 /// Requests served on one downstream HTTP/1 connection before it is recycled.
@@ -87,11 +98,16 @@ fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), Strin
             error_log: None,
             user: Some(config.master.user.clone()),
             upgrade_sock: upgrade_sock.to_string_lossy().into_owned(),
+            // `false`: per-worker threads each get their own runtime and only
+            // poll their own task queues — zero cross-thread contention and
+            // better cache locality, at the cost of losing steal-driven load
+            // balancing. Acceptable for an edge gateway where work units are
+            // uniform HTTP requests.
             work_stealing: false,
             threads: config.master.workers,
             grace_period_seconds: Some(GRACE_PERIOD_SECS),
             graceful_shutdown_timeout_seconds: Some(GRACEFUL_SHUTDOWN_TIMEOUT_SECS),
-            upstream_keepalive_pool_size: UPSTREAM_KEEPALIVE_POOL_SIZE,
+            upstream_keepalive_pool_size: upstream_keepalive_pool_size(config.master.workers),
             max_retries: MAX_UPSTREAM_RETRIES,
             ..Default::default()
         },
@@ -145,6 +161,13 @@ fn server_run(config: OphanConfig, pid_file: Option<String>) -> Result<(), Strin
         }
     }
 
+    #[cfg(unix)]
+    if Upgrade::is_child() {
+        sys::systemd::Systemd::took_over();
+    } else {
+        sys::systemd::Systemd::ready();
+    }
+
     server.run(RunArgs {
         #[cfg(unix)] // Shutdown signal only available on unix systems
         shutdown_signal: Box::new(sys::ShutdownWatch { state: app_state.clone() }),
@@ -190,6 +213,12 @@ fn gateway_service(
                     println!("[{}] listen {}", name, address)
                 }
 
+                // Bare-metal tuning. These options are applied pre-bind on the
+                // listening socket only (pingora `apply_tcp_socket_options`);
+                // they never touch the zero-downtime upgrade path, which
+                // handovers the existing fds (`from_raw_fd` skips bind and all
+                // of these options entirely), so SO_REUSEPORT here cannot
+                // disturb the handover.
                 let mut options = TcpSocketOptions::default();
                 options.tcp_keepalive = Some(TcpKeepalive {
                     idle: Duration::from_secs(60),
@@ -198,6 +227,25 @@ fn gateway_service(
                     #[cfg(target_os = "linux")]
                     user_timeout: Duration::from_secs(0),
                 });
+
+                // TCP Fast Open: lets an accept-bearing SYN carry request data,
+                // saving one RTT per connection. 256 is a modest TFO backlog,
+                // enforced per-socket by the kernel (tcp_fastopen sysctl must
+                // allow the server side via e.g. 0x1).
+                options.tcp_fastopen = Some(256);
+
+                // Don't touch SO_SNDBUF/SO_RCVBUF: the kernel auto-tunes them
+                // (~2 MiB max, doubled by the TCP window-scaling swing) and
+                // forcing a value disables the dynamic swing. Only set these
+                // (e.g. 4 MiB) for known high-bandwidth*high-RTT links or FFT
+                // proxies where autotuning is measurably behind.
+                options.tcp_snd_buf = None;
+                options.tcp_recv_buf = None;
+
+                // Leave IPV6_V6ONLY as the OS default (`[::]` bindings stay
+                // dual-stack on Linux); set explicitly only if the config ever
+                // distinguishes v4-only from v6-only wildcard listeners.
+                options.ipv6_only = None;
 
                 (ServerAddress::Tcp(address, Some(options)), listener.security.clone().into())
             },

@@ -17,3 +17,7 @@ harness = false
 [[bench]]
 name = "path_matcher"
 harness = false
+
+[[bench]]
+name = "ipmatches"
+harness = false

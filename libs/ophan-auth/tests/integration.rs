@@ -398,7 +398,7 @@ async fn test_jwks_direct_wrong_kid_fails() {
             no_dpop_context(),
         )
         .await;
-    assert!(matches!(result2, Err(Error::KeyNotFound(_))));
+    assert!(matches!(resolved(&result2), Some(Error::KeyNotFound(_))));
 }
 
 #[tokio::test]
@@ -435,8 +435,8 @@ async fn test_jwks_direct_unexpected_algorithm_fails() {
         )
         .await;
     assert!(matches!(
-        result,
-        Err(Error::UnsupportedAlgorithm(jsonwebtoken::Algorithm::ES256))
+        resolved(&result),
+        Some(Error::UnsupportedAlgorithm(jsonwebtoken::Algorithm::ES256))
     ));
 }
 
@@ -655,7 +655,7 @@ async fn test_oidc_wrong_issuer_fails() {
         )
         .await;
     assert!(
-        matches!(result, Err(Error::InvalidToken(_))),
+        matches!(resolved(&result), Some(Error::InvalidToken(_))),
         "OIDC auth should fail with wrong issuer, got: {:?}",
         result
     );
@@ -853,7 +853,7 @@ async fn test_token_without_aud_or_iss_is_rejected() {
             )
             .await;
         assert!(
-            matches!(&result, Err(Error::InvalidToken(e)) if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(_))),
+            matches!(resolved(&result), Some(Error::InvalidToken(e)) if matches!(e.kind(), jsonwebtoken::errors::ErrorKind::MissingRequiredClaim(_))),
             "token lacking a configured claim must be rejected, got: {result:?}"
         );
     }
@@ -931,7 +931,7 @@ async fn test_unknown_kid_refetches_at_most_once_per_cooldown() {
     // The key set was just fetched: random kids fail fast without a fetch.
     for kid in ["random-1", "random-2", "random-3"] {
         let (token, _) = sign_es256(&make_claims(), kid);
-        assert!(matches!(authenticate(&token).await, Err(Error::KeyNotFound(_))));
+        assert!(matches!(resolved(&authenticate(&token).await), Some(Error::KeyNotFound(_))));
     }
     initial.assert_calls(1);
 
@@ -952,8 +952,14 @@ async fn test_unknown_kid_refetches_at_most_once_per_cooldown() {
     tokio::time::sleep(cooldown + std::time::Duration::from_millis(50)).await;
     let (unknown_1, _) = sign_es256(&make_claims(), "random-4");
     let (unknown_2, _) = sign_es256(&make_claims(), "random-5");
-    assert!(matches!(authenticate(&unknown_1).await, Err(Error::KeyNotFound(_))));
-    assert!(matches!(authenticate(&unknown_2).await, Err(Error::KeyNotFound(_))));
+    assert!(matches!(
+        resolved(&authenticate(&unknown_1).await),
+        Some(Error::KeyNotFound(_))
+    ));
+    assert!(matches!(
+        resolved(&authenticate(&unknown_2).await),
+        Some(Error::KeyNotFound(_))
+    ));
     rotated.assert_calls(2);
 }
 
@@ -1005,7 +1011,7 @@ async fn test_concurrent_unknown_kids_share_one_refetch() {
         .collect::<Vec<_>>();
 
     for task in tasks {
-        assert!(matches!(task.await.unwrap(), Err(Error::KeyNotFound(_))));
+        assert!(matches!(resolved(&task.await.unwrap()), Some(Error::KeyNotFound(_))));
     }
     mock.assert_calls(2);
 }
@@ -1053,7 +1059,10 @@ async fn test_oidc_discovery_issuer_must_match_configuration() {
             no_dpop_context(),
         )
         .await;
-    assert!(matches!(result, Err(Error::InvalidDiscovery(_))), "got: {result:?}");
+    assert!(
+        matches!(resolved(&result), Some(Error::InvalidDiscovery(_))),
+        "got: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -1084,8 +1093,8 @@ async fn test_oidc_rejects_symmetric_algorithms() {
         )
         .await;
     assert!(matches!(
-        result,
-        Err(Error::UnsupportedAlgorithm(jsonwebtoken::Algorithm::HS256))
+        resolved(&result),
+        Some(Error::UnsupportedAlgorithm(jsonwebtoken::Algorithm::HS256))
     ));
     discovery.assert_calls(0);
 }
@@ -1232,7 +1241,7 @@ async fn test_refreshed_access_token_is_validated() {
     });
 
     let result = make_service().refresh_session(&refresh_config(server.url("/token")), "refresh", None).await;
-    assert!(matches!(result, Err(Error::InvalidToken(_))), "got: {result:?}");
+    assert!(matches!(resolved(&result), Some(Error::InvalidToken(_))), "got: {result:?}");
 }
 
 #[tokio::test]
@@ -1269,4 +1278,103 @@ async fn test_opaque_refreshed_access_token_uses_id_token_claims() {
 
     let result = service.refresh_session(&config, "without-id-token", None).await;
     assert!(matches!(result, Err(Error::InvalidToken(_))));
+}
+
+// ─── Validation cache ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_validation_cache_hits_without_revalidation() {
+    let service = make_service();
+    let config = AuthConfig {
+        validator: make_validator_config(),
+        ..make_static_auth_config()
+    };
+    let token = sign_hs256(&make_claims(), TEST_SECRET, TEST_KID);
+
+    let first = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &token },
+            no_dpop_context(),
+        )
+        .await;
+    let second = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &token },
+            no_dpop_context(),
+        )
+        .await;
+
+    assert!(first.is_ok());
+    assert!(second.is_ok());
+    assert_eq!(first.unwrap().sub, second.unwrap().sub);
+}
+
+#[tokio::test]
+async fn test_validation_cache_distinguishes_tokens() {
+    let service = make_service();
+    let config = AuthConfig {
+        validator: make_validator_config(),
+        ..make_static_auth_config()
+    };
+
+    let mut other = make_claims();
+    other.sub = "user-43".into();
+
+    let token_a = sign_hs256(&make_claims(), TEST_SECRET, TEST_KID);
+    let token_b = sign_hs256(&other, TEST_SECRET, TEST_KID);
+
+    let a = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &token_a },
+            no_dpop_context(),
+        )
+        .await
+        .unwrap();
+    let b = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &token_b },
+            no_dpop_context(),
+        )
+        .await
+        .unwrap();
+
+    assert_ne!(a.sub, b.sub);
+}
+
+#[tokio::test]
+async fn test_validation_cache_invalid_token_is_not_served() {
+    let service = make_service();
+    let config = AuthConfig {
+        validator: make_validator_config(),
+        ..make_static_auth_config()
+    };
+
+    let forged = sign_hs256(&make_claims(), b"totally-different-secret", TEST_KID);
+    let first = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &forged },
+            no_dpop_context(),
+        )
+        .await;
+    let second = service
+        .authenticate(
+            &config,
+            RawToken { ttype: TokenType::Bearer, token: &forged },
+            no_dpop_context(),
+        )
+        .await;
+
+    assert!(first.is_err());
+    assert!(second.is_err());
+}
+
+/// The underlying error of a shared single-flight fetch result
+/// (`Error::Shared` wraps the original `Error`).
+fn resolved<T>(result: &Result<T, Error>) -> Option<&Error> {
+    result.as_ref().err().map(Error::resolve)
 }

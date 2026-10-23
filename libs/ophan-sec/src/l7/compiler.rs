@@ -237,6 +237,11 @@ impl RuleCompiler {
             Self::push_rule(builder, &mut compiled);
         }
 
+        // Body phases: the combined Aho-Corasick + hybrid DFA are built
+        // **here**, once, from the per-rule accumulator output — never per
+        // request (sessions only spin up a `BodySession` from the phase).
+        compiled.compile_body_phases();
+
         Ok(compiled)
     }
 

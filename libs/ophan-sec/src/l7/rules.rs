@@ -40,6 +40,7 @@
 //! [`Phase`]: crate::l7::expr::Phase
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use ahash::AHashMap;
 use flatkit::{net::IpSet, str::ImmerStr};
@@ -47,6 +48,7 @@ use http::HeaderName;
 use ophan_net::http::{HttpMethodSet, StatusCodeSet, header};
 use ophan_net::proxy::RequestParts;
 
+use crate::l7::body::CompiledBodyPhase;
 use crate::l7::expr::{Field, RuleMeta};
 use crate::l7::matchers::TextMatchers;
 
@@ -97,15 +99,44 @@ impl IpCompiledRules {
 pub struct CompiledWafRules {
     /// WHO-IS.md phase 4 — request line + headers.
     pub request_headers: Vec<CompiledRule>,
-    /// WHO-IS.md phase 5 — request body (streaming rules).
-    pub request_body: Vec<CompiledBodyRule>,
+    /// WHO-IS.md phase 5 — request body (streaming rules). Kept in sync with
+    /// [`Self::request_body_phase`] by [`Self::compile_body_phases`].
+    pub(crate) request_body: Vec<CompiledBodyRule>,
     /// WHO-IS.md phase 6 — response headers + status.
     pub response_headers: Vec<CompiledRule>,
     /// WHO-IS.md phase 7 — response body (streaming rules).
-    pub response_body: Vec<CompiledBodyRule>,
+    pub(crate) response_body: Vec<CompiledBodyRule>,
+    /// Immutable compiled automata for phase 5 — the combined
+    /// Aho-Corasick + hybrid DFA built **once** from [`Self::request_body`]
+    /// and shared by every session's [`crate::l7::body::BodySession`].
+    pub(crate) request_body_phase: Arc<CompiledBodyPhase>,
+    /// Same, for phase 7, from [`Self::response_body`].
+    pub(crate) response_body_phase: Arc<CompiledBodyPhase>,
 }
 
 impl CompiledWafRules {
+    pub fn request_body(&self) -> &[CompiledBodyRule] {
+        &self.request_body
+    }
+
+    pub fn response_body(&self) -> &[CompiledBodyRule] {
+        &self.response_body
+    }
+
+    pub fn request_body_phase(&self) -> &Arc<CompiledBodyPhase> {
+        &self.request_body_phase
+    }
+
+    pub fn response_body_phase(&self) -> &Arc<CompiledBodyPhase> {
+        &self.response_body_phase
+    }
+
+    /// Rebuilds the body automata from the body rules; called whenever those change.
+    pub(crate) fn compile_body_phases(&mut self) {
+        self.request_body_phase = Arc::new(CompiledBodyPhase::compile(&self.request_body));
+        self.response_body_phase = Arc::new(CompiledBodyPhase::compile(&self.response_body));
+    }
+
     /// True when no phase has any rule.
     pub fn is_empty(&self) -> bool {
         self.request_headers.is_empty()

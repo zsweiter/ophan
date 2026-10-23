@@ -66,22 +66,6 @@ impl ServeConfig {
         }
     }
 
-    /// Create a config from all options.
-    #[inline]
-    pub fn with_options<P>(root: P, skip_patterns: Option<PathMatcherSet>, flags: FsFlags) -> Self
-    where
-        P: Into<PathBuf>,
-    {
-        Self {
-            root: root.into(),
-            skip_patterns,
-            flags,
-            security_headers: SecurityHeaders::default(),
-            cache_ttl: None,
-            indexes: None,
-        }
-    }
-
     #[inline(always)]
     pub fn is_blacklisted<P: AsRef<Path>>(&self, path: P) -> bool {
         self.skip_patterns.as_ref().is_some_and(|p| p.matches(path.as_ref().as_os_str().as_encoded_bytes()))

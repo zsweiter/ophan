@@ -97,7 +97,7 @@ fn compiles_valid_matrix() {
     );
     let compiled = RuleCompiler::compile(&rules).expect("valid matrix must compile");
     assert!(!compiled.request_headers.is_empty());
-    assert!(!compiled.request_body.is_empty());
+    assert!(!compiled.request_body().is_empty());
     assert!(!compiled.response_headers.is_empty());
 }
 
@@ -108,7 +108,7 @@ fn owasp_default_rules_compile() {
     let compiled = RuleCompiler::compile(&Expr::AllOf(exprs.into_boxed_slice())).expect("OWASP default rules must compile");
 
     // All default rules are body or headers rules.
-    assert!(!compiled.request_body.is_empty(), "OWASP body rules must be present");
+    assert!(!compiled.request_body().is_empty(), "OWASP body rules must be present");
     assert!(
         compiled
             .request_headers
@@ -130,8 +130,8 @@ fn anyof_merges_literals_into_one_rule() {
         .into_boxed_slice(),
     );
     let compiled = RuleCompiler::compile(&rule).expect("AnyOf must compile");
-    assert_eq!(compiled.request_body.len(), 1, "AnyOf merges into one body rule");
-    assert_eq!(compiled.request_body[0].literals.len(), 2);
+    assert_eq!(compiled.request_body().len(), 1, "AnyOf merges into one body rule");
+    assert_eq!(compiled.request_body()[0].literals.len(), 2);
 }
 
 #[test]

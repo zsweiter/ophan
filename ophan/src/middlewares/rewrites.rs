@@ -83,6 +83,8 @@ impl FlatTrie {
     ///
     /// If a rule already exists at the terminal node it is **not** overwritten
     /// (first registration wins, consistent with global priority order).
+    ///
+    /// Children are kept sorted by byte so the hot-path lookup can binary-search.
     fn insert<I: Iterator<Item = u8>>(&mut self, iter: I, to: Box<str>, priority: u32) {
         if priority < self.min_prio {
             self.min_prio = priority;
@@ -90,7 +92,9 @@ impl FlatTrie {
 
         let mut current_idx: usize = 0;
         for b in iter {
-            let child_idx = self.nodes[current_idx].children.iter().find(|(c, _)| *c == b).map(|(_, idx)| *idx);
+            let children = &self.nodes[current_idx].children;
+            let at = children.partition_point(|&(c, _)| c < b);
+            let child_idx = children.get(at).filter(|&(c, _)| *c == b).map(|&(_, idx)| idx);
 
             match child_idx {
                 Some(next_idx) => {
@@ -99,7 +103,7 @@ impl FlatTrie {
                 None => {
                     let new_node_idx = self.nodes.len() as u32;
                     self.nodes.push(CompactNode::default());
-                    self.nodes[current_idx].children.push((b, new_node_idx));
+                    self.nodes[current_idx].children.insert(at, (b, new_node_idx));
                     current_idx = new_node_idx as usize;
                 },
             }
@@ -123,8 +127,10 @@ impl FlatTrie {
         let mut consumed: usize = 0;
 
         for b in iter {
-            // Hot path: the next byte continues the current path.
-            if let Some(&(_, next_idx)) = self.nodes[current_idx].children.iter().find(|(c, _)| *c == b) {
+            // Hot path: binary search over the sorted children.
+            let node = &self.nodes[current_idx];
+            let at = node.children.partition_point(|&(c, _)| c < b);
+            if let Some(&(_, next_idx)) = node.children.get(at).filter(|&(c, _)| *c == b) {
                 current_idx = next_idx as usize;
                 consumed += 1;
                 if let Some((prio, to)) = self.nodes[current_idx].rule.as_ref() {
@@ -141,6 +147,11 @@ impl FlatTrie {
 
         best.map(|(prio, len, to)| (len, to, prio))
     }
+}
+
+/// Best candidate for a path.
+struct Candidate<'a> {
+    cow: Cow<'a, str>,
 }
 
 /// High-performance path rewrite engine.
@@ -244,75 +255,38 @@ impl RewriteEngine {
     /// Apply rewrite rules with full priority evaluation (no early exit
     /// assumptions beyond the normal priority logic).
     #[inline]
-    pub fn apply_hold<'a>(&self, path: &'a str) -> Cow<'a, str> {
+    pub fn apply_hold<'a>(&'a self, path: &'a str) -> Cow<'a, str> {
         if path.is_empty() {
             return Cow::Borrowed(path);
         }
 
-        // Collect the best candidate. Lower priority number wins.
-        let mut candidate: Option<(u32, Cow<'a, str>)> = None;
+        let candidate = self.best_candidate(path, true);
+        let rewritten = candidate.map_or_else(|| Cow::Borrowed(path), |c| c.cow);
 
-        // Exact match (most common fast path for many workloads).
-        if let Some((prio, to)) = self.exact.get(path) {
-            candidate = Some((*prio, Cow::Owned(to.to_string())));
-        }
-
-        if let Some((len, to, prio)) = self.prefix_trie.find_best(path.bytes())
-            && candidate.as_ref().is_none_or(|(cp, _)| prio < *cp)
-        {
-            let rest = &path[len..];
-            let rewritten = if to.is_empty() {
-                Cow::Borrowed(rest)
-            } else {
-                let mut out = String::with_capacity(to.len() + rest.len());
-                out.push_str(to);
-                out.push_str(rest);
-                Cow::Owned(out)
-            };
-            candidate = Some((prio, rewritten));
-        }
-
-        if let Some((len, to, prio)) = self.suffix_trie.find_best(path.bytes().rev())
-            && candidate.as_ref().is_none_or(|(cp, _)| prio < *cp)
-        {
-            let rest = &path[..path.len() - len];
-            let rewritten = if to.is_empty() {
-                Cow::Borrowed(rest)
-            } else {
-                let mut out = String::with_capacity(rest.len() + to.len());
-                out.push_str(rest);
-                out.push_str(to);
-                Cow::Owned(out)
-            };
-            candidate = Some((prio, rewritten));
-        }
-
-        // Note: we still evaluate even when candidate priority is 0 because
-        // apply_hold is the “full evaluation” path; the optimised apply()
-        // short-circuits earlier.
-        if let Some((prio, rewritten)) = self.match_regex(path)
-            && candidate.as_ref().is_none_or(|(cp, _)| prio < *cp)
-        {
-            candidate = Some((prio, Cow::Owned(rewritten)));
-        }
-
-        let result = match candidate {
-            Some((_, res)) => res,
-            None => Cow::Borrowed(path),
-        };
-
-        self.apply_trailing_slash(result)
+        self.apply_trailing_slash(rewritten)
     }
 
     /// Apply rewrite rules with aggressive early exits for priority-0 rules
     /// and min-priority filters.
     #[inline]
-    pub fn apply<'a>(&self, path: &'a str) -> Cow<'a, str> {
+    pub fn apply<'a>(&'a self, path: &'a str) -> Cow<'a, str> {
         // Cold / rare: empty path.
         if path.is_empty() {
             return Cow::Borrowed(path);
         }
 
+        let candidate = self.best_candidate(path, false);
+        let rewritten = candidate.map_or_else(|| Cow::Borrowed(path), |c| c.cow);
+
+        self.apply_trailing_slash(rewritten)
+    }
+
+    /// Best (lowest priority number) candidate among all engines. The returned
+    /// `Cow` may borrow from `self` (exact replacement) or from `path` (prefix
+    /// and suffix remainders); a trailing-slash policy or a consumer that owns
+    /// the value must not assume borrows of `path` alone.
+    #[inline]
+    fn best_candidate<'a>(&'a self, path: &'a str, full: bool) -> Option<Candidate<'a>> {
         enum MatchKind<'a> {
             Exact(&'a str),
             Prefix { len: usize, to: &'a str },
@@ -321,23 +295,24 @@ impl RewriteEngine {
         }
 
         let mut best_prio = u32::MAX;
-        let mut best_match: Option<MatchKind<'_>> = None;
+        let mut best: Option<MatchKind<'a>> = None;
 
         if let Some((prio, to)) = self.exact.get(path) {
-            if *prio == 0 {
-                return self.apply_trailing_slash(Cow::Owned(to.to_string()));
+            if !full && *prio == 0 {
+                return Some(Candidate { cow: Cow::Borrowed(to.as_ref()) });
             }
+
             best_prio = *prio;
-            best_match = Some(MatchKind::Exact(to));
+            best = Some(MatchKind::Exact(to));
         }
 
-        if best_prio > self.prefix_trie.min_prio
+        if (full || best_prio > self.prefix_trie.min_prio)
             && let Some((len, to, prio)) = self.prefix_trie.find_best(path.bytes())
             && prio < best_prio
         {
-            if prio == 0 {
+            if !full && prio == 0 {
                 let rest = &path[len..];
-                let rewritten = if to.is_empty() {
+                let cow = if to.is_empty() {
                     Cow::Borrowed(rest)
                 } else {
                     let mut out = String::with_capacity(to.len() + rest.len());
@@ -346,20 +321,20 @@ impl RewriteEngine {
                     Cow::Owned(out)
                 };
 
-                return self.apply_trailing_slash(rewritten);
+                return Some(Candidate { cow });
             }
 
             best_prio = prio;
-            best_match = Some(MatchKind::Prefix { len, to });
+            best = Some(MatchKind::Prefix { len, to });
         }
 
-        if best_prio > self.suffix_trie.min_prio
+        if (full || best_prio > self.suffix_trie.min_prio)
             && let Some((len, to, prio)) = self.suffix_trie.find_best(path.bytes().rev())
             && prio < best_prio
         {
-            if prio == 0 {
+            if !full && prio == 0 {
                 let rest = &path[..path.len() - len];
-                let rewritten = if to.is_empty() {
+                let cow = if to.is_empty() {
                     Cow::Borrowed(rest)
                 } else {
                     let mut out = String::with_capacity(rest.len() + to.len());
@@ -367,23 +342,28 @@ impl RewriteEngine {
                     out.push_str(to);
                     Cow::Owned(out)
                 };
-                return self.apply_trailing_slash(rewritten);
+
+                return Some(Candidate { cow });
             }
+
             best_prio = prio;
-            best_match = Some(MatchKind::Suffix { len, to });
+            best = Some(MatchKind::Suffix { len, to });
         }
 
         if let Some((min_regex_prio, _, _)) = self.regexes.first()
-            && best_prio > *min_regex_prio
+            && (full || best_prio > *min_regex_prio)
             && let Some((prio, rewritten)) = self.match_regex(path)
             && prio < best_prio
         {
-            // best_prio = prio;
-            best_match = Some(MatchKind::Regex(rewritten));
+            if !full && prio == 0 {
+                return Some(Candidate { cow: Cow::Owned(rewritten) });
+            }
+
+            best = Some(MatchKind::Regex(rewritten));
         }
 
-        let final_path = match best_match {
-            Some(MatchKind::Exact(to)) => Cow::Owned(to.to_string()),
+        let cow = match best {
+            Some(MatchKind::Exact(to)) => Cow::Borrowed(to),
             Some(MatchKind::Prefix { len, to }) => {
                 let rest = &path[len..];
                 if to.is_empty() {
@@ -410,7 +390,7 @@ impl RewriteEngine {
             None => Cow::Borrowed(path),
         };
 
-        self.apply_trailing_slash(final_path)
+        Some(Candidate { cow })
     }
 
     /// Returns the first matching regex (by registration order) together with
@@ -425,14 +405,16 @@ impl RewriteEngine {
         Some((*prio, re.replace(path, to.as_ref()).into_owned()))
     }
 
-    /// Applies the rules to the path of `uri`, keeping its query. Returns `None` when the
-    /// path is unchanged.
+    /// Applies the rules to the path of `uri`, keeping its query. Returns `None`
+    /// when the resulting path is byte-identical to the input.
     pub fn rewrite_uri(&self, uri: &http::Uri) -> Result<Option<http::Uri>, http::uri::InvalidUri> {
         let path = uri.path();
         let rewritten = self.apply(path);
 
-        // Borrowed results are sub-slices of `path`, so equal length means unchanged.
-        if matches!(rewritten, Cow::Borrowed(_)) && rewritten.len() == path.len() {
+        // Content comparison instead of a borrowed/len heuristic: a rule that
+        // rewrites a path onto itself (e.g. an exact rule with an identical
+        // replacement, or a borrowed remainder) is a no-op.
+        if rewritten.as_ref() == path {
             return Ok(None);
         }
 
@@ -757,6 +739,19 @@ mod tests {
     }
 
     #[test]
+    fn earlier_exact_rule_beats_later_regex() {
+        let e = engine(
+            vec![("/zzz", "/z"), ("/foo", "/exact"), (r"^/f[a-z]+$", "/regex")],
+            None,
+            None,
+            TrailingSlashAction::Ignore,
+        );
+        assert_eq!(e.apply("/foo"), "/exact");
+        assert_eq!(e.apply_hold("/foo"), "/exact");
+        assert_eq!(e.apply_hold("/fab"), "/regex");
+    }
+
+    #[test]
     fn min_prio_filter_skips_empty_trie() {
         // No prefix rules → min_prio stays MAX → filter never walks.
         let e = engine(vec![("/only-exact", "/x")], None, None, TrailingSlashAction::Ignore);
@@ -775,10 +770,10 @@ mod tests {
             Cow::Owned(_) => panic!("expected Cow::Borrowed when nothing changed"),
         }
 
-        // Match → must be Owned
+        // Exact match → zero allocation: the replacement is borrowed from the engine.
         match e.apply("/foo") {
-            Cow::Owned(s) => assert_eq!(s, "/bar"),
-            Cow::Borrowed(_) => panic!("expected Cow::Owned after a rewrite"),
+            Cow::Borrowed(s) => assert_eq!(s, "/bar"),
+            Cow::Owned(_) => panic!("expected Cow::Borrowed for an exact replacement"),
         }
 
         // TrailingSlash::Never on an already-borrowed path that only loses the slash
@@ -826,5 +821,31 @@ mod uri_tests {
     fn rewrite_unchanged_path_returns_none() {
         let e = engine(Some("/api"), TrailingSlashAction::Ignore);
         assert_eq!(rewrite(&e, "/other?x=1"), None);
+    }
+
+    #[test]
+    fn rewrite_same_length_different_value_is_applied() {
+        // An exact replacement of equal length must not be mistaken for an
+        // unchanged path.
+        let e = RewriteEngine::new(
+            vec![("/foo".to_string(), "/bar".to_string())],
+            None,
+            None,
+            TrailingSlashAction::Ignore,
+        )
+        .unwrap();
+        assert_eq!(rewrite(&e, "/foo?q=1").as_deref(), Some("/bar?q=1"));
+    }
+
+    #[test]
+    fn rewrite_identical_replacement_is_a_no_op() {
+        let e = RewriteEngine::new(
+            vec![("/foo".to_string(), "/foo".to_string())],
+            None,
+            None,
+            TrailingSlashAction::Ignore,
+        )
+        .unwrap();
+        assert_eq!(rewrite(&e, "/foo?q=1"), None);
     }
 }

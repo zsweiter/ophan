@@ -74,7 +74,7 @@ pub struct CorsConfig {
 impl Default for CorsConfig {
     fn default() -> Self {
         Self {
-            allow_origins: AllowedOrigins::List(Box::new([])),
+            allow_origins: AllowedOrigins::List(OriginList::default()),
             allow_credentials: false,
             max_age: None,
             allow_methods: Some(HeaderValue::from_static("GET, HEAD")),
@@ -88,7 +88,48 @@ impl Default for CorsConfig {
 #[derive(Debug, Clone)]
 pub enum AllowedOrigins {
     All,
-    List(Box<[OriginPattern]>),
+    List(OriginList),
+}
+
+/// Explicit origin allowlist split into an O(1) lookup table for literal
+/// origins and a short scan for `*.domain` wildcards, so a request carrying an
+/// `Origin` header only hashes into the map when the origin is configured
+/// exactly, and never linear-scans a long list.
+#[derive(Debug, Clone, Default)]
+pub struct OriginList {
+    exact: ahash::AHashMap<Box<[u8]>, ()>,
+    wildcards: Box<[WildcardOrigin]>,
+    len: usize,
+}
+
+impl OriginList {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl From<Vec<OriginPattern>> for OriginList {
+    fn from(list: Vec<OriginPattern>) -> Self {
+        let len = list.len();
+        let mut exact = ahash::AHashMap::with_capacity(len);
+        let mut wildcards = Vec::new();
+
+        for pattern in list {
+            match pattern {
+                OriginPattern::Exact(origin) => {
+                    exact.insert(origin, ());
+                },
+                OriginPattern::Wildcard(origin) => wildcards.push(origin),
+            }
+        }
+
+        Self { exact, wildcards: wildcards.into_boxed_slice(), len }
+    }
 }
 
 impl AllowedOrigins {
@@ -99,7 +140,13 @@ impl AllowedOrigins {
     pub fn matches(&self, origin: &[u8]) -> bool {
         match self {
             AllowedOrigins::All => true,
-            AllowedOrigins::List(list) => list.iter().any(|p| p.matches(origin)),
+            AllowedOrigins::List(list) => {
+                if list.exact.contains_key(origin) {
+                    return true;
+                }
+
+                list.wildcards.iter().any(|p| p.matches(origin))
+            },
         }
     }
 }
@@ -112,7 +159,7 @@ impl TryFrom<&str> for AllowedOrigins {
             return Ok(Self::All);
         }
 
-        Ok(Self::List(vec![OriginPattern::try_from(value)?].into_boxed_slice()))
+        Ok(Self::List(vec![OriginPattern::try_from(value)?].into()))
     }
 }
 
@@ -121,7 +168,7 @@ impl<'a> TryFrom<&'a [&'a str]> for AllowedOrigins {
 
     fn try_from(values: &'a [&'a str]) -> Result<Self, Self::Error> {
         if values.is_empty() {
-            return Ok(Self::List(Box::new([])));
+            return Ok(Self::List(OriginList::default()));
         }
 
         let mut list = Vec::with_capacity(values.len());
@@ -140,7 +187,7 @@ impl<'a> TryFrom<&'a [&'a str]> for AllowedOrigins {
             list.push(OriginPattern::try_from(value)?);
         }
 
-        Ok(Self::List(list.into_boxed_slice()))
+        Ok(Self::List(list.into()))
     }
 }
 

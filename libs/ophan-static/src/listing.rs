@@ -1,9 +1,7 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io;
-use std::path::Path;
-
-use tokio::fs;
+use std::path::{Path, PathBuf};
 
 use crate::conf::ServeConfig;
 
@@ -55,8 +53,21 @@ const HTML_FOOT: &str = "</tbody>\
 pub struct DirectoryListing;
 
 impl DirectoryListing {
-    pub async fn build(req_path: &str, system_path: &Path, conf: &ServeConfig) -> io::Result<String> {
-        let mut entries = fs::read_dir(system_path).await?;
+    /// Discovers and serializes the whole listing inside a single blocking call.
+    pub(crate) async fn build(req_path: &str, system_path: &Path, conf: &ServeConfig) -> io::Result<String> {
+        let req_path = req_path.to_owned();
+        let conf = conf.clone();
+        let path: PathBuf = system_path.to_path_buf();
+
+        tokio::task::spawn_blocking(move || Self::render(&req_path, &path, &conf))
+            .await
+            .map_err(io::Error::other)?
+    }
+
+    /// Blocking rendering core: one `read_dir` pass, entry types read straight from
+    /// the directory stream, and file metadata fetched only for the listed files.
+    pub(crate) fn render(req_path: &str, system_path: &Path, conf: &ServeConfig) -> io::Result<String> {
+        let entries = std::fs::read_dir(system_path)?;
         let safe_req_path = html_escape(req_path);
 
         let mut html = String::with_capacity(HTML_CAPACITY_HINT);
@@ -79,21 +90,24 @@ impl DirectoryListing {
 
         let base_path = req_path.trim_end_matches('/');
 
-        while let Some(entry) = entries.next_entry().await? {
+        for entry in entries {
+            let entry = entry?;
             let file_name = entry.file_name();
             let name = file_name.to_str().unwrap_or("");
-            let meta = entry.metadata().await?;
-            let path = entry.path();
+            // Entry type comes from the dirent itself: no per-entry stat for it.
+            let file_type = entry.file_type()?;
 
-            if conf.flags.is_blocked(meta.file_type(), name) {
+            if conf.flags.is_blocked(file_type, name) {
                 continue;
             }
+
+            let path = entry.path();
 
             if conf.is_blacklisted(&path) {
                 continue;
             }
 
-            let is_dir = meta.is_dir();
+            let is_dir = file_type.is_dir();
             let icon = if is_dir { "\u{1F4C1}" } else { "\u{1F4C4}" };
             let class = if is_dir { "dir" } else { "file" };
 
@@ -111,7 +125,7 @@ impl DirectoryListing {
                      </tr>"
                 );
             } else {
-                let formatted_size = flatkit::format_size(meta.len());
+                let formatted_size = flatkit::format_size(entry.metadata()?.len());
                 let _ = write!(
                     html,
                     "<tr class='{class}'>\
@@ -154,8 +168,11 @@ pub fn html_escape(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
+    use tokio::fs;
 
     use super::*;
+    use crate::fs::security::FsFlags;
+    use flatkit::matchers::PathMatcherSet;
 
     #[test]
     fn html_escape_noop() {
@@ -212,5 +229,44 @@ mod tests {
 
         assert!(html.contains("file.txt"));
         assert!(html.contains("Parent Directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_listing_hides_symlinks_by_default() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
+
+        fs::write(dir.join("plain.txt"), b"plain").await.unwrap();
+        fs::create_dir(dir.join("target")).await.unwrap();
+        symlink(dir.join("target"), dir.join("link")).unwrap();
+
+        let conf = ServeConfig::new(dir);
+        let html = DirectoryListing::build("/", dir, &conf).await.unwrap();
+
+        assert!(html.contains("plain.txt"));
+        assert!(html.contains("target"));
+        assert!(!html.contains("href='/link'"), "symlink must be blocked: {html}");
+
+        let follow = ServeConfig::with_flags(dir, FsFlags::secure() | FsFlags::FOLLOW_SYMLINKS | FsFlags::DIRECTORY_LIST);
+        let html = DirectoryListing::build("/", dir, &follow).await.unwrap();
+        assert!(html.contains("href='/link'"));
+    }
+
+    #[tokio::test]
+    async fn directory_listing_respects_blacklist() {
+        let temp = tempdir().unwrap();
+        let dir = temp.path();
+
+        fs::write(dir.join("keep.txt"), b"keep").await.unwrap();
+        fs::write(dir.join("drop.tmp"), b"drop").await.unwrap();
+
+        let conf = ServeConfig::with_skip_patterns(dir, PathMatcherSet::try_from(&["**/*.tmp"] as &[&str]).unwrap());
+        let html = DirectoryListing::build("/", dir, &conf).await.unwrap();
+
+        assert!(html.contains("keep.txt"));
+        assert!(!html.contains("drop.tmp"));
     }
 }

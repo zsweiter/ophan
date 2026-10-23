@@ -1,0 +1,94 @@
+# ═══════════════════════════════════════════════════════════════
+# Ophan API Gateway — apt repository
+#
+# Publishes the .deb packages of a GitHub release to a signed apt repository served by
+# GitHub Pages (repository APT_REPOSITORY, default zsweiter/apt).
+#
+# Requires: secrets APT_GPG_PRIVATE_KEY (signing key without passphrase) and APT_REPO_TOKEN
+# (contents write on the apt repository). To publish every release automatically, add:
+#
+#     release:
+#         types: [published]
+# ═══════════════════════════════════════════════════════════════
+
+name: apt repository
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Release tag whose .deb packages are published (e.g. v0.1.32)"
+                required: true
+
+permissions:
+    contents: read
+
+jobs:
+    publish:
+        name: Publish apt repository
+        runs-on: ubuntu-latest
+
+        env:
+            APT_REPOSITORY: ${{ vars.APT_REPOSITORY || 'zsweiter/apt' }}
+            TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+        steps:
+            - name: Check configuration
+              env:
+                  GPG_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+                  REPO_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
+              run: |
+                  if [ -z "$GPG_KEY" ] || [ -z "$REPO_TOKEN" ]; then
+                    echo "::error::APT_GPG_PRIVATE_KEY and APT_REPO_TOKEN must be set"
+                    exit 1
+                  fi
+                  case "$TAG" in
+                    *-*) echo "::error::pre-release $TAG is not published to apt"; exit 1 ;;
+                  esac
+
+            - name: Download packages
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: gh release download "$TAG" --repo "${{ github.repository }}" --pattern "*.deb" --dir debs
+
+            - name: Check out the apt repository
+              uses: actions/checkout@v5
+              with:
+                  repository: ${{ env.APT_REPOSITORY }}
+                  token: ${{ secrets.APT_REPO_TOKEN }}
+                  path: apt
+
+            - name: Update and sign the repository
+              env:
+                  GPG_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+              run: |
+                  sudo apt-get update && sudo apt-get install -y --no-install-recommends reprepro
+
+                  echo "$GPG_KEY" | gpg --batch --import
+                  KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ { print $5; exit }')
+
+                  cd apt
+                  mkdir -p conf
+                  cat > conf/distributions <<CONF
+                  Origin: Ophan
+                  Label: Ophan
+                  Codename: stable
+                  Architectures: amd64 arm64
+                  Components: main
+                  Description: Ophan API Gateway
+                  SignWith: $KEY_ID
+                  CONF
+                  sed -i 's/^ *//' conf/distributions
+
+                  for deb in ../debs/*.deb; do
+                    reprepro -b . includedeb stable "$deb"
+                  done
+
+                  gpg --armor --export "$KEY_ID" > ophan.asc
+                  touch .nojekyll
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git add -A
+                  git commit -m "ophan $TAG" || exit 0
+                  git push

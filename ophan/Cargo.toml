@@ -3,6 +3,33 @@ name = "ophan"
 version = "0.1.31"
 edition = "2024"
 
+description = "High-performance reverse proxy, API gateway and load balancer"
+license = "MIT"
+repository = "https://github.com/zsweiter/ophan"
+
+[package.metadata.deb]
+maintainer = "Alex Zweiter <zsweiter@gmail.com>"
+copyright = "2026, Alex Zweiter"
+license-file = ["../LICENSE", "0"]
+section = "httpd"
+priority = "optional"
+depends = ""
+extended-description = """\
+Ophan is a reverse proxy and API gateway built on Pingora: routing, load balancing, \
+health checks, rate limiting, JWT authentication, CORS and static files, configured \
+with a small DSL and reloaded without downtime."""
+maintainer-scripts = "../packaging/deb/"
+assets = [
+    ["target/release/ophan", "usr/bin/", "755"],
+    ["../defaults/config/master.conf", "etc/ophan/", "644"],
+    ["../defaults/config/gateways/ophan.conf", "etc/ophan/gateways/", "644"],
+    ["../defaults/www/index.html", "usr/share/ophan/www/", "644"],
+    ["../defaults/www/favicon.svg", "usr/share/ophan/www/", "644"],
+    ["../README.md", "usr/share/doc/ophan/README.md", "644"],
+]
+conf-files = ["/etc/ophan/master.conf", "/etc/ophan/gateways/ophan.conf"]
+systemd-units = { unit-name = "ophan", unit-scripts = "../packaging/deb/", enable = true, start = false, restart-after-upgrade = false, stop-on-upgrade = false }
+
 [dependencies]
 ophan-net = { workspace = true }
 ophan-auth = { workspace = true }
@@ -30,6 +57,7 @@ serde = { workspace = true }
 
 async-trait = { workspace = true }
 bytes = { workspace = true }
+sha2 = { workspace = true }
 base64 = { workspace = true }
 
 hashbrown = { workspace = true }
@@ -49,6 +77,7 @@ tracing-subscriber = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "~0.31.1", default-features = false, features = [
+    "process",
     "signal",
     "user",
 ] }

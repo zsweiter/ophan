@@ -306,6 +306,31 @@ impl HttpMethodSet {
     pub fn is_empty(&self) -> bool {
         self.custom.is_empty() && self.standard.is_empty()
     }
+
+    /// The methods of this set that are not in `other`.
+    pub fn without(&self, other: &Self) -> Self {
+        if other.is_any() {
+            return Self::new(HttpMethod::NONE);
+        }
+
+        Self {
+            standard: HttpMethod(self.standard.0 & !other.standard.0),
+            custom: self.custom.iter().filter(|m| !other.custom.contains(m)).cloned().collect(),
+        }
+    }
+
+    /// Whether a method belongs to both sets; a set that accepts any method
+    /// intersects every non-empty set.
+    pub fn intersects(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        if self.is_any() || other.is_any() {
+            return true;
+        }
+
+        !(self.standard & other.standard).is_empty() || self.custom.iter().any(|m| other.custom.contains(m))
+    }
 }
 
 impl<S> FromIterator<S> for HttpMethodSet
@@ -349,3 +374,26 @@ impl fmt::Display for ParseHttpMethodError {
 }
 
 impl std::error::Error for ParseHttpMethodError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn method_sets_intersect_and_subtract() {
+        let get_post = HttpMethodSet::new(HttpMethod::GET | HttpMethod::POST);
+        let post = HttpMethodSet::new(HttpMethod::POST);
+        let put = HttpMethodSet::new(HttpMethod::PUT);
+        let none = HttpMethodSet::new(HttpMethod::NONE);
+
+        assert!(get_post.intersects(&post));
+        assert!(!get_post.intersects(&put));
+        assert!(HttpMethodSet::all().intersects(&put));
+        assert!(!HttpMethodSet::all().intersects(&none));
+
+        let get = get_post.without(&post);
+        assert!(get.contains_str("GET") && !get.contains_str("POST"));
+        assert!(get_post.without(&HttpMethodSet::all()).is_empty());
+        assert!(!HttpMethodSet::all().without(&post).contains_str("POST"));
+    }
+}

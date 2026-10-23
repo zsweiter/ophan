@@ -25,7 +25,7 @@ pub fn parse_raw_master<'a>(input: &'a str) -> Result<RawMaster<'a>, ConfigError
     let mut workers = RawWorkers::Count(1);
 
     #[cfg(unix)]
-    let mut pid = "/run/ophan.pid";
+    let mut pid = "/var/run/ophan/ophan.pid";
     #[cfg(not(unix))]
     let mut pid = "C:\\ophan-gateway\\ophan.pid";
 
@@ -530,8 +530,10 @@ fn parse_raw_health_check(pair: pest::iterators::Pair<Rule>) -> Result<RawHealth
 fn parse_raw_routes(pair: pest::iterators::Pair<Rule>) -> Result<Vec<RawRoute>, ConfigError> {
     let mut routes = Vec::new();
     for def in pair.into_inner() {
-        if def.as_rule() == Rule::route_def {
-            routes.push(parse_raw_single_route(def)?);
+        match def.as_rule() {
+            Rule::route_def => routes.push(parse_raw_single_route(def)?),
+            Rule::host_def => routes.push(parse_raw_host_route(def)?),
+            _ => {},
         }
     }
     Ok(routes)
@@ -541,97 +543,90 @@ fn parse_raw_single_route(pair: pest::iterators::Pair<Rule>) -> Result<RawRoute,
     let mut inner = pair.into_inner();
     let path = extract_str(inner.next().unwrap());
 
-    let mut backend = RawBackend::Upstream("");
-    let mut hosts = Vec::new();
-    let mut methods = Vec::new();
-    let mut protocols = Vec::new();
-    let mut policies = None;
-    let mut rewrite = None;
-    let mut inbound_headers = None;
-    let mut outbound_headers = None;
-    let mut timeouts = None;
-    let mut streaming = None;
-    let mut route_static_config: Option<(RawStaticFlags, Vec<&str>)> = None;
+    let mut fields = RawRouteFields::default();
+    for body in inner {
+        if body.as_rule() != Rule::EOI && !parse_route_field(body.clone(), &mut fields)? {
+            return Err(body.error(format!("unexpected field '{}' in route '{}'", body.as_str(), path)));
+        }
+    }
+
+    fields.into_path_route(path).map(RawRoute::Path).map_err(ConfigError::parse)
+}
+
+/// `host "a.com" { ... }` or `host ["a.com", "b.com"] { <settings> match "<methods> <path>" { <settings> } }`
+fn parse_raw_host_route(pair: pest::iterators::Pair<Rule>) -> Result<RawRoute, ConfigError> {
+    let mut inner = pair.into_inner();
+    let hosts_pair = inner.next().unwrap();
+    let hosts = match hosts_pair.as_rule() {
+        Rule::string => vec![extract_str(hosts_pair.clone())],
+        _ => extract_raw_array(hosts_pair.clone()),
+    };
+
+    if hosts.is_empty() || hosts.iter().any(|host| host.trim().is_empty()) {
+        return Err(hosts_pair.error("host block needs at least one host, and no empty one"));
+    }
+
+    let mut defaults = RawRouteFields::default();
+    let mut matches = Vec::new();
 
     for body in inner {
         match body.as_rule() {
-            Rule::backend_assignment => {
-                backend = parse_raw_backend(body)?;
+            Rule::match_def => matches.push(parse_raw_match_route(body)?),
+            Rule::route_hosts => return Err(body.error("hosts is not allowed inside a host block, list them in `host [...]`")),
+            _ => {
+                if !parse_route_field(body.clone(), &mut defaults)? {
+                    return Err(body.error(format!("unexpected field '{}' in host block", body.as_str())));
+                }
             },
-            Rule::route_policies_block => {
-                policies = Some(parse_raw_route_policies(body)?);
-            },
-            Rule::rewrite_block => {
-                rewrite = Some(parse_raw_rewrite(body));
-            },
-            Rule::inbound_headers_block => {
-                inbound_headers = Some(parse_raw_inbound_headers(body));
-            },
-            Rule::outbound_headers_block => {
-                outbound_headers = Some(parse_raw_outbound_headers(body));
-            },
-            Rule::timeouts_block => {
-                timeouts = Some(parse_raw_timeouts(body)?);
-            },
-            Rule::streaming_block => {
-                streaming = Some(parse_raw_streaming(body));
-            },
-            Rule::route_hosts => {
-                let val = body.into_inner().next().unwrap();
-                hosts = extract_raw_array(val);
-            },
+        }
+    }
+
+    Ok(RawRoute::Host(RawHostRoute { hosts, defaults, matches }))
+}
+
+fn parse_raw_match_route(pair: pest::iterators::Pair<Rule>) -> Result<RawMatchRoute, ConfigError> {
+    let mut inner = pair.into_inner();
+    let pattern = extract_str(inner.next().unwrap());
+
+    let mut fields = RawRouteFields::default();
+    for body in inner {
+        match body.as_rule() {
+            Rule::route_hosts => return Err(body.error(format!("hosts is not allowed in match '{pattern}'"))),
             Rule::route_methods => {
-                let val = body.into_inner().next().unwrap();
-                methods = extract_raw_array(val);
+                return Err(body.error(format!(
+                    "methods is not allowed in match '{pattern}', write them in the pattern: \"GET|POST /path\""
+                )));
             },
-            Rule::route_protocols => {
-                let val = body.into_inner().next().unwrap();
-                protocols = extract_raw_array(val);
+            _ => {
+                if !parse_route_field(body.clone(), &mut fields)? {
+                    return Err(body.error(format!("unexpected field '{}' in match '{pattern}'", body.as_str())));
+                }
             },
-            Rule::static_config_block => {
-                route_static_config = Some(parse_raw_static_config(body));
-            },
-            Rule::EOI => {},
-            _ => return Err(body.error(format!("unexpected field '{}' in route '{}'", body.as_str(), path))),
         }
     }
 
-    if let Some((flags, exclude_paths)) = route_static_config {
-        if let RawBackend::Static(ref mut sb) = backend {
-            if flags.listing.is_some() {
-                sb.flags.listing = flags.listing;
-            }
-            if flags.dotfiles.is_some() {
-                sb.flags.dotfiles = flags.dotfiles;
-            }
-            if flags.index.is_some() {
-                sb.flags.index = flags.index;
-            }
-            if flags.symlinks.is_some() {
-                sb.flags.symlinks = flags.symlinks;
-            }
-            sb.exclude_paths.extend(exclude_paths);
-        } else {
-            return Err(ConfigError::parse(format!(
-                "static_config requires a static backend in route '{}'",
-                path
-            )));
-        }
+    Ok(RawMatchRoute { pattern, fields })
+}
+
+/// Parses one setting of a `route`, `host` or `match` block into `fields`. Returns
+/// `false` when `body` is not a route setting.
+fn parse_route_field<'a>(body: pest::iterators::Pair<'a, Rule>, fields: &mut RawRouteFields<'a>) -> Result<bool, ConfigError> {
+    match body.as_rule() {
+        Rule::backend_assignment => fields.backend = Some(parse_raw_backend(body)?),
+        Rule::route_policies_block => fields.policies = Some(parse_raw_route_policies(body)?),
+        Rule::rewrite_block => fields.rewrite = Some(parse_raw_rewrite(body)),
+        Rule::inbound_headers_block => fields.inbound_headers = Some(parse_raw_inbound_headers(body)),
+        Rule::outbound_headers_block => fields.outbound_headers = Some(parse_raw_outbound_headers(body)),
+        Rule::timeouts_block => fields.timeouts = Some(parse_raw_timeouts(body)?),
+        Rule::streaming_block => fields.streaming = Some(parse_raw_streaming(body)),
+        Rule::route_hosts => fields.hosts = Some(extract_raw_array(body.into_inner().next().unwrap())),
+        Rule::route_methods => fields.methods = Some(extract_raw_array(body.into_inner().next().unwrap())),
+        Rule::route_protocols => fields.protocols = Some(extract_raw_array(body.into_inner().next().unwrap())),
+        Rule::static_config_block => fields.static_config = Some(parse_raw_static_config(body)),
+        _ => return Ok(false),
     }
 
-    Ok(RawRoute::Path(RawPathRoute {
-        path,
-        hosts,
-        methods,
-        protocols,
-        backend,
-        timeouts,
-        streaming,
-        policies,
-        rewrite,
-        inbound_headers,
-        outbound_headers,
-    }))
+    Ok(true)
 }
 
 fn parse_raw_backend(pair: pest::iterators::Pair<Rule>) -> Result<RawBackend, ConfigError> {
@@ -741,6 +736,17 @@ fn parse_raw_route_policies(pair: pest::iterators::Pair<Rule>) -> Result<RawRout
                     _ => Err(ConfigError::parse(format!("unknown policy type '{}'", policy_type))),
                 };
                 action?;
+            },
+            Rule::policy_off => {
+                let policy_type = entry.into_inner().next().unwrap().as_str();
+                match policy_type {
+                    "auth" => auth = Some(RawRouteAction::Off),
+                    "waf" => waf = Some(RawRouteAction::Off),
+                    "cors" => cors = Some(RawRouteAction::Off),
+                    "limiter" => limiter = Some(RawRouteAction::Off),
+                    "helmet" => helmet = Some(RawRouteAction::Off),
+                    _ => return Err(ConfigError::parse(format!("unknown policy type '{}'", policy_type))),
+                }
             },
             Rule::policy_extends => {
                 let mut inner = entry.into_inner();

@@ -19,17 +19,15 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/var/log/ophan/access.log</string>
+    <string>/var/log/ophan/launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/var/log/ophan/error.log</string>
+    <string>/var/log/ophan/launchd.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>CONFIG</key>
+        <key>CONFIG_PATH</key>
         <string>@CONFIGDIR@/master.conf</string>
-        <key>PIDFILE</key>
-        <string>/var/run/ophan.pid</string>
     </dict>
 
     <key>WorkingDirectory</key>

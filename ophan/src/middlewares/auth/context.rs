@@ -34,6 +34,7 @@ impl AuthContext {
                     .claims
                     .encode_bytes()
                     .inspect_err(|err| tracing::error!(err = %err, "failed to encode user claims"))
+                    .map(bytes::Bytes::from)
                     .ok()?;
 
                 HeaderValue::from_maybe_shared(encoded)

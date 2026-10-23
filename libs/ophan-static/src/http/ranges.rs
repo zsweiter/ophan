@@ -1,4 +1,4 @@
-use std::{fmt, ops::Range};
+use std::fmt;
 
 use bytes::{BufMut, BytesMut};
 use http::{HeaderValue, header::InvalidHeaderValue};
@@ -145,12 +145,6 @@ impl HttpRange {
     #[inline]
     pub fn len(&self) -> u64 {
         self.length
-    }
-
-    #[allow(unused)]
-    #[inline]
-    pub fn as_std_range(&self) -> Range<u64> {
-        self.start..self.start + self.length
     }
 }
 

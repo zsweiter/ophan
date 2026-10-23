@@ -5,6 +5,7 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue, TRANSF
 use http::request::Parts;
 use http::{HeaderMap, Method, Version};
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 use crate::http::client::Client;
@@ -17,6 +18,11 @@ use crate::{RawStream, transport};
 pub struct Request {
     pub(super) method: Method,
     pub(super) url: Url,
+    /// `url` re-parsed as a `http::Uri`, done exactly once per request.
+    pub(super) uri: Result<http::Uri>,
+    /// Set when the URL changed after `uri` was computed; `uri` is then
+    /// re-derived from `url` at send time.
+    pub(super) url_dirty: bool,
     pub(super) version: Version,
     pub(super) headers: HeaderMap,
     pub(super) body: Option<Bytes>,
@@ -53,9 +59,12 @@ impl RequestBuilder {
 
     /// Create a new `RequestBuilder` for the given method and URL.
     pub fn from_parts(client: Client, method: Method, url: impl Into<Url>) -> Self {
+        let url = url.into();
         let request = Ok(Request {
             method,
-            url: url.into(),
+            uri: Request::resolve_uri(&url),
+            url,
+            url_dirty: false,
             version: Version::default(),
             headers: HeaderMap::new(),
             body: None,
@@ -149,6 +158,7 @@ impl RequestBuilder {
                 req.url.query_pairs_mut().append_pair(k, v);
             }
 
+            req.url_dirty = true;
             req
         });
         self
@@ -184,14 +194,22 @@ impl RequestBuilder {
 
 impl Request {
     pub fn new(method: Method, url: impl Into<Url>) -> Self {
+        let url = url.into();
         Self {
             method,
-            url: url.into(),
+            uri: Self::resolve_uri(&url),
+            url,
+            url_dirty: false,
             version: Version::default(),
             headers: HeaderMap::new(),
             body: None,
             timeout: None,
         }
+    }
+
+    #[inline]
+    fn resolve_uri(url: &Url) -> Result<http::Uri> {
+        Ok(url.as_str().parse()?)
     }
 
     pub fn method(&self) -> &Method {
@@ -203,6 +221,8 @@ impl Request {
     }
 
     pub fn url_mut(&mut self) -> &mut Url {
+        // Any out-of-band change to the URL invalidates the cached `uri`.
+        self.url_dirty = true;
         &mut self.url
     }
 
@@ -228,35 +248,69 @@ impl Request {
 
     /// Converts this custom `Request` into a standard `http::request::Parts`
     /// from the `http` crate along with the remaining fields (body and timeout).
+    /// The cached `http::Uri` is reused unless the URL was changed after it
+    /// was computed.
     ///
     /// # Errors
     /// Returns an error if the internal `Url` cannot be parsed into a valid `http::Uri`.
     pub fn into_parts(self) -> Result<(Parts, Option<Bytes>, Option<Duration>)> {
-        let uri: http::Uri = self.url.as_str().parse()?;
+        let Self { method, url, uri, url_dirty, version, headers, body, timeout } = self;
+
+        let uri = if url_dirty { url.as_str().parse()? } else { uri? };
+        let _ = url;
 
         let (mut parts, _) = http::Request::builder()
-            .method(self.method)
+            .method(method)
             .uri(uri)
-            .version(self.version)
+            .version(version)
             .body(())
             .map_err(|e| Error::new(ErrorKind::Encode(e.to_string())))?
             .into_parts();
 
-        parts.headers = self.headers;
+        parts.headers = headers;
 
-        if let Some(body) = self.body.as_ref()
+        if let Some(body_bytes) = body.as_ref()
             && !parts.headers.contains_key(CONTENT_LENGTH)
             && !parts.headers.contains_key(TRANSFER_ENCODING)
         {
-            parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+            parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(body_bytes.len()));
         }
 
-        if let Some(timeout) = self.timeout {
+        if let Some(timeout) = timeout {
             parts.extensions.insert(timeout);
         }
 
-        Ok((parts, self.body, self.timeout))
+        Ok((parts, body, timeout))
     }
+}
+
+/// Sends the encoded request over `stream` and parses the response.
+///
+/// Returns the parsed response together with the stream, so the caller can
+/// park or drop it, and whether the whole request was written. On error the
+/// stream is in an unspecified state and must not be recycled.
+pub(super) async fn drive(
+    decoder: &crate::http::protocol::Decoder,
+    mut stream: RawStream,
+    header_bytes: &[u8],
+    body: Option<&Bytes>,
+    is_head: bool,
+) -> (Result<crate::http::protocol::decoder::ParsedResponse>, RawStream, bool) {
+    let mut sent = false;
+
+    let result = async {
+        stream.write_all(header_bytes).await?;
+        if let Some(body_bytes) = body {
+            stream.write_all(body_bytes).await?;
+        }
+
+        stream.flush().await?;
+        sent = true;
+        Ok::<_, Error>(decoder.parse(&mut stream, is_head).await?)
+    }
+    .await;
+
+    (result, stream, sent)
 }
 
 /// Parse a URL and connect to its transport (http, https, or unix).
@@ -318,6 +372,30 @@ mod tests {
         let (parts, body, _) = req.into_parts().unwrap();
 
         assert_eq!(parts.headers[CONTENT_LENGTH], body.unwrap().len().to_string());
+    }
+
+    #[test]
+    fn into_parts_reflects_url_mutations() {
+        let mut req = dummy_client().get("http://example.com/").request.unwrap();
+        req.url_mut().set_path("/moved");
+        req.url_mut().set_query(Some("q=2"));
+        let (parts, _, _) = req.into_parts().unwrap();
+
+        assert_eq!(parts.uri.path(), "/moved");
+        assert_eq!(parts.uri.query(), Some("q=2"));
+    }
+
+    #[test]
+    fn into_parts_reflects_query_appends() {
+        let (parts, _, _) = dummy_client()
+            .get("http://example.com/p")
+            .query(&[("a", "1"), ("b", "2")])
+            .request
+            .unwrap()
+            .into_parts()
+            .unwrap();
+
+        assert_eq!(parts.uri.path_and_query().unwrap().as_str(), "/p?a=1&b=2");
     }
 
     #[test]

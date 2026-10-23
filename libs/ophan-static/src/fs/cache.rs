@@ -121,28 +121,46 @@ impl Filesystem {
         }
     }
 
+    /// Returns the cached object for `target_path`, loading it on a miss. A path that
+    /// does not exist is remembered for at most `MISS_TTL`, so repeated lookups skip
+    /// the filesystem until then or until [`Self::invalidate`].
     pub async fn fetch_or_load<P>(&self, target_path: P, ttl: Option<Duration>) -> io::Result<CacheObject>
     where
         P: AsRef<Path>,
     {
-        let path = target_path.as_ref();
+        let path: &Path = target_path.as_ref();
+
+        // Fast negative path: a recently failed lookup is answered without stat.
+        if self.misses.get(path).0.is_some() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
 
         if let Some(cached) = self.get(path) {
             return Ok(cached);
         }
 
         let owned = path.to_path_buf();
-        let cached_object = tokio::task::spawn_blocking(move || CacheObject::load_blocking(owned))
+        let loaded = tokio::task::spawn_blocking(move || CacheObject::load_blocking(owned))
             .await
-            .map_err(io::Error::other)??;
+            .map_err(io::Error::other)?;
+
+        let cached_object = match loaded {
+            Ok(object) => object,
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    let miss_ttl = ttl.unwrap_or(self.default_ttl).min(MISS_TTL);
+                    self.misses.put(path, (), Some(miss_ttl));
+                }
+                return Err(e);
+            },
+        };
 
         self.insert(path, cached_object.clone(), Some(ttl.unwrap_or(self.default_ttl)));
 
         Ok(cached_object)
     }
 
-    /// Like [`Self::fetch_or_load`], but a missing path yields `Ok(None)` and is
-    /// remembered for a short while so repeated probes skip the filesystem.
+    /// Like [`Self::fetch_or_load`], but a missing path yields `Ok(None)`.
     pub async fn probe<P>(&self, target_path: P, ttl: Option<Duration>) -> io::Result<Option<CacheObject>>
     where
         P: AsRef<Path>,
@@ -155,11 +173,7 @@ impl Filesystem {
 
         match self.fetch_or_load(path, ttl).await {
             Ok(object) => Ok(Some(object)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let miss_ttl = ttl.unwrap_or(self.default_ttl).min(MISS_TTL);
-                self.misses.put(path, (), Some(miss_ttl));
-                Ok(None)
-            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -312,6 +326,71 @@ mod tests {
 
         fs.invalidate(&file_path);
         assert!(fs.probe(&file_path, None).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn negative_cache_short_circuits_not_found() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("later.txt");
+
+        // Small TTL keeps the negative window examinable: the marker can never live
+        // longer than MISS_TTL, whichever of both is smaller.
+        let fs = Filesystem::new(100, Duration::from_millis(80));
+
+        assert!(
+            matches!(fs.fetch_or_load(&file_path, None).await, Err(e) if e.kind() == io::ErrorKind::NotFound),
+            "first load of a missing path must 404"
+        );
+
+        std::fs::write(&file_path, b"created").unwrap();
+
+        // Still inside the negative window: no filesystem touch, plain 404.
+        assert!(
+            matches!(fs.fetch_or_load(&file_path, None).await, Err(e) if e.kind() == io::ErrorKind::NotFound),
+            "a file created inside the miss window must not be visible yet"
+        );
+
+        std::thread::sleep(Duration::from_millis(140));
+        let found = fs.fetch_or_load(&file_path, None).await.unwrap();
+        assert_eq!(found.into_file().unwrap().metadata.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn invalidation_clears_negative_cache() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("write-me.txt");
+
+        let fs = Filesystem::new(100, Duration::from_secs(60));
+        assert!(fs.fetch_or_load(&file_path, None).await.is_err());
+
+        std::fs::write(&file_path, b"data").unwrap();
+        fs.invalidate(&file_path);
+
+        assert!(fs.fetch_or_load(&file_path, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_misses_share_one_flight() {
+        let dir = temp_dir();
+        let file_path = dir.path().join("raced.txt");
+        std::fs::write(&file_path, b"data").unwrap();
+
+        let fs = Arc::new(Filesystem::new(100, Duration::from_secs(60)));
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let fs = Arc::clone(&fs);
+            let path = file_path.clone();
+            handles.push(tokio::spawn(async move { fs.fetch_or_load(&path, None).await.unwrap() }));
+        }
+
+        let mut first_ptr = None;
+        for handle in handles {
+            let object = handle.await.unwrap().into_file().unwrap();
+            let ptr = Arc::as_ptr(&object) as *const u8;
+            *first_ptr.get_or_insert(ptr) = ptr;
+            assert_eq!(first_ptr, Some(ptr), "all concurrent loads must share one object");
+        }
     }
 
     #[tokio::test]

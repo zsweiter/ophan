@@ -1,6 +1,7 @@
 pub mod common;
 pub mod error;
 pub mod form;
+mod pool;
 mod request;
 pub mod response;
 pub mod url;
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use http::Method;
-use tokio::io::AsyncWriteExt;
 
 pub use request::RequestBuilder;
 pub use response::Response;
@@ -41,6 +41,7 @@ struct ClientRef {
     timeout: Option<Duration>,
     connect_timeout: Option<Duration>,
     tls_connector: Option<crate::tls::connector::TlsConnector>,
+    pool: pool::Pool,
 }
 
 impl Client {
@@ -55,6 +56,7 @@ impl Client {
                 timeout: Some(DEFAULT_TIMEOUT),
                 connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
                 tls_connector: None,
+                pool: pool::Pool::new(),
             }),
         }
     }
@@ -119,31 +121,61 @@ impl Client {
     ///
     /// The per-request timeout takes precedence over the client default and
     /// bounds the whole exchange, connection phase included.
+    ///
+    /// A connection previously parked for the same origin is tried first. When the
+    /// exchange on it fails, the request is sent again over a fresh connection only
+    /// if it was not fully written or its method is idempotent, so a request the
+    /// server may already have processed is never repeated. A stream that ends the
+    /// exchange at a keep-alive viable boundary is parked again.
     pub(super) async fn execute(&self, req: request::Request) -> Result<Response> {
         let (parts, body, timeout) = req.into_parts()?;
 
+        let is_head = parts.method == Method::HEAD;
+        let poolable = pool::request_reusable(&parts.headers);
+        let header_bytes =
+            v1::http_req_header_to_wire(&parts).map_err(|a| Error::new(error::ErrorKind::Encode(a.to_string())))?;
+
         let exchange = async {
+            let pool = &self.inner.pool;
+            let pool_key = pool::key(&parts.uri);
+
+            if let Some(key) = pool_key.as_deref()
+                && poolable
+                && let Some(stream) = pool.pop(key)
+            {
+                let (result, stream, sent) =
+                    request::drive(&self.inner.decoder, stream, &header_bytes, body.as_ref(), is_head).await;
+
+                match result {
+                    Ok(parsed) => {
+                        if pool::response_reusable(&parsed, is_head) {
+                            pool.put(key, stream);
+                        }
+                        return Ok(response(parsed));
+                    },
+                    Err(e) if sent && !parts.method.is_idempotent() => return Err(e),
+                    Err(_) => drop(stream),
+                }
+            }
+
             let tls = self.inner.tls_connector.as_ref();
             let connect = request::connect_transport(&parts.uri, tls);
-            let mut stream = match self.inner.connect_timeout {
+            let stream = match self.inner.connect_timeout {
                 Some(dur) => tokio::time::timeout(dur, connect).await.map_err(|_| Error::new(error::ErrorKind::Timeout))??,
                 None => connect.await?,
             };
 
-            let header_bytes =
-                v1::http_req_header_to_wire(&parts).map_err(|a| Error::new(error::ErrorKind::Encode(a.to_string())))?;
+            let (result, stream, _) = request::drive(&self.inner.decoder, stream, &header_bytes, body.as_ref(), is_head).await;
 
-            stream.write_all(&header_bytes).await?;
-            if let Some(body_bytes) = body {
-                stream.write_all(&body_bytes).await?;
+            let parsed = result?;
+            if let Some(key) = pool_key.as_deref()
+                && poolable
+                && pool::response_reusable(&parsed, is_head)
+            {
+                pool.put(key, stream);
             }
 
-            stream.flush().await?;
-
-            let is_head = parts.method == Method::HEAD;
-            let parsed = self.inner.decoder.parse(&mut stream, is_head).await?;
-
-            Ok::<_, Error>(Response::new(parsed.status, parsed.version, parsed.headers, parsed.body))
+            Ok(response(parsed))
         };
 
         match timeout.or(self.inner.timeout) {
@@ -151,6 +183,11 @@ impl Client {
             None => exchange.await,
         }
     }
+}
+
+#[inline]
+fn response(parsed: crate::http::protocol::decoder::ParsedResponse) -> Response {
+    Response::new(parsed.status, parsed.version, parsed.headers, parsed.body)
 }
 
 pub struct ClientBuilder {
@@ -218,6 +255,7 @@ impl ClientBuilder {
                 timeout: self.timeout,
                 connect_timeout: self.connect_timeout,
                 tls_connector,
+                pool: pool::Pool::new(),
             }),
         }
     }
@@ -226,6 +264,7 @@ impl ClientBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn builder_defaults() {
@@ -319,5 +358,100 @@ mod tests {
                 .map(|r| &r.method)
                 .is_ok_and(|m| *m == Method::CONNECT)
         );
+    }
+
+    /// Answers every request, except that the first connection reads its second
+    /// request and closes without answering. Returns the address and the number of
+    /// accepted connections.
+    async fn server_dropping_second_request() -> (std::net::SocketAddr, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let first = counter.fetch_add(1, Ordering::SeqCst) == 0;
+
+                tokio::spawn(async move {
+                    let mut answered = 0;
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        let mut request = Vec::new();
+                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match socket.read(&mut buf).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => request.extend_from_slice(&buf[..n]),
+                            }
+                        }
+                        if first && answered == 1 {
+                            return;
+                        }
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.unwrap();
+                        answered += 1;
+                    }
+                });
+            }
+        });
+
+        (addr, accepted)
+    }
+
+    #[tokio::test]
+    async fn idempotent_request_is_retried_after_a_failed_recycle() {
+        let (addr, accepted) = server_dropping_second_request().await;
+        let client = Client::builder().timeout(Duration::from_secs(5)).build();
+
+        for _ in 0..2 {
+            let body = client.get(format!("http://{addr}/")).send().await.unwrap().text().unwrap();
+            assert_eq!(body, "ok");
+        }
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_request_is_not_repeated() {
+        let (addr, accepted) = server_dropping_second_request().await;
+        let client = Client::builder().timeout(Duration::from_secs(5)).build();
+
+        assert!(client.post(format!("http://{addr}/token")).send().await.is_ok());
+        assert!(client.post(format!("http://{addr}/token")).send().await.is_err());
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_is_reused_between_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            for _ in 0..2 {
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0);
+                    if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.unwrap();
+            }
+
+            drop(socket);
+        });
+
+        let client = Client::builder().timeout(Duration::from_secs(5)).build();
+
+        for expected in ["ok", "ok"] {
+            let body = client.get(format!("http://{addr}/")).send().await.unwrap().text().unwrap();
+            assert_eq!(body, expected);
+        }
+
+        server.await.unwrap();
     }
 }

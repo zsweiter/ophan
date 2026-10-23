@@ -308,7 +308,7 @@ fn owasp_default_rules_produce_working_engine() {
     match r {
         WafResult::Block { action, matched, .. } => {
             assert_eq!(action, WafAction::Block { status: 403 });
-            assert_eq!(matched[0].category.as_deref(), Some("A03:2021"));
+            assert_eq!(matched[0].category, Some("A03:2021"));
         },
         other => panic!("expected Block for SQLi, got {other:?}"),
     }

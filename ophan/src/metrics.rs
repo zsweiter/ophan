@@ -77,12 +77,57 @@ pub static RATE_LIMIT_ENTRIES: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 const METHODS: [&str; 10] = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE", "OTHER"];
 
 /// Status codes with a cached counter; any other code goes through the label lookup.
-const CACHED_STATUSES: [u16; 20] =
-    [0, 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 405, 409, 413, 429, 500, 502, 503, 504, 101];
-const CACHED_STATUS_LABELS: [&str; 20] = [
-    "0", "200", "201", "204", "301", "302", "304", "400", "401", "403", "404", "405", "409", "413", "429", "500", "502", "503",
-    "504", "101",
+///
+/// Keep both arrays and the arms of [`status_index`] in the same order: the match
+/// arms return the position of the status in these arrays.
+const CACHED_STATUSES: [u16; 32] = [
+    0, 100, 101, 200, 201, 202, 204, 206, 226, 301, 302, 304, 307, 308, 400, 401, 403, 404, 405, 409, 410, 412, 413, 416, 418,
+    421, 422, 429, 500, 502, 503, 504,
 ];
+const CACHED_STATUS_LABELS: [&str; 32] = [
+    "0", "100", "101", "200", "201", "202", "204", "206", "226", "301", "302", "304", "307", "308", "400", "401", "403", "404",
+    "405", "409", "410", "412", "413", "416", "418", "421", "422", "429", "500", "502", "503", "504",
+];
+
+/// O(1) index of `status` within [`CACHED_STATUSES`], `None` for uncached codes.
+#[inline]
+fn status_index(status: u16) -> Option<usize> {
+    Some(match status {
+        0 => 0,
+        100 => 1,
+        101 => 2,
+        200 => 3,
+        201 => 4,
+        202 => 5,
+        204 => 6,
+        206 => 7,
+        226 => 8,
+        301 => 9,
+        302 => 10,
+        304 => 11,
+        307 => 12,
+        308 => 13,
+        400 => 14,
+        401 => 15,
+        403 => 16,
+        404 => 17,
+        405 => 18,
+        409 => 19,
+        410 => 20,
+        412 => 21,
+        413 => 22,
+        416 => 23,
+        418 => 24,
+        421 => 25,
+        422 => 26,
+        429 => 27,
+        500 => 28,
+        502 => 29,
+        503 => 30,
+        504 => 31,
+        _ => return None,
+    })
+}
 
 #[inline]
 fn method_index(method: &Method) -> usize {
@@ -127,7 +172,7 @@ impl RequestCounters {
     fn inc(&self, method: &Method, status: u16) {
         let method_idx = method_index(method);
 
-        let Some(status_idx) = CACHED_STATUSES.iter().position(|&s| s == status) else {
+        let Some(status_idx) = status_index(status) else {
             let status = status.to_string();
             REQUESTS_TOTAL
                 .with_label_values(&[&*self.gateway, &*self.route, METHODS[method_idx], &status])
@@ -387,6 +432,14 @@ mod tests {
     fn method_label_is_bounded() {
         assert_eq!(method_label(&Method::GET), "GET");
         assert_eq!(method_label(&Method::from_bytes(b"PURGE").unwrap()), "OTHER");
+    }
+
+    #[test]
+    fn cached_status_tables_match_the_index() {
+        for (i, status) in CACHED_STATUSES.iter().enumerate() {
+            assert_eq!(status_index(*status), Some(i), "status {status}");
+            assert_eq!(CACHED_STATUS_LABELS[i], status.to_string(), "status {status}");
+        }
     }
 
     #[test]

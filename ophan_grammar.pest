@@ -128,8 +128,10 @@ load_balance_assignment = { ("balance_strategy" | "load_balance") ~ "=" ~ string
 health_check_assignment = { "health_check" ~ "=" ~ inline_object }
 
 // ========== ROUTES ==========
-routes_block = { "routes" ~ "{" ~ route_def* ~ "}" }
+routes_block = { "routes" ~ "{" ~ (route_def | host_def)* ~ "}" }
 route_def = { ("route" | "path") ~ string ~ "{" ~ route_body* ~ "}" }
+host_def = { "host" ~ (array | string) ~ "{" ~ (match_def | route_body)* ~ "}" }
+match_def = { "match" ~ string ~ "{" ~ route_body* ~ "}" }
 route_body = _{
     backend_assignment
   | route_policies_block
@@ -172,10 +174,12 @@ static_config_exclude_paths = { "exclude_paths" ~ "=" ~ array }
 route_policies_block = { "policies" ~ "{" ~ route_policy_entry* ~ "}" }
 route_policy_entry = _{
     policy_extends
+  | policy_off
   | policy_direct
   | policy_local_block
 }
 
+policy_off = { identifier ~ "=" ~ "off" ~ !(ASCII_ALPHANUMERIC | "_" | "-") }
 policy_direct = { identifier ~ "=" ~ string }
 policy_extends = { identifier ~ "extends" ~ string ~ "{" ~ (sources_block | refresh_block | key_value)* ~ "}" }
 policy_local_block = { identifier ~ "{" ~ policy_local_body* ~ "}" }

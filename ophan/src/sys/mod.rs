@@ -4,6 +4,12 @@ pub mod pid;
 pub mod upgrade;
 
 #[cfg(unix)]
+pub mod release;
+
+#[cfg(unix)]
+pub mod systemd;
+
+#[cfg(unix)]
 pub mod unix_signal;
 
 #[cfg(windows)]

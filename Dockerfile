@@ -1,7 +1,10 @@
 # ═══════════════════════════════════════════════════════════════
 # Ophan API Gateway — Docker Image (Multi-Architecture)
 # Build:   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/zsweiter/ophan:latest --push .
-# Run:     docker run -d -p 80:80 -p 443:443 -v /path/to/config:/etc/ophan ghcr.io/zsweiter/ophan:latest
+# Run:     docker run -d -p 80:80 \
+#            -v ophan-config:/etc/ophan -v ophan-www:/var/www -v ophan-logs:/var/log/ophan \
+#            -v ophan-run:/run/ophan \
+#            ghcr.io/zsweiter/ophan:latest
 # ═══════════════════════════════════════════════════════════════
 
 FROM --platform=$BUILDPLATFORM lukemathwalker/cargo-chef:latest-rust-1.94 AS chef
@@ -13,6 +16,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM --platform=$BUILDPLATFORM chef AS builder
 COPY --from=planner /src/recipe.json recipe.json
+COPY vendor/ vendor/
 
 ARG TARGETARCH
 ARG BUILDARCH
@@ -22,6 +26,7 @@ ARG CARGO_ZIGBUILD_VERSION=0.23.4
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
+    libcap2-bin \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -52,36 +57,31 @@ RUN TARGET=$(cat /.target) && cargo chef cook --release --zigbuild --target "$TA
 COPY . .
 RUN TARGET=$(cat /.target) \
     && cargo zigbuild --release --target "$TARGET" --bin ophan \
-    && cp "target/$TARGET/release/ophan" /ophan
+    && cp "target/$TARGET/release/ophan" /ophan \
+    && setcap 'cap_net_bind_service=+ep' /ophan
 
-FROM alpine:3.21
+RUN mkdir -p /rootfs/etc/ophan /rootfs/usr/share/ophan /rootfs/var/www /rootfs/var/log/ophan /rootfs/run/ophan \
+    && cp -R packaging/docker/. /rootfs/etc/ophan/ \
+    && cp -R packaging/docker /rootfs/usr/share/ophan/config \
+    && cp -R defaults/www/. /rootfs/var/www/
 
-RUN apk add --no-cache libcap
-
-RUN addgroup -S ophan && adduser -S -G ophan ophan
-
-RUN mkdir -p /etc/ophan /var/www/ /var/log/ophan /var/run/ophan
+FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /ophan /usr/local/bin/ophan
+COPY --from=builder /rootfs/usr/share/ophan /usr/share/ophan
+COPY --from=builder --chown=65532:65532 /rootfs/etc/ophan /etc/ophan
+COPY --from=builder --chown=65532:65532 /rootfs/var/www /var/www
+COPY --from=builder --chown=65532:65532 /rootfs/var/log/ophan /var/log/ophan
+COPY --from=builder --chown=65532:65532 /rootfs/run/ophan /run/ophan
 
-COPY defaults/config/ /etc/ophan/
-COPY defaults/config/ /usr/share/ophan/config/
-COPY defaults/www/ /var/www/
-COPY entrypoint.sh /entrypoint.sh
+USER 65532:65532
 
-RUN chown -R ophan:ophan /etc/ophan /var/www /var/log/ophan /var/run/ophan /run \
-    && chmod +x /entrypoint.sh \
-    && setcap 'cap_net_bind_service=+ep' /usr/local/bin/ophan \
-    && apk del libcap # Clean up to keep the image lightweight
+ENV CONFIG_PATH=/etc/ophan/master.conf
+ENV OPHAN_CONFIG_SEED_DIR=/usr/share/ophan/config
+ENV OPHAN_PID_FILE=/tmp/ophan/ophan.pid
 
-USER ophan
+VOLUME ["/etc/ophan", "/var/www", "/var/log/ophan", "/run/ophan"]
 
 EXPOSE 80
-EXPOSE 443
 
-ENV OPHAN_CONFIG_DIR=/etc/ophan
-ENV OPHAN_WWW_DIR=/var/www
-ENV OPHAN_PID_FILE=/var/run/ophan/ophan.pid
-ENV OPHAN_SOCKET_PATH=/var/run/ophan_gateway.sock
-
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/ophan"]

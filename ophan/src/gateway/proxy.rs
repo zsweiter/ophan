@@ -218,10 +218,10 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
     /// - After this hook, `ctx.matched_route` is always `Some`.
     /// - `ctx.client_addr` is updated from the actual downstream socket.
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        ctx.request_id = match session.get_header(&header::X_REQUEST_ID) {
-            None => RequestId::new_uuid(),
-            Some(header) => RequestId::from(header),
-        };
+        ctx.request_id = session
+            .get_header(&header::X_REQUEST_ID)
+            .and_then(RequestId::from_client)
+            .unwrap_or_else(RequestId::new_uuid);
 
         let Some(app) = ctx.app.as_ref() else {
             return Err(Error::new_str("no application context"));
@@ -295,6 +295,9 @@ impl pingora::proxy::ProxyHttp for OphanGateway {
             return Ok(());
         }
 
+        // `Pipeline::on_request_body` takes `&mut OphanCtx` plus `&HttpRoute`, so the
+        // route must be cloned out of `ctx` first (only reached when a WAF policy is
+        // configured for this route).
         let route = Arc::clone(ctx.route()?);
         let request = session.as_downstream().req_header();
 

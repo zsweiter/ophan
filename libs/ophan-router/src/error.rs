@@ -31,6 +31,12 @@ pub enum InsertError {
 
     /// Catch-all parameters are only allowed at the end of a path.
     InvalidCatchAll,
+
+    /// Two routes of the same host and path accept a common method.
+    MethodConflict {
+        /// The path both routes register.
+        path: String,
+    },
 }
 
 impl fmt::Display for InsertError {
@@ -44,6 +50,9 @@ impl fmt::Display for InsertError {
             },
             Self::InvalidParam => write!(f, "Parameters must be registered with a valid name"),
             Self::InvalidCatchAll => write!(f, "Catch-all parameters are only allowed at the end of a route"),
+            Self::MethodConflict { path } => {
+                write!(f, "Two routes for '{path}' on the same host accept a common method")
+            },
         }
     }
 }

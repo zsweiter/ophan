@@ -14,6 +14,9 @@ use crate::config::{NetworkProtocol, UpstreamAddress};
 
 /// How long a resolved host backend address is reused before resolving again.
 const DNS_TTL: Duration = Duration::from_secs(30);
+/// How long a failed resolution keeps any previous address in service before trying again,
+/// so a failing DNS does not add a blocking lookup to every request.
+const DNS_NEGATIVE_TTL: Duration = Duration::from_secs(5);
 const DNS_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,9 +149,18 @@ impl Backend {
                 match tokio::time::timeout(DNS_TIMEOUT, lookup).await {
                     Ok(Ok(Ok(Some(addr)))) => (Some(addr), Some(Instant::now() + DNS_TTL)),
                     result => {
-                        // Keep serving with the last known address while DNS is failing.
+                        // Keep serving with the last known address while DNS is failing,
+                        // and negative-cache the failure so requests do not retry the
+                        // lookup until the address goes stale again.
                         if let Some(template) = cached.as_ref() {
                             tracing::warn!("failed to resolve upstream '{}', using the last address: {result:?}", name);
+
+                            let degraded = Arc::new(PeerTemplate {
+                                peer: template.peer.clone(),
+                                expires_at: Some(Instant::now() + DNS_NEGATIVE_TTL),
+                            });
+                            self.peer_template.store(Some(degraded));
+
                             return Ok(template.peer.clone());
                         }
 

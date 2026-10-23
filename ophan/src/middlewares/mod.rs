@@ -104,7 +104,7 @@ impl Pipeline {
 
         if let Some(auth) = route.auth_policy.as_ref() {
             let scheme = ctx.scheme;
-            match Box::pin(self.auth_middleware.on_request_with_scheme(req, scheme, auth, ctx)).await {
+            match self.auth_middleware.on_request_with_scheme(req, scheme, auth, ctx).await {
                 FilterAction::Continue => { /* continue */ },
                 action => return action,
             }

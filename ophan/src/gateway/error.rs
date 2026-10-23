@@ -149,7 +149,9 @@ pub fn build_error_body(error: &GatewayError, accept: Option<&[u8]>, request_id:
 
     let wants_json = accept.is_some_and(|accept| memchr::memmem::find(accept, b"application/json").is_some());
 
-    let dynamic_metadata_len = 4 + error_message.len() + error_name.len() + request_id.len();
+    // Worst case: JSON/HTML escaping can expand each character up to 6x, so the
+    // buffers are sized for the fully escaped text and never reallocate.
+    let dynamic_metadata_len = 4 + error_message.len() * 6 + error_name.len() * 6 + request_id.len() + 16;
     let (content_type, body) = match wants_json {
         true => {
             let mut buf = BytesMut::with_capacity(60 + dynamic_metadata_len + 16);

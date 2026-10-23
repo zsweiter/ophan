@@ -164,51 +164,64 @@ impl<'a> Read for ChunkReader<'a> {
 }
 
 // =============================================================================
-// StreamingBodyMatcher
+// BodyMatchInfo — automaton-slot provenance of a streaming match
 // =============================================================================
 
-/// Per-body streaming matcher. Owned by `WafSession`; built once from the
-/// compiled body rules and reused across chunks via `reset()`.
+/// Identifies which compiled automaton reported a [`BodyAction::Block`] and
+/// the automaton-local index of the matching pattern. The session resolves
+/// the originating [`RuleMeta`] through [`CompiledBodyPhase::meta_of`], so a
+/// match never has to clone rule data into the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodyMatchInfo {
+    /// Index of the matched literal (Aho-Corasick) or regex (hybrid DFA)
+    /// within its own combined automaton.
+    pub pattern_index: usize,
+    /// `true` when the match came from the DFA, `false` from AC literals.
+    pub from_dfa: bool,
+}
+
+// =============================================================================
+// CompiledBodyPhase — immutable, compiled once
+// =============================================================================
+
+/// Immutable compilation of a body-inspection phase: the combined
+/// Aho-Corasick automaton over every non-negated rule's literals and the
+/// combined steppable hybrid DFA over their regexes, plus the per-pattern
+/// [`RuleMeta`] tables.
+///
+/// Built **once** at configuration load (see `RuleCompiler::compile`) and
+/// stored in [`crate::l7::rules::CompiledWafRules`] behind an `Arc`. Every
+/// request/response body spins up a cheap [`BodySession`] via
+/// [`Self::session`] — the automata are shared, never rebuilt per request.
 #[derive(Clone)]
-pub struct StreamingBodyMatcher {
+pub struct CompiledBodyPhase {
     /// Combined Aho-Corasick over every non-negated rule's literals.
     ac: Option<Arc<AhoCorasick>>,
     /// `ac`'s pattern index → originating rule meta.
     ac_meta: Arc<[Option<RuleMeta>]>,
-    /// Maximum literal pattern length, used to size the overlap window.
+    /// Maximum literal pattern length minus one — overlap window size.
     overlap_len: usize,
-    /// Trailing bytes of the previous chunk (bounded, ≤ `overlap_len`).
-    overlap: Vec<u8>,
     /// Combined steppable hybrid DFA over every non-negated rule's regexes.
-    dfa: Option<DFA>,
-    /// DFA cache — holds the lazily-built DFA states (bounded by config).
-    dfa_cache: Option<DfaCache>,
+    dfa: Option<Arc<DFA>>,
     /// `dfa`'s pattern index → originating rule meta.
     dfa_meta: Arc<[Option<RuleMeta>]>,
-    /// Current DFA state across chunks (`None` until the first chunk).
-    dfa_state: Option<LazyStateID>,
-    /// `false` once the DFA gave up (cache too small / quit byte) — regex
-    /// rules are then skipped for the remainder of this body.
-    regex_active: bool,
-    /// Whether the body content type permits regex scanning.
-    rewindable: bool,
-    /// Terminal state: matched / ended clean.
-    phase_state: BodyPhaseState,
-    /// Provenance of the match that set [`BodyPhaseState::Matched`].
-    last_meta: Option<RuleMeta>,
 }
 
-impl std::fmt::Debug for StreamingBodyMatcher {
+impl std::fmt::Debug for CompiledBodyPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamingBodyMatcher")
+        f.debug_struct("CompiledBodyPhase")
             .field("has_ac", &self.ac.is_some())
+            .field("ac_patterns", &self.ac_meta.len())
             .field("overlap_len", &self.overlap_len)
             .field("has_dfa", &self.dfa.is_some())
-            .field("regex_active", &self.regex_active)
-            .field("rewindable", &self.rewindable)
-            .field("phase_state", &self.phase_state)
-            .field("last_meta", &self.last_meta.as_ref().map(|m| m.id.as_ref()))
-            .finish_non_exhaustive()
+            .field("dfa_patterns", &self.dfa_meta.len())
+            .finish()
+    }
+}
+
+impl Default for CompiledBodyPhase {
+    fn default() -> Self {
+        Self::compile(&[])
     }
 }
 
@@ -226,15 +239,18 @@ enum BodyPhaseState {
     Clean,
 }
 
-impl StreamingBodyMatcher {
-    /// Build a streaming matcher from the compiled body rules of one phase.
+impl CompiledBodyPhase {
+    /// Compile the combined automata from a phase's compiled body rules.
     ///
     /// All literal patterns across all (non-negated) rules are merged into a
     /// single Aho-Corasick automaton; all regexes into a single hybrid DFA.
     /// Negated body rules are **rejected at compile time** (see
     /// `compiler.rs`) because "block when X is absent" cannot be decided
     /// mid-stream without buffering.
-    pub fn from_rules(rules: &[CompiledBodyRule], rewindable: bool) -> Self {
+    ///
+    /// This is the **one** place the automata are built; it must run at
+    /// configuration load time, never in the request path.
+    pub fn compile(rules: &[CompiledBodyRule]) -> Self {
         let mut literals: Vec<&str> = Vec::new();
         let mut ac_meta: Vec<Option<RuleMeta>> = Vec::new();
         let mut regexes: Vec<&str> = Vec::new();
@@ -266,52 +282,116 @@ impl StreamingBodyMatcher {
         };
         let overlap_len = ac.as_ref().map_or(0, |a| a.max_pattern_len().saturating_sub(1));
 
-        let dfa = if regexes.is_empty() || !rewindable {
+        let dfa = if regexes.is_empty() {
             None
         } else {
             DFA::builder()
                 .configure(regex_automata::hybrid::dfa::Config::new().cache_capacity(256 * 1024))
                 .build_many(&regexes)
                 .ok()
+                .map(Arc::new)
         };
-        let dfa_cache = dfa.as_ref().map(DFA::create_cache);
-        let regex_active = dfa.is_some();
 
         Self {
             ac,
             ac_meta: ac_meta.into(),
             overlap_len,
-            overlap: Vec::with_capacity(overlap_len),
             dfa,
-            dfa_cache,
             dfa_meta: dfa_meta.into(),
-            dfa_state: None,
-            regex_active,
-            rewindable,
-            phase_state: BodyPhaseState::default(),
-            last_meta: None,
         }
     }
 
-    /// `true` when the matcher has nothing to do (no literals, no regexes).
+    /// `true` when the phase has nothing to do (no literals, no regexes).
     pub fn is_empty(&self) -> bool {
         self.ac.is_none() && self.dfa.is_none()
     }
 
-    /// Provenance of the rule that matched (available after
-    /// [`BodyAction::Block`]).
-    pub fn last_meta(&self) -> Option<&RuleMeta> {
-        self.last_meta.as_ref()
+    /// Spin up a per-body runtime state. **Cheap**: no automaton is rebuilt —
+    /// the session allocates only its DFA cache (the `&mut`-only lazily
+    /// expanded state machine memory) and the fixed overlap buffer.
+    pub fn session(self: &Arc<Self>) -> BodySession {
+        let dfa_cache = self.dfa.as_ref().map(|d| d.create_cache());
+        BodySession {
+            phase: Arc::clone(self),
+            overlap: Vec::with_capacity(self.overlap_len),
+            dfa_cache,
+            dfa_state: None,
+            rewindable: true,
+            regex_gave_up: false,
+            phase_state: BodyPhaseState::default(),
+            last_hit: None,
+        }
     }
 
-    /// Feed one chunk. `end_body` must be `true` on the final call for this
-    /// body. Returns [`BodyAction::Block`] on the first match (fail-fast);
-    /// [`BodyAction::Allow`] only when `end_body` arrives with no match.
+    /// Resolve the originating [`RuleMeta`] for a match reported by
+    /// [`BodySession::feed`] / [`BodySession::last_hit`].
+    pub fn meta_of(&self, hit: Option<BodyMatchInfo>) -> Option<&RuleMeta> {
+        let hit = hit?;
+        let table = match hit.from_dfa {
+            true => &self.dfa_meta,
+            false => &self.ac_meta,
+        };
+        table.get(hit.pattern_index)?.as_ref()
+    }
+}
+
+// =============================================================================
+// BodySession — per-body runtime state (cheap, from a compiled phase)
+// =============================================================================
+
+/// Per-body runtime state driven by one shared [`CompiledBodyPhase`].
+///
+/// Holds the only mutable automaton attachment — the hybrid DFA cache (the
+/// `regex_automata::hybrid::Cache` requires `&mut` and is therefore owned
+/// per session; the DFA and Aho-Corasick automata themselves are shared
+/// behind an `Arc`) — plus the bounded overlap buffer and the streaming
+/// state machine. Reuse it across bodies with [`BodySession::reset`]: after
+/// the first chunk of a body no further allocation happens (both the cache
+/// memory pool and the overlap buffer capacity are retained).
+#[derive(Clone)]
+pub struct BodySession {
+    phase: Arc<CompiledBodyPhase>,
+    /// Trailing bytes of the previous chunk (bounded, ≤ `overlap_len`),
+    /// preallocated at phase compile time and reused in place.
+    overlap: Vec<u8>,
+    /// DFA cache — holds the lazily-built DFA states (bounded by config).
+    dfa_cache: Option<DfaCache>,
+    /// Current DFA state across chunks (`None` until the first chunk).
+    dfa_state: Option<LazyStateID>,
+    /// Whether the body content type permits regex scanning.
+    rewindable: bool,
+    /// Sticky: `true` once the DFA gave up mid-body (cache too small / quit
+    /// byte) — regex rules are then skipped until the next `reset()`.
+    regex_gave_up: bool,
+    /// Terminal state: matched / ended clean.
+    phase_state: BodyPhaseState,
+    /// Automaton slot provenance of the match that set
+    /// [`BodyPhaseState::Matched`].
+    last_hit: Option<BodyMatchInfo>,
+}
+
+impl std::fmt::Debug for BodySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BodySession")
+            .field("overlap_len", &self.phase.overlap_len)
+            .field("regex_active", &self.regex_active())
+            .field("rewindable", &self.rewindable)
+            .field("phase_state", &self.phase_state)
+            .field("last_hit", &self.last_hit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BodySession {
+    /// Feed one chunk. `end` must be `true` on the final call for this body.
+    /// Returns [`BodyAction::Block`] on the first match (fail-fast);
+    /// [`BodyAction::Allow`] only when `end` arrives with no match.
     ///
-    /// **Zero-copy**: `chunk` is borrowed; the only allocation is the bounded
-    /// overlap tail (≤ `max_pattern_len - 1` bytes) and the DFA cache.
+    /// **Zero-copy**: `chunk` is borrowed; the overlap tail is updated in
+    /// place (no allocation after the first chunk) and the DFA cache memory
+    /// pool comes from the session.
     #[inline]
-    pub fn on_chunk(&mut self, chunk: &[u8], end_body: bool) -> BodyAction {
+    pub fn feed(&mut self, chunk: &[u8], end: bool) -> BodyAction {
         match self.phase_state {
             BodyPhaseState::Matched => return BodyAction::Block,
             BodyPhaseState::Clean => return BodyAction::Allow,
@@ -319,7 +399,7 @@ impl StreamingBodyMatcher {
         }
 
         // --- 1. Aho-Corasick over overlap ++ chunk ---
-        if let Some(ac) = &self.ac {
+        if let Some(ac) = &self.phase.ac {
             let mut reader = ChunkReader { overlap: &self.overlap, chunk, pos: 0 };
             let mut hit = None;
             for m in ac.stream_find_iter(&mut reader).flatten() {
@@ -328,36 +408,48 @@ impl StreamingBodyMatcher {
             }
 
             if let Some(pidx) = hit {
-                if let Some(meta) = self.ac_meta.get(pidx).and_then(|m| m.as_ref()) {
-                    self.last_meta = Some(meta.clone());
-                }
+                self.last_hit = Some(BodyMatchInfo { pattern_index: pidx, from_dfa: false });
                 self.phase_state = BodyPhaseState::Matched;
                 return BodyAction::Block;
             }
         }
 
         // --- 2. Update bounded overlap window (tail of overlap ++ chunk) ---
-        if self.overlap_len > 0 {
+        //
+        // In-place update of the preallocated buffer: after the first chunk
+        // this never allocates regardless of how the window saturates,
+        // including chunks shorter than the window itself.
+        if self.phase.overlap_len > 0 {
             let total = self.overlap.len() + chunk.len();
-            let keep = total.min(self.overlap_len);
-            if keep > 0 {
-                let mut tail = Vec::with_capacity(keep);
-                if chunk.len() >= keep {
-                    tail.extend_from_slice(&chunk[chunk.len() - keep..]);
-                } else {
-                    let from = self.overlap.len() - (keep - chunk.len());
-                    tail.extend_from_slice(&self.overlap[from..]);
-                    tail.extend_from_slice(chunk);
-                }
-                self.overlap = tail;
-            } else {
+            let keep = total.min(self.phase.overlap_len);
+            if keep == 0 {
                 self.overlap.clear();
+            } else if keep <= chunk.len() {
+                // The kept window is fully inside the chunk: overwrite the
+                // buffer content (capacity ≥ keep, no reallocation).
+                let from = chunk.len() - keep;
+                self.overlap.resize(keep, 0); // pad or shrink in place
+                self.overlap.copy_from_slice(&chunk[from..]);
+            } else {
+                // chunk.len() < keep: the window is the retained tail of the
+                // previous overlap followed by the whole chunk. Rotate that
+                // tail to the front, then splice the chunk right behind it.
+                let old_keep = keep - chunk.len(); // ≤ self.overlap.len()
+                let len = self.overlap.len();
+                self.overlap.copy_within(len - old_keep..len, 0);
+                if self.overlap.len() < keep {
+                    // Early chunks before the window saturates; the padding
+                    // is overwritten by the splice below. Fits in capacity.
+                    self.overlap.resize(keep, 0);
+                }
+                self.overlap[old_keep..keep].copy_from_slice(chunk);
+                self.overlap.truncate(keep);
             }
         }
 
         // --- 3. Steppable hybrid DFA over chunk ---
-        if self.regex_active {
-            if let (Some(dfa), Some(cache)) = (&self.dfa, &mut self.dfa_cache) {
+        if self.regex_active() {
+            if let (Some(dfa), Some(cache)) = (&self.phase.dfa, &mut self.dfa_cache) {
                 let mut sid = match self.dfa_state {
                     Some(s) => s,
                     None => {
@@ -366,8 +458,8 @@ impl StreamingBodyMatcher {
                         match start {
                             Ok(s) => s,
                             Err(_) => {
-                                self.regex_active = false;
-                                return self.finish(end_body);
+                                self.regex_gave_up = true;
+                                return self.finish(end);
                             },
                         }
                     },
@@ -380,9 +472,7 @@ impl StreamingBodyMatcher {
                             sid = next;
                             if sid.is_match() {
                                 let pidx = dfa.match_pattern(cache, sid, 0).as_usize();
-                                if let Some(meta) = self.dfa_meta.get(pidx).and_then(|m| m.as_ref()) {
-                                    self.last_meta = Some(meta.clone());
-                                }
+                                self.last_hit = Some(BodyMatchInfo { pattern_index: pidx, from_dfa: true });
                                 self.phase_state = BodyPhaseState::Matched;
                                 return BodyAction::Block;
                             }
@@ -398,37 +488,78 @@ impl StreamingBodyMatcher {
                     }
                 }
                 if gave_up {
-                    self.regex_active = false;
+                    self.regex_gave_up = true;
                 } else {
                     self.dfa_state = Some(sid);
                 }
             } else {
-                self.regex_active = false;
+                self.regex_gave_up = true;
             }
         }
 
-        self.finish(end_body)
+        self.finish(end)
+    }
+
+    /// `true` when regex (DFA) scanning is disabled for this body.
+    pub fn regex_active(&self) -> bool {
+        self.rewindable && !self.regex_gave_up && self.phase.dfa.is_some()
+    }
+
+    /// Enable / disable regex (DFA) scanning for the next body. Call before
+    /// the first chunk of a body (e.g. to skip regexes for binary content
+    /// types); mid-body switches between chunks are undefined.
+    pub fn set_rewindable(&mut self, rewindable: bool) {
+        self.rewindable = rewindable;
+    }
+
+    /// Whether regex (DFA) scanning is enabled for this body.
+    pub fn rewindable(&self) -> bool {
+        self.rewindable
+    }
+
+    /// Automaton-slot provenance of the latest [`BodyAction::Block`] (or of
+    /// the match remembered by the terminal state).
+    pub fn last_hit(&self) -> Option<BodyMatchInfo> {
+        self.last_hit
+    }
+
+    /// Gating switch set before the first chunk (used by the
+    /// [`StreamingBodyMatcher`] constructors).
+    fn rewound(mut session: Self, rewindable: bool) -> Self {
+        session.rewindable = rewindable;
+        session
+    }
+
+    /// Reset per-body state so the session can be reused for the next
+    /// request/response body. The DFA cache and the overlap buffer's
+    /// capacity are retained — resetting allocates nothing (only the DFA
+    /// state seed is dropped; its lazily-built states stay warm in the
+    /// cache for the next body).
+    pub fn reset(&mut self) {
+        self.overlap.clear(); // keeps capacity — zero alloc on the next body
+        self.dfa_state = None;
+        self.regex_gave_up = false;
+        self.phase_state = BodyPhaseState::Empty;
+        self.last_hit = None;
     }
 
     /// Handle end-of-body: finalize the DFA (matches are delayed by one byte
     /// and confirmed via the EOI transition) and set the terminal state.
     #[inline]
-    fn finish(&mut self, end_body: bool) -> BodyAction {
-        if !end_body {
+    fn finish(&mut self, end: bool) -> BodyAction {
+        if !end {
             self.phase_state = BodyPhaseState::Scanning;
             return BodyAction::Continue;
         }
 
         // Confirm a pending regex match via the EOI transition.
-        if self.regex_active {
-            if let (Some(dfa), Some(cache)) = (&self.dfa, &mut self.dfa_cache) {
+        if self.regex_active() {
+            if let (Some(dfa), Some(cache)) = (&self.phase.dfa, &mut self.dfa_cache) {
                 if let Some(sid) = self.dfa_state {
                     if let Ok(sid) = dfa.next_eoi_state(cache, sid) {
                         if sid.is_match() {
                             let pidx = dfa.match_pattern(cache, sid, 0).as_usize();
-                            if let Some(meta) = self.dfa_meta.get(pidx).and_then(|m| m.as_ref()) {
-                                self.last_meta = Some(meta.clone());
-                            }
+                            self.last_hit = Some(BodyMatchInfo { pattern_index: pidx, from_dfa: true });
                             self.phase_state = BodyPhaseState::Matched;
                             return BodyAction::Block;
                         }
@@ -440,14 +571,76 @@ impl StreamingBodyMatcher {
         self.phase_state = BodyPhaseState::Clean;
         BodyAction::Allow
     }
+}
+
+// =============================================================================
+// StreamingBodyMatcher — public wrapper over CompiledBodyPhase + BodySession
+// =============================================================================
+
+/// Per-body streaming matcher — the historical public API. Wraps an
+/// [`Arc`]-shared [`CompiledBodyPhase`] with a [`BodySession`] so callers
+/// that compile per phase keep a single value with the original streaming
+/// interface. [`Self::from_rules`] preserves the old compile-per-call shape;
+/// code paths that compile once (configuration load) should prefer
+/// [`CompiledBodyPhase::session`] directly.
+#[derive(Clone)]
+pub struct StreamingBodyMatcher {
+    phase: Arc<CompiledBodyPhase>,
+    session: BodySession,
+}
+
+impl std::fmt::Debug for StreamingBodyMatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingBodyMatcher")
+            .field("has_ac", &self.phase.ac.is_some())
+            .field("overlap_len", &self.phase.overlap_len)
+            .field("has_dfa", &self.phase.dfa.is_some())
+            .field("regex_active", &self.session.regex_active())
+            .field("rewindable", &self.session.rewindable)
+            .field("phase_state", &self.session.phase_state)
+            .field("last_meta", &self.phase.meta_of(self.session.last_hit).map(|m| m.id.as_ref()))
+            .finish_non_exhaustive()
+    }
+}
+
+impl StreamingBodyMatcher {
+    /// Build a streaming matcher from the compiled body rules of one phase,
+    /// compiling the automata now (see [`CompiledBodyPhase::compile`]).
+    ///
+    /// `rewindable = false` keeps the automata but skips regex (DFA)
+    /// scanning for this body — literal Aho-Corasick still runs.
+    pub fn from_rules(rules: &[CompiledBodyRule], rewindable: bool) -> Self {
+        let phase = Arc::new(CompiledBodyPhase::compile(rules));
+        Self::from_phase(Arc::clone(&phase), rewindable)
+    }
+
+    /// Wrap an existing (shared) compiled phase with a fresh runtime state.
+    pub fn from_phase(phase: Arc<CompiledBodyPhase>, rewindable: bool) -> Self {
+        let session = phase.session();
+        Self { phase, session: BodySession::rewound(session, rewindable) }
+    }
+
+    /// `true` when the matcher has nothing to do (no reachable automaton).
+    pub fn is_empty(&self) -> bool {
+        self.phase.ac.is_none() && (self.phase.dfa.is_none() || !self.session.rewindable)
+    }
+
+    /// Provenance of the rule that matched (available after
+    /// [`BodyAction::Block`]).
+    pub fn last_meta(&self) -> Option<&RuleMeta> {
+        self.phase.meta_of(self.session.last_hit)
+    }
+
+    /// Feed one chunk. Same contract as [`BodySession::feed`] (chunk, end
+    /// of body) — see there for the streaming details.
+    #[inline]
+    pub fn on_chunk(&mut self, chunk: &[u8], end_body: bool) -> BodyAction {
+        self.session.feed(chunk, end_body)
+    }
 
     /// Reset to the initial state so the matcher can be reused for the next
-    /// request/response body (the session calls this on `reset()`).
+    /// request/response body; no allocation after the first body.
     pub fn reset(&mut self) {
-        self.overlap.clear();
-        self.dfa_state = None;
-        self.regex_active = self.dfa.is_some();
-        self.phase_state = BodyPhaseState::Empty;
-        self.last_meta = None;
+        self.session.reset();
     }
 }

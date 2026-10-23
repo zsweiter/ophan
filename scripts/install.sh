@@ -18,6 +18,8 @@ SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 UPGRADE=false
 FORCE=false
 
+ZERO_DOWNTIME_SINCE="0.1.32"
+
 TMPDIR=""
 
 # ──────────────────────────────────────────────────────────────
@@ -83,6 +85,10 @@ info() {
     printf '  %b•%b %s\n' "${DIM}" "$RESET" "$1"
 }
 
+version_at_least() {
+    [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
 # ──────────────────────────────────────────────────────────────
 # Cleanup
 # ──────────────────────────────────────────────────────────────
@@ -111,7 +117,7 @@ Options:
   --bindir PATH       Binary directory (default: PREFIX/bin)
   --config PATH       Configuration directory (default: /etc/ophan)
   --no-service        Do not install systemd service
-  --upgrade           Upgrade: replace binary and restart the running service
+  --upgrade           Upgrade: replace binary and hand the running service over to it
   --force             Force overwrite of existing config/binary even if same version
   --help              Show this help
 
@@ -503,6 +509,22 @@ if [[ "$OS" == "linux" && "$INSTALL_SERVICE" == true ]]; then
         warn "systemd.service not found in package"
     else
 
+        if ! getent passwd ophan >/dev/null 2>&1; then
+            useradd --system --user-group --no-create-home --home-dir /nonexistent \
+                --shell /usr/sbin/nologin --comment "Ophan gateway" ophan
+            ok "System user 'ophan' created"
+        fi
+
+        chgrp -R ophan "$CONFIGDIR"
+        chmod -R g+rX "$CONFIGDIR"
+        mkdir -p /var/log/ophan
+        chown -R ophan:ophan /var/log/ophan
+
+        if grep -qE '^[[:space:]]*pid[[:space:]]*=[[:space:]]*"/run/ophan\.pid"' "$CONFIGDIR/master.conf" 2>/dev/null; then
+            sed -i -E 's|^([[:space:]]*pid[[:space:]]*=[[:space:]]*)"/run/ophan\.pid"|\1"/var/run/ophan/ophan.pid"|' "$CONFIGDIR/master.conf"
+            info "PID file moved to /var/run/ophan/ophan.pid"
+        fi
+
         sed \
             -e "s|@SBINDIR@|$BINDIR|g" \
             -e "s|@CONFIGDIR@|$CONFIGDIR|g" \
@@ -556,10 +578,16 @@ if [[ "$OS" == "linux" &&
       -f "$SERVICE_FILE" ]]; then
 
     if [[ "$UPGRADE" == true ]] && systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        step "Upgrading service (restart)"
+        if [[ -n "${INSTALLED_VER:-}" ]] && version_at_least "$INSTALLED_VER" "$ZERO_DOWNTIME_SINCE"; then
+            step "Upgrading service (zero-downtime reload)"
+            UPGRADE_ACTION=reload
+        else
+            step "Upgrading service (restart)"
+            UPGRADE_ACTION=restart
+        fi
 
-        if systemctl restart "$SERVICE_NAME" && sleep 2 && systemctl is-active --quiet "$SERVICE_NAME"; then
-            ok "Service restarted on v${VERSION}"
+        if systemctl "$UPGRADE_ACTION" "$SERVICE_NAME" && sleep 2 && systemctl is-active --quiet "$SERVICE_NAME"; then
+            ok "Service upgraded to v${VERSION} (${UPGRADE_ACTION})"
         elif [[ -n "$BACKUP_BIN" ]]; then
             warn "Service failed on v${VERSION} — rolling back to previous binary"
             install -m 755 "$BACKUP_BIN" "$BINDIR/ophan"

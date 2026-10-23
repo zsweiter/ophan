@@ -220,8 +220,7 @@ pub enum RawRegistrySecurity<'a> {
 #[derive(Debug, Clone)]
 pub enum RawRoute<'a> {
     Path(RawPathRoute<'a>),
-    // planed
-    Group(RawGroupRoute<'a>),
+    Host(RawHostRoute<'a>),
 }
 
 #[derive(Debug, Clone)]
@@ -239,22 +238,143 @@ pub struct RawPathRoute<'a> {
     pub outbound_headers: Option<RawRouteHeadersOpts<'a, RawHeadersRemove<'a>>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RawGroupRoute<'a> {
-    pub name: &'a str,
-    pub hosts: Vec<&'a str>,
-    pub methods: Vec<&'a str>,
+/// Route settings as written in a `route`, `host` or `match` block; `None` means unset.
+#[derive(Debug, Clone, Default)]
+pub struct RawRouteFields<'a> {
+    pub hosts: Option<Vec<&'a str>>,
+    pub methods: Option<Vec<&'a str>>,
+    pub protocols: Option<Vec<&'a str>>,
     pub backend: Option<RawBackend<'a>>,
+    pub static_config: Option<(RawStaticFlags, Vec<&'a str>)>,
+    pub timeouts: Option<RawRouteTimeouts>,
+    pub streaming: Option<RawStreaming>,
     pub policies: Option<RawRoutePolicies<'a>>,
+    pub rewrite: Option<RawUriRewrite<'a>>,
     pub inbound_headers: Option<RawRouteHeadersOpts<'a, RawHeadersOps<'a>>>,
     pub outbound_headers: Option<RawRouteHeadersOpts<'a, RawHeadersRemove<'a>>>,
-    pub matches: Vec<RawRouteMatch<'a>>,
 }
 
+impl<'a> RawRouteFields<'a> {
+    /// The route for `path`, with `static_config` folded into a static backend.
+    pub fn into_path_route(self, path: &'a str) -> Result<RawPathRoute<'a>, String> {
+        let mut backend = self.backend.unwrap_or(RawBackend::Upstream(""));
+
+        if let Some((flags, exclude_paths)) = self.static_config {
+            let RawBackend::Static(ref mut sb) = backend else {
+                return Err(format!("static_config requires a static backend in route '{path}'"));
+            };
+
+            sb.flags.listing = flags.listing.or(sb.flags.listing);
+            sb.flags.dotfiles = flags.dotfiles.or(sb.flags.dotfiles);
+            sb.flags.index = flags.index.or(sb.flags.index);
+            sb.flags.symlinks = flags.symlinks.or(sb.flags.symlinks);
+            sb.exclude_paths.extend(exclude_paths);
+        }
+
+        Ok(RawPathRoute {
+            path,
+            hosts: self.hosts.unwrap_or_default(),
+            methods: self.methods.unwrap_or_default(),
+            protocols: self.protocols.unwrap_or_default(),
+            backend,
+            timeouts: self.timeouts,
+            streaming: self.streaming,
+            policies: self.policies,
+            rewrite: self.rewrite,
+            inbound_headers: self.inbound_headers,
+            outbound_headers: self.outbound_headers,
+        })
+    }
+
+    /// These settings over the inherited `parent`.
+    ///
+    /// The backend (with its `static_config`), protocols, timeouts, streaming and rewrite
+    /// are replaced as a whole. Policies are merged per kind and headers per name.
+    fn over(self, parent: &Self) -> Self {
+        let static_config = match self.backend {
+            Some(_) => self.static_config,
+            None => self.static_config.or_else(|| parent.static_config.clone()),
+        };
+
+        Self {
+            hosts: self.hosts.or_else(|| parent.hosts.clone()),
+            methods: self.methods.or_else(|| parent.methods.clone()),
+            protocols: self.protocols.or_else(|| parent.protocols.clone()),
+            backend: self.backend.or_else(|| parent.backend.clone()),
+            static_config,
+            timeouts: self.timeouts.or_else(|| parent.timeouts.clone()),
+            streaming: self.streaming.or_else(|| parent.streaming.clone()),
+            policies: RawRoutePolicies::merged(self.policies, parent.policies.as_ref()),
+            rewrite: self.rewrite.or_else(|| parent.rewrite.clone()),
+            inbound_headers: RawRouteHeadersOpts::merged(self.inbound_headers, parent.inbound_headers.as_ref()),
+            outbound_headers: RawRouteHeadersOpts::merged(self.outbound_headers, parent.outbound_headers.as_ref()),
+        }
+    }
+}
+
+/// `host [..] { ... match "<methods> <path>" { ... } }`: routes of some hosts sharing settings.
 #[derive(Debug, Clone)]
-pub struct RawRouteMatch<'a> {
-    pub pattern: &'a str, // e.g. "GET /*"
-    pub backend: RawBackend<'a>,
+pub struct RawHostRoute<'a> {
+    pub hosts: Vec<&'a str>,
+    pub defaults: RawRouteFields<'a>,
+    pub matches: Vec<RawMatchRoute<'a>>,
+}
+
+/// `match "GET|POST /path" { ... }`; without methods the path accepts every method.
+#[derive(Debug, Clone)]
+pub struct RawMatchRoute<'a> {
+    pub pattern: &'a str,
+    pub fields: RawRouteFields<'a>,
+}
+
+impl<'a> RawMatchRoute<'a> {
+    /// Splits the pattern into its methods (empty for every method) and its path.
+    pub fn methods_and_path(&self) -> Result<(Vec<&'a str>, &'a str), String> {
+        let pattern = self.pattern.trim();
+
+        let (methods, path) = match pattern.split_once(char::is_whitespace) {
+            Some((methods, path)) => (methods.split('|').map(str::trim).collect::<Vec<_>>(), path.trim()),
+            None => (Vec::new(), pattern),
+        };
+
+        if !path.starts_with('/') {
+            return Err(format!(
+                "match '{}': expected \"<METHOD|METHOD> /path\" or \"/path\"",
+                self.pattern
+            ));
+        }
+
+        if let Some(method) = methods.iter().find(|m| m.is_empty() || !m.bytes().all(|b| b.is_ascii_uppercase())) {
+            return Err(format!("match '{}': invalid method '{method}'", self.pattern));
+        }
+
+        Ok((methods, path))
+    }
+}
+
+impl<'a> RawHostRoute<'a> {
+    /// The path routes this block declares: one per `match`, or a `/*` route when the
+    /// block has none. Every route inherits the block settings.
+    pub fn expand(&self) -> Result<Vec<RawPathRoute<'a>>, String> {
+        let mut defaults = self.defaults.clone();
+        defaults.hosts = Some(self.hosts.clone());
+
+        if self.matches.is_empty() {
+            return defaults.into_path_route("/*").map(|route| vec![route]);
+        }
+
+        self.matches
+            .iter()
+            .map(|m| {
+                let (methods, path) = m.methods_and_path()?;
+                let mut fields = m.fields.clone().over(&defaults);
+                if !methods.is_empty() {
+                    fields.methods = Some(methods);
+                }
+                fields.into_path_route(path)
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +436,64 @@ pub struct RawRouteHeadersOpts<'a, D> {
     pub upstream: D,
 }
 
+/// Header rules declared at a nested level over the ones it inherits.
+pub trait InheritHeaders: Clone {
+    fn over(self, parent: &Self) -> Self;
+}
+
+impl InheritHeaders for RawHeadersOps<'_> {
+    /// The parent's `set` entries for headers this level sets or removes are dropped, and
+    /// the parent's removals of headers this level sets.
+    fn over(mut self, parent: &Self) -> Self {
+        let named = |list: &[&str], name: &str| list.iter().any(|n| n.eq_ignore_ascii_case(name));
+        let own_set: Vec<&str> = self.set.iter().map(|(name, _)| *name).collect();
+
+        let inherited_set = parent
+            .set
+            .iter()
+            .filter(|(name, _)| !named(&own_set, name) && !named(&self.remove, name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let inherited_remove = parent
+            .remove
+            .iter()
+            .filter(|name| !named(&own_set, name) && !named(&self.remove, name))
+            .copied()
+            .collect::<Vec<_>>();
+
+        self.set.splice(0..0, inherited_set);
+        self.remove.splice(0..0, inherited_remove);
+        self
+    }
+}
+
+impl InheritHeaders for RawHeadersRemove<'_> {
+    fn over(mut self, parent: &Self) -> Self {
+        let inherited = parent
+            .remove
+            .iter()
+            .filter(|name| !self.remove.iter().any(|own| own.eq_ignore_ascii_case(name)))
+            .copied()
+            .collect::<Vec<_>>();
+
+        self.remove.splice(0..0, inherited);
+        self
+    }
+}
+
+impl<D: InheritHeaders> RawRouteHeadersOpts<'_, D> {
+    fn merged(own: Option<Self>, parent: Option<&Self>) -> Option<Self> {
+        match (own, parent) {
+            (own, None) => own,
+            (None, Some(parent)) => Some(parent.clone()),
+            (Some(own), Some(parent)) => Some(Self {
+                opts: own.opts.over(&parent.opts),
+                upstream: own.upstream.over(&parent.upstream),
+            }),
+        }
+    }
+}
+
 // ============================================================================
 // ROUTE POLICY INVOCATIONS / OVERRIDES
 // ============================================================================
@@ -329,11 +507,39 @@ pub struct RawRoutePolicies<'a> {
     pub helmet: Option<RawRouteAction<'a, RawHelmetConfig<'a>>>,
 }
 
+impl RawRoutePolicies<'_> {
+    /// `own` over `parent`, kind by kind: a kind `own` sets, `off` included, replaces the parent's.
+    fn merged(own: Option<Self>, parent: Option<&Self>) -> Option<Self> {
+        match (own, parent) {
+            (own, None) => own,
+            (None, Some(parent)) => Some(parent.clone()),
+            (Some(own), Some(parent)) => Some(Self {
+                auth: own.auth.or_else(|| parent.auth.clone()),
+                cors: own.cors.or_else(|| parent.cors.clone()),
+                waf: own.waf.or_else(|| parent.waf.clone()),
+                limiter: own.limiter.or_else(|| parent.limiter.clone()),
+                helmet: own.helmet.or_else(|| parent.helmet.clone()),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum RawRouteAction<'a, T> {
     Ref(&'a str),
-    Extends { base: &'a str, overrides: T },
+    Extends {
+        base: &'a str,
+        overrides: T,
+    },
     Inline(T),
+    /// `<policy> = off`: no policy of this kind, overriding an inherited one.
+    Off,
+}
+
+impl<T> RawRouteAction<'_, T> {
+    pub fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
 }
 
 // ============================================================================
