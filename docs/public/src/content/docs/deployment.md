@@ -41,9 +41,10 @@ sudo apt install "./ophan_${VERSION}_${ARCH}.deb"
 sudo systemctl start ophan
 ```
 
-The package installs a static binary in `/usr/bin`, the configuration in `/etc/ophan` (kept on
-upgrades) and an enabled `ophan` systemd unit. Installing a newer package reloads the service,
-which hands its listeners over to the new binary without downtime.
+The package (glibc 2.28 or newer: Debian 10+, Ubuntu 18.10+) installs the binary in `/usr/bin`,
+the configuration in `/etc/ophan` (kept on upgrades) and an enabled `ophan` systemd unit.
+Installing a newer package reloads the service, which hands its listeners over to the new
+binary without downtime.
 
 ## Linux Service (systemd)
 

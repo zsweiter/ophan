@@ -18,6 +18,7 @@ use crate::balancer::BalanceStrategy;
 use crate::config::dsl::ConfigFileTracker;
 use crate::middlewares::auth::AuthConfig;
 use crate::middlewares::cors::CorsConfig;
+use crate::middlewares::helmet::HelmetConfig;
 use crate::middlewares::limiter::LimiterConfig;
 use crate::middlewares::rewrites::TrailingSlashAction;
 
@@ -570,6 +571,8 @@ pub struct RoutesConfig {
     pub waf: Option<Arc<WafConfig>>,
     pub cors: Option<Arc<CorsConfig>>,
     pub limiter: Option<Arc<LimiterConfig>>,
+    /// `None` uses the default helmet configuration.
+    pub helmet: Option<HelmetConfig>,
 
     pub rewrite: Option<RouteRewrites>,
     pub headers: Option<HeaderMutations>,

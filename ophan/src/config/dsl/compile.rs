@@ -33,6 +33,7 @@ use crate::config::get_max_thread_size;
 use crate::middlewares::auth::AuthConfig;
 use crate::middlewares::auth::TokenSource;
 use crate::middlewares::cors::{AllowedOrigins, CorsConfig};
+use crate::middlewares::helmet::{HelmetConfig, HelmetLevel, HelmetTarget};
 use crate::middlewares::limiter::LimiterConfig;
 use crate::middlewares::limiter::LimiterIdentifier;
 use crate::middlewares::limiter::LimiterRate;
@@ -186,6 +187,7 @@ struct GatewayScope<'a> {
     waf: &'a HashMap<String, Arc<WafConfig>>,
     cors: &'a HashMap<String, Arc<CorsConfig>>,
     limiter: &'a HashMap<String, Arc<LimiterConfig>>,
+    helmet: &'a HashMap<String, HelmetConfig>,
     upstreams: &'a HashMap<ImmerStr, Arc<UpstreamConfig>>,
 }
 
@@ -200,6 +202,7 @@ fn compile_gateway(raw: &RawGateway, errors: &mut Vec<CompileError>) -> Option<G
     let waf_map = build_waf_map(raw, errors);
     let cors_map = build_cors_map(raw, errors);
     let limiter_map = build_limiter_map(raw, errors);
+    let helmet_map = build_helmet_map(raw, errors);
 
     let upstreams: Vec<Arc<UpstreamConfig>> = raw
         .upstreams
@@ -223,6 +226,7 @@ fn compile_gateway(raw: &RawGateway, errors: &mut Vec<CompileError>) -> Option<G
         waf: &waf_map,
         cors: &cors_map,
         limiter: &limiter_map,
+        helmet: &helmet_map,
         upstreams: &upstream_map,
     };
 
@@ -627,6 +631,7 @@ fn compile_route(route: &RawPathRoute, scope: &GatewayScope, errors: &mut Vec<Co
     let mut waf: Option<Arc<WafConfig>> = None;
     let mut cors: Option<Arc<CorsConfig>> = None;
     let mut limiter: Option<Arc<LimiterConfig>> = None;
+    let mut helmet: Option<HelmetConfig> = None;
 
     if let Some(ref policies) = route.policies {
         if let Some(action) = policies.auth.as_ref().filter(|a| !a.is_off()) {
@@ -648,6 +653,12 @@ fn compile_route(route: &RawPathRoute, scope: &GatewayScope, errors: &mut Vec<Co
         if let Some(action) = policies.cors.as_ref().filter(|a| !a.is_off()) {
             match resolve_cors(action, scope) {
                 Ok(cfg) => cors = Some(cfg),
+                Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
+            }
+        }
+        if let Some(action) = policies.helmet.as_ref() {
+            match resolve_helmet(action, scope) {
+                Ok(cfg) => helmet = Some(cfg),
                 Err(e) => errors.push(CompileError::new(format!("route '{}': {}", path, e))),
             }
         }
@@ -692,6 +703,7 @@ fn compile_route(route: &RawPathRoute, scope: &GatewayScope, errors: &mut Vec<Co
         waf,
         cors,
         limiter,
+        helmet,
         rewrite,
         headers,
         timeouts,
@@ -819,6 +831,21 @@ fn compile_headers(
     (!mutations.is_empty()).then_some(mutations)
 }
 
+fn build_helmet_map(raw: &RawGateway, errors: &mut Vec<CompileError>) -> HashMap<String, HelmetConfig> {
+    let mut map = HashMap::new();
+    for rp in &raw.policies {
+        if let RawPolicy::Helmet { name, config } = rp {
+            match HelmetConfig::default().with_overrides(config.target, config.level) {
+                Ok(cfg) => {
+                    map.insert(name.to_string(), cfg);
+                },
+                Err(e) => errors.push(CompileError::new(format!("policy helmet '{}': {}", name, e))),
+            }
+        }
+    }
+    map
+}
+
 // ============================================================================
 // POLICY RESOLUTION
 // ============================================================================
@@ -834,6 +861,21 @@ fn resolve_auth(action: &RawRouteAction<RawAuthConfig>, scope: &GatewayScope) ->
         },
         RawRouteAction::Inline(config) => Ok(Arc::new(build_auth_from_raw(config)?)),
         RawRouteAction::Off => Err("auth is off".into()),
+    }
+}
+
+/// `off` keeps only the headers sent on every response (`X-Content-Type-Options`).
+fn resolve_helmet(action: &RawRouteAction<RawHelmetConfig>, scope: &GatewayScope) -> Result<HelmetConfig, String> {
+    match action {
+        RawRouteAction::Ref(name) => {
+            scope.helmet.get(*name).copied().ok_or_else(|| format!("helmet policy '{}' not found", name))
+        },
+        RawRouteAction::Extends { base, overrides } => {
+            let base = scope.helmet.get(*base).ok_or_else(|| format!("helmet policy '{}' not found", base))?;
+            base.with_overrides(overrides.target, overrides.level)
+        },
+        RawRouteAction::Inline(config) => HelmetConfig::default().with_overrides(config.target, config.level),
+        RawRouteAction::Off => Ok(HelmetConfig::new(HelmetTarget::default(), HelmetLevel::Disabled)),
     }
 }
 
@@ -1561,6 +1603,95 @@ mod tests {
 
     fn route<'a>(gateway: &'a GatewayConfig, path: &str) -> &'a RoutesConfig {
         gateway.routes.iter().find(|r| r.path == path).unwrap_or_else(|| panic!("no route for {path}"))
+    }
+
+    fn helmet_gateway(routes: &str) -> (Option<GatewayConfig>, Vec<CompileError>) {
+        let source = format!(
+            r#"name = "gw"
+            listeners {{ listener "http" {{ address = "127.0.0.1:8080" }} }}
+            upstreams {{ upstream "api" {{ static_servers = ["127.0.0.1:3000"] }} }}
+            routes {{ {routes} }}
+            policy helmet "api-strict" {{ target = "api" level = "strict" }}"#
+        );
+        let raw = crate::config::dsl::parser::parse_raw_gateway(&source).expect("valid syntax");
+        let mut errors = Vec::new();
+        let gateway = compile_gateway(&raw, &mut errors);
+        (gateway, errors)
+    }
+
+    #[test]
+    fn route_helmet_policies_are_compiled() {
+        let (gateway, errors) = helmet_gateway(
+            r#"route "/ref" { backend = upstream("api") policies { helmet = "api-strict" } }
+            route "/extends" { backend = upstream("api") policies { helmet extends "api-strict" { level = "standard" } } }
+            route "/inline" { backend = upstream("api") policies { helmet { target = "api" } } }
+            route "/off" { backend = upstream("api") policies { helmet = off } }
+            route "/default" { backend = upstream("api") }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        let gateway = gateway.unwrap();
+
+        assert_eq!(
+            route(&gateway, "/ref").helmet,
+            Some(HelmetConfig::new(HelmetTarget::Api, HelmetLevel::Strict))
+        );
+        assert_eq!(
+            route(&gateway, "/extends").helmet,
+            Some(HelmetConfig::new(HelmetTarget::Api, HelmetLevel::Standard))
+        );
+        assert_eq!(
+            route(&gateway, "/inline").helmet,
+            Some(HelmetConfig::new(HelmetTarget::Api, HelmetLevel::Standard))
+        );
+        assert_eq!(route(&gateway, "/off").helmet.map(|h| h.level), Some(HelmetLevel::Disabled));
+        assert_eq!(route(&gateway, "/default").helmet, None);
+    }
+
+    #[test]
+    fn helmet_off_overrides_the_host_policy() {
+        let (gateway, errors) = helmet_gateway(
+            r#"host "example.com" {
+                backend = upstream("api")
+                policies { helmet = "api-strict" }
+                match "/app/*" { }
+                match "/raw/*" { policies { helmet = off } }
+            }"#,
+        );
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+        let gateway = gateway.unwrap();
+
+        assert_eq!(route(&gateway, "/app/*").helmet.map(|h| h.level), Some(HelmetLevel::Strict));
+        assert_eq!(route(&gateway, "/raw/*").helmet.map(|h| h.level), Some(HelmetLevel::Disabled));
+    }
+
+    #[test]
+    fn invalid_helmet_values_are_rejected() {
+        let (_, errors) = helmet_gateway(r#"route "/x" { backend = upstream("api") policies { helmet { level = "max" } } }"#);
+        assert!(
+            fatal(&errors).iter().any(|e| e.contains("unknown helmet level 'max'")),
+            "{:?}",
+            fatal(&errors)
+        );
+
+        let (_, errors) = helmet_gateway(r#"route "/x" { backend = upstream("api") policies { helmet = "missing" } }"#);
+        assert!(
+            fatal(&errors).iter().any(|e| e.contains("helmet policy 'missing' not found")),
+            "{:?}",
+            fatal(&errors)
+        );
+    }
+
+    #[test]
+    fn routes_use_their_compiled_helmet() {
+        let (gateway, errors) = helmet_gateway(r#"route "/x" { backend = upstream("api") policies { helmet = "api-strict" } }"#);
+        assert!(fatal(&errors).is_empty(), "{:?}", fatal(&errors));
+
+        let context = crate::state::AppContext::build(&gateway.unwrap(), None).unwrap();
+        let matched = context.router.match_route(None, &http::Method::GET, "/x").unwrap();
+        assert_eq!(
+            matched.value.helmet_policy,
+            Some(HelmetConfig::new(HelmetTarget::Api, HelmetLevel::Strict))
+        );
     }
 
     #[test]

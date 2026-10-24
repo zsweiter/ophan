@@ -72,8 +72,8 @@ curl -sSL https://raw.githubusercontent.com/zsweiter/ophan/main/scripts/install.
 
 ### Debian / Ubuntu — .deb
 
-Static packages for `amd64` and `arm64`, attached to every release; they run on any Debian or
-Ubuntu release.
+Packages for `amd64` and `arm64`, attached to every release; they run on Debian 10+ and
+Ubuntu 18.10+ (glibc 2.28 or newer).
 
 ```bash
 VERSION=0.1.32

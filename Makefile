@@ -145,13 +145,14 @@ package-docker:
 		.
 	@echo "✅ Docker image: $(APP_NAME):$(VERSION)"
 
-# ── Debian package (static musl binary; needs cargo-zigbuild and cargo-deb) ──
-DEB_TARGET := $(subst gnu,musl,$(LINUX_TARGET))
+# ── Debian package (glibc 2.28 binary; needs cargo-zigbuild and cargo-deb) ──
+DEB_TARGET := $(LINUX_TARGET)
+DEB_GLIBC := 2.28
 
 package-deb:
 	sed "s|@SBINDIR@|/usr/bin|g; s|@CONFIGDIR@|/etc/$(APP_NAME)|g" \
 		$(STUB_DIR)/systemd.service > packaging/deb/$(APP_NAME).service
-	$(CARGO) zigbuild --release --target $(DEB_TARGET) -p $(APP_NAME)
+	$(CARGO) zigbuild --release --target $(DEB_TARGET).$(DEB_GLIBC) -p $(APP_NAME)
 	mkdir -p $(DIST_DIR)
 	$(CARGO) deb -p $(APP_NAME) --no-build --target $(DEB_TARGET) --output $(DIST_DIR)/
 	@echo "✅ Debian package in $(DIST_DIR)/"

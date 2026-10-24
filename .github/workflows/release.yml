@@ -3,7 +3,8 @@
 #
 # Triggered by: git tag v[0-9]+.[0-9]+.[0-9]+*
 # Builds for:   Linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64)
-# Outputs:      .tar.gz / .zip + .sha256 checksums, .deb (static, amd64/arm64)
+# Outputs:      .tar.gz / .zip + .sha256 checksums, .deb (amd64/arm64)
+# Linux:        built with zig against glibc 2.28 (Debian 10+, Ubuntu 18.10+, RHEL 8+)
 # apt repo:     see apt-repo.yml
 # ═══════════════════════════════════════════════════════════════
 
@@ -28,12 +29,16 @@ jobs:
                 include:
                     - os: ubuntu-latest
                       target: x86_64-unknown-linux-gnu
+                      glibc: "2.28"
+                      deb_arch: amd64
                       pkg_os: linux
                       pkg_arch: x86_64
                       ext: tar.gz
 
-                    - os: ubuntu-24.04-arm
+                    - os: ubuntu-latest
                       target: aarch64-unknown-linux-gnu
+                      glibc: "2.28"
+                      deb_arch: arm64
                       pkg_os: linux
                       pkg_arch: aarch64
                       ext: tar.gz
@@ -64,6 +69,11 @@ jobs:
 
         runs-on: ${{ matrix.os }}
 
+        env:
+            ZIG_VERSION: 0.13.0
+            CARGO_ZIGBUILD_VERSION: 0.23.4
+            CARGO_DEB_VERSION: 3.8.0
+
         steps:
             - uses: actions/checkout@v5
 
@@ -73,10 +83,31 @@ jobs:
                   target: ${{ matrix.target }}
                   cache: true
 
+            - name: Install zig, cargo-zigbuild and cargo-deb
+              if: matrix.glibc
+              run: |
+                  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
+                  echo "$RUNNER_TEMP/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+                  cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
+                  cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+
             - name: Build release
-              run: cargo build --release --target ${{ matrix.target }}
+              run: |
+                  if [ -n "${{ matrix.glibc }}" ]; then
+                    cargo zigbuild --release -p ophan --target "${{ matrix.target }}.${{ matrix.glibc }}"
+                  else
+                    cargo build --release -p ophan --target "${{ matrix.target }}"
+                  fi
               env:
                   CARGO_BUILD_JOBS: ${{ matrix.os == 'ubuntu-latest' && 4 || 3 }}
+
+            - name: Build Debian package
+              if: matrix.deb_arch
+              run: |
+                  VERSION="${GITHUB_REF_NAME#v}"
+                  sed "s|@SBINDIR@|/usr/bin|g; s|@CONFIGDIR@|/etc/ophan|g" stubs/systemd.service > packaging/deb/ophan.service
+                  cargo deb -p ophan --no-build --no-strip --target ${{ matrix.target }} --deb-version "$VERSION" --output dist/
+                  (cd dist && for deb in *.deb; do sha256sum "$deb" > "$deb.sha256"; done)
 
             - name: Package artifacts
               shell: bash
@@ -126,59 +157,13 @@ jobs:
               uses: actions/upload-artifact@v7
               with:
                   name: ${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
-                  path: dist/ophan-*
-
-    deb:
-        name: Debian package (${{ matrix.deb_arch }})
-        runs-on: ubuntu-latest
-        strategy:
-            fail-fast: false
-            matrix:
-                include:
-                    - target: x86_64-unknown-linux-musl
-                      deb_arch: amd64
-                    - target: aarch64-unknown-linux-musl
-                      deb_arch: arm64
-
-        env:
-            ZIG_VERSION: 0.13.0
-            CARGO_ZIGBUILD_VERSION: 0.23.4
-            CARGO_DEB_VERSION: 3.8.0
-
-        steps:
-            - uses: actions/checkout@v5
-
-            - name: Install rust
-              uses: actions-rust-lang/setup-rust-toolchain@v1
-              with:
-                  target: ${{ matrix.target }}
-                  cache: true
-
-            - name: Install zig, cargo-zigbuild and cargo-deb
-              run: |
-                  curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" | tar -xJ -C "$RUNNER_TEMP"
-                  echo "$RUNNER_TEMP/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
-                  cargo install cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION" --locked
-                  cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
-
-            - name: Build static binary
-              run: cargo zigbuild --release --target ${{ matrix.target }} -p ophan
-
-            - name: Build package
-              run: |
-                  VERSION="${GITHUB_REF_NAME#v}"
-                  sed "s|@SBINDIR@|/usr/bin|g; s|@CONFIGDIR@|/etc/ophan|g" stubs/systemd.service > packaging/deb/ophan.service
-                  cargo deb -p ophan --no-build --no-strip --target ${{ matrix.target }} --deb-version "$VERSION" --output dist/
-
-            - name: Upload artifact
-              uses: actions/upload-artifact@v7
-              with:
-                  name: deb-${{ matrix.deb_arch }}
-                  path: dist/*.deb
+                  path: |
+                      dist/ophan-*
+                      dist/*.deb
 
     release:
         name: Upload to GitHub Release
-        needs: [build, deb]
+        needs: build
         runs-on: ubuntu-latest
         steps:
             - name: Download all artifacts

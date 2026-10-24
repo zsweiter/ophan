@@ -2,14 +2,14 @@ use http::{HeaderName, HeaderValue};
 use ophan_net::http::header;
 use ophan_net::proxy::ResponseParts;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HelmetTarget {
     Api,
     #[default]
     Web,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HelmetLevel {
     /// No security headers are added. only necesary
     Disabled,
@@ -23,15 +23,50 @@ pub enum HelmetLevel {
     Strict,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HelmetConfig {
     pub target: HelmetTarget,
     pub level: HelmetLevel,
 }
 
+impl std::str::FromStr for HelmetTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "web" => Ok(Self::Web),
+            "api" => Ok(Self::Api),
+            other => Err(format!("unknown helmet target '{other}', expected \"web\" or \"api\"")),
+        }
+    }
+}
+
+impl std::str::FromStr for HelmetLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "strict" => Ok(Self::Strict),
+            "disabled" | "off" => Ok(Self::Disabled),
+            other => Err(format!(
+                "unknown helmet level '{other}', expected \"standard\", \"strict\" or \"disabled\""
+            )),
+        }
+    }
+}
+
 impl HelmetConfig {
     pub const fn new(target: HelmetTarget, level: HelmetLevel) -> Self {
         Self { target, level }
+    }
+
+    /// This configuration with the `target` and `level` that are set replaced.
+    pub fn with_overrides(self, target: Option<&str>, level: Option<&str>) -> Result<Self, String> {
+        Ok(Self {
+            target: target.map(str::parse).transpose()?.unwrap_or(self.target),
+            level: level.map(str::parse).transpose()?.unwrap_or(self.level),
+        })
     }
 
     #[inline(always)]

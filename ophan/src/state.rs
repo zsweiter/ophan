@@ -97,7 +97,7 @@ impl AppContext {
                 waf_policy: route.waf.clone(),
                 cors_policy: route.cors.clone(),
                 limiter_policy: route.limiter.clone(),
-                helmet_policy: Some(HelmetConfig::default()),
+                helmet_policy: Some(route.helmet.unwrap_or_default()),
                 timeouts: route.timeouts.clone(),
                 streaming: route.streaming,
                 headers: route.headers.clone(),

@@ -217,8 +217,7 @@ fn gateway_service(
                 // listening socket only (pingora `apply_tcp_socket_options`);
                 // they never touch the zero-downtime upgrade path, which
                 // handovers the existing fds (`from_raw_fd` skips bind and all
-                // of these options entirely), so SO_REUSEPORT here cannot
-                // disturb the handover.
+                // of these options entirely).
                 let mut options = TcpSocketOptions::default();
                 options.tcp_keepalive = Some(TcpKeepalive {
                     idle: Duration::from_secs(60),

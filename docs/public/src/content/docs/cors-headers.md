@@ -7,8 +7,6 @@ order: 403
 
 Ophan handles Cross-Origin Resource Sharing and injects hardened security headers through the `cors` and `helmet` policies.
 
-> **⚠️ In development** — CORS and helmet header injection are being implemented.
-
 ---
 
 ## CORS
@@ -56,54 +54,51 @@ CORS preflight is processed during `on_request` and answered by the gateway.
 
 ## Security Headers (helmet)
 
-Helmet injects a hardened set of HTTP security headers. It is configured with a **target** (`api` or `web`) and a **level** (`disabled`, `standard`, `strict`).
+Helmet adds HTTP security headers to responses. It is configured with a **target** (`web` or
+`api`) and a **level** (`standard`, `strict` or `disabled`). Routes without a helmet policy use
+`web` / `standard`. Headers the upstream already set are kept.
 
 ```hcl
-policy helmet "web-strict" {
-    target = "web"
+policy helmet "api-strict" {
+    target = "api"
     level  = "strict"
 }
 ```
 
-### Profiles Matrix
+### Headers by profile
 
-| Target  | Standard                                                                                                                                                               | Strict                                                                                                               |
-| ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **API** | Headers tailored for JSON/REST APIs — isolates execution (`nosniff`, `COOP`, `CORP`, `Origin-Agent-Cluster`); excludes browser vectors like CSP and `X-Frame-Options`. | Adds stronger runtime isolation (`COEP: require-corp`) and a strict `Referrer-Policy`.                               |
-| **Web** | Browser defaults — clickjacking & referrer protections (`X-Frame-Options: SAMEORIGIN`, `strict-origin-when-cross-origin`). CSP managed by the app.                     | Maximum browser hardening — `X-Frame-Options: DENY`, strict `COEP`, restrictive `Permissions-Policy`, `no-referrer`. |
-
-### API Standard
+Every response, even with `level = "disabled"`:
 
 ```http
 X-Content-Type-Options: nosniff
-Cross-Origin-Opener-Policy: same-origin
+```
+
+Unless disabled, every response also gets:
+
+```http
 Cross-Origin-Resource-Policy: same-origin
-Origin-Agent-Cluster: ?1
-X-DNS-Prefetch-Control: off
-X-Permitted-Cross-Domain-Policies: none
-X-Download-Options: noopen
-X-XSS-Protection: 0
 ```
 
-### API Strict
-
-Adds to the above:
+`api` + `strict` adds:
 
 ```http
-Cross-Origin-Embedder-Policy: require-corp
 Referrer-Policy: no-referrer
 ```
 
-### Web Strict
+`web` adds the browser headers only to documents (`text/html`, `application/xhtml+xml`,
+`image/svg+xml`), where they have an effect:
 
-```http
-X-Frame-Options: DENY
-Cross-Origin-Embedder-Policy: require-corp
-Referrer-Policy: no-referrer
-Permissions-Policy: ...
-```
+| Header                         | `standard`                        | `strict`       |
+| ------------------------------ | --------------------------------- | -------------- |
+| `Cross-Origin-Opener-Policy`   | `same-origin`                     | `same-origin`  |
+| `Origin-Agent-Cluster`         | `?1`                              | `?1`           |
+| `X-DNS-Prefetch-Control`       | `off`                             | `off`          |
+| `X-Frame-Options`              | `SAMEORIGIN`                      | `DENY`         |
+| `Referrer-Policy`              | `strict-origin-when-cross-origin` | `no-referrer`  |
+| `Cross-Origin-Embedder-Policy` | —                                 | `require-corp` |
 
-> **Recommendation:** For the strict profiles, explicitly inject a tailored **Content-Security-Policy (CSP)** at the application level.
+> **Recommendation:** for the strict profiles, send a **Content-Security-Policy** tailored to
+> the application from the application itself.
 
 ## Assigning to Routes
 
@@ -112,10 +107,26 @@ path "/api/*" {
     backend = upstream("api")
     policies {
         cors   = "default"
-        helmet = "web-strict"
+        helmet = "api-strict"                               # a named policy
+    }
+}
+
+path "/docs/*" {
+    backend = upstream("docs")
+    policies {
+        helmet extends "api-strict" { level = "standard" }  # a named policy with overrides
+    }
+}
+
+path "/legacy/*" {
+    backend = upstream("legacy")
+    policies {
+        helmet = off                                        # only X-Content-Type-Options
     }
 }
 ```
+
+Inside a `host` block, a `match` can replace the host's helmet policy or turn it `off` the same way.
 
 ## Next Steps
 

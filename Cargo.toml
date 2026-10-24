@@ -28,7 +28,7 @@ ophan-router = { path = "./libs/ophan-router" }
 pingora = { version = "0.9", default-features = false }
 prometheus = { version = "0.14", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
-libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"] }
+tikv-jemallocator = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.18", features = ["io"] }
 futures = { version = "0.3" }
